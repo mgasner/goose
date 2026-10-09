@@ -69,6 +69,7 @@ calls it, so they are compiled and run as part of the test suite.
 | [17_calc](17_calc.goose) | An interactive calculator: tokens as fixed-mode enum values, recursive descent straight to values by functions nested in `evaluate` that share its locals, variables in a dictionary, every error one `return ... from`. Run with `calc < data/calc.stdin`. |
 | [18_json](18_json.goose) | A JSON parser and printer: variable-mode nodes in one pool with 4-byte relative links, the parser state as locals of `parse` shared by the nested recursive functions, deep errors with positions, pretty and compact rendering, key and index lookups. |
 | [19_vm](19_vm.goose) | A stack bytecode VM: a fixed-mode enum per instruction, a `match` dispatch loop, a disassembler, two hand-assembled programs. |
+| [32_graphql](32_graphql.goose) | A GraphQL server for a book catalogue with the `graphql` module: a schema in SDL, an enum of object handles and resolver case functions, an interface and a union, arguments and variables, field errors. Requests come from stdin, one JSON request per line, and are answered by a pool of workers, each with its own copy of the catalogue; mutations run on the main thread and `sync` replays their changes on every worker. Answers print in request order; one thread and the pool are timed on stderr. Run with `graphql < data/graphql.stdin`. |
 
 ## Graphics, simulation, threads
 

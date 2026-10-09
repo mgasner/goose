@@ -2581,6 +2581,10 @@ inline Val TypeCheck::CheckVariantConst(Dot *d, SEnum *en) {
     auto t = ast.EnumOf(en, {}, false, d->line);
     auto inst = GetEnumInst(t);
     auto found = en->FindVariant(d->name);
+    // A deferred type's one written variant is its empty call (deferred.h).
+    if (en->isdeferred && found != &en->variants[0])
+        Error(d, cat(en->qname, " is a deferred type, whose only named value is ", en->name,
+                     ".empty: construct a call as ", en->name, "(function, arguments...)"));
     if (!found) Error(d, cat("enum ", en->name, " has no variant named ", d->name));
     if (found->has_payload)
         Error(d, cat("variant ", en->name, ".", d->name,

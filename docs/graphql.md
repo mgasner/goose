@@ -266,6 +266,57 @@ the hook it would make one call per author and per book.
   type_of)` and `execute(request, root, out)` still run level by level; they
   just call no hook.
 
+### Deferred values: `r.later`
+
+The batch hook loads what a level *will* need, so it has to know in advance
+which rows each field reads. When only the resolver knows that -- the key
+comes from the object's own row, or from an argument, or from what an
+earlier load returned -- the resolver can ask for the key itself and say
+what to do once it is loaded, as a DataLoader's `load(key).then(...)` does:
+
+```goose
+fn load_authors(keys: i64[:]) { /* one backend call for all of them */ }
+fn author_name(key: i64, s: graphql::Slot&) { s.string(authors[key].name); }
+
+fn resolve(o: Obj.Book, f: graphql::Field&, r: graphql::Result<Obj>&) {
+    if f.is("authorName") {
+        r.later(graphql::Loader(load_authors), books[o.i].author, graphql::Then(author_name));
+    }
+}
+```
+
+* After every resolver of the level has run, each loader that was asked is
+  called **once**, with all the keys asked of it, distinct and in the order
+  they were first asked. Then each `then` runs, in the order asked, with its
+  key and a `graphql::Slot` to give the value to.
+* A `then` gives its value with the same calls a resolver uses:
+  `s.int(..)`, `s.string(..)`, `s.list() { .. }`, `s.none()`,
+  `s.error(..)` and the rest, but not `object`. It gives exactly one value,
+  and that value is checked against the field's type like any other.
+* A `then` may ask again: `s.later(loader, key, then)`. That waits for
+  another **round**: every loader asked in it is called once more, then its
+  `then`s run. A level ends when a round asks nothing new. A book's
+  author's country is two rounds: authors, then countries.
+* `r.later` may stand anywhere a value may, including as a list item:
+  `r.list() { for t in tags { r.later(tag_loader, t, graphql::Then(tag_name)); } }`.
+* `graphql::Loader(f, ...)` and `graphql::Then(f, ...)` are **stored
+  calls** (`goose_spec.md` §8.3): the function, then any values to keep for
+  it, written before the parameters the library passes. A loader's
+  `keys: i64[:]` and a `then`'s `key: i64, s: graphql::Slot&` are those
+  parameters. Loaders are told apart by their function and stored values,
+  so `Loader(load, AUTHORS)` and `Loader(load, COUNTRIES)` are two loaders
+  of one function. What they keep must be fixed-size, as handles are.
+* On a pool, every worker runs its own rounds, and a split level's parts run
+  theirs separately (§9).
+
+`graphql::loader_calls` and `graphql::later_rounds` count loader calls and
+rounds since the program started, for tests and tuning.
+
+A `then` cannot give an object yet: the stored call would have to know the
+program's handle type, and deferred types are not generic. Give the object's
+handle directly and load its fields with the batch hook at the next level,
+or with `r.later` from its own resolvers.
+
 Running a level at a time has one cost: the response is written after all of
 it is resolved, not while fields resolve, so a request's results stay in
 memory until it ends, about as much as the response itself. On in-memory
@@ -498,6 +549,8 @@ which are global so that `f.int("x")` and `r.int(1)` work from your code.
 | `sync(p, changes)` | Brings every worker's data up to date. |
 | `stop(p)` | Ends every worker's loop once the queued requests are answered. |
 | `request_serial` | Changes with every request, for per-request caches. |
+| `Loader(f, ...)`, `Then(f, ...)` | Stored calls: a loader `f(..., keys: i64[:])`; what follows it, `f(..., key: i64, s: Slot&)`. |
+| `loader_calls`, `later_rounds` | Loader calls and rounds of deferred values so far. |
 | `max_depth`, `introspection`, `fork_min_fields`, `fork_min_items` | Options; set them before spawning workers. |
 
 | On a field `f` | |
@@ -518,6 +571,12 @@ which are global so that `f.int("x")` and `r.int(1)` work from your code.
 | `r.int`, `r.float`, `r.boolean`, `r.string`, `r.enum_value`, `r.json`, `r.none` | A leaf value. |
 | `r.object(handle)`, `r.list() { ... }` | An object; a list. |
 | `r.error(msg)` | A field error. |
+| `r.later(loader, key, then)` | A value given once `loader` has run with `key`. |
+
+| In a `then`, on a slot `s` | |
+|---|---|
+| `s.int`, `s.float`, `s.boolean`, `s.string`, `s.enum_value`, `s.json`, `s.none`, `s.list`, `s.error` | The value, as on a result. |
+| `s.later(loader, key, then)` | Wait for another round. |
 
 ### Limits
 

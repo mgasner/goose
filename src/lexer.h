@@ -34,7 +34,7 @@ namespace goose {
 
 #define TOKENS_KEYWORDS \
     F(T_IMPORT,   "import")    F(T_NAMESPACE, "namespace") \
-    F(T_STRUCT,   "struct")    F(T_ENUM,     "enum") \
+    F(T_STRUCT,   "struct")    F(T_ENUM,     "enum")     F(T_DEFERRED, "deferred") \
     F(T_TYPE,     "type")      F(T_FN,       "fn")      F(T_THREADFN, "thread_fn") \
     F(T_EXPORT,   "export") \
     F(T_RECURSIVE, "recursive") F(T_LET,     "let")     F(T_VAR,    "var") \

@@ -49,6 +49,8 @@ let E_OBJECT = 6;     // i: a row of the handles; node: the object's node
 let E_LIST = 7;       // i: the entry after the list's last item
 let E_ERROR = 8;
 let E_JSON = 9;       // a custom scalar's JSON, as given
+let E_LATER = 10;     // i: a row of `laters`; a value a loader has yet to make possible
+let E_REF = 11;       // i: the entry where that value, once given, starts
 
 struct Entry { kind: i64, i: i64 = 0, f: f64 = 0.0, at: i64 = 0, n: i64 = 0, node: i64 = -1 }
 
@@ -115,6 +117,8 @@ var request_serial: i64 = 0;
 
 fn clear_execution() {
     resp.clear();
+    laters.clear();
+    later_loaders.clear();
     entries.clear();
     etext.clear();
     path.clear();
@@ -386,6 +390,7 @@ fn resolve_field<O, T, F>(r: Result<O>&, n: i64, g: i64) {
     if fields[def].owner != ty && fields[def].owner != t_meta { def = field_of(ty, name); }
     let em = entries.len;
     let f = Field { sel: s, def: def, parent: ty };
+    cur_def = def;
     if fields[def].owner == t_meta { resolve_root_meta(r, f); }
     else {
         match r.handles[nd.handle] {
@@ -444,6 +449,7 @@ fn resolve_levels<O, T, B, F>(r: Result<O>&, batching: bool) {
             let n = frontier[k];
             if nodes[n].part < 0 { resolve_node(r, n, T, F); }
         }
+        run_laters();
         frontier.clear();
         for n in lo..nodes.len { frontier.push(n); }
     }
@@ -469,10 +475,122 @@ fn resolve_operation<O, T, B, F>(r: Result<O>&, root: O, batching: bool) {
     for g in pl.gfirst..pl.gfirst + pl.gcount {
         let lo = nodes.len;
         resolve_field(r, 0, g, T, F);
+        run_laters();
         frontier.clear();
         for n in lo..nodes.len { frontier.push(n); }
         resolve_levels(r, batching, T, B, F);
     }
+}
+
+// --- deferred values -------------------------------------------------------------------
+//
+// A resolver that needs data its handle does not reach yet asks a loader
+// for a key, and says what makes the value of it once loaded:
+// `r.later(loader, key, then)`. Its entry is E_LATER until then. When every
+// resolver of the level has run, each loader asked is called once with the
+// distinct keys asked of it, and then every `then`, in the order asked,
+// with its key. A `then` gives the field's value as a resolver would,
+// appended at the end of the entries, and the E_LATER becomes an E_REF to
+// it; or it asks a loader in turn, which makes another round. The level is
+// done when a round asks nothing more. Loaders and thens are stored calls
+// (docs/design/deferred_calls.md), which is what lets the program's own
+// functions wait in the library's tables.
+
+// A loader: called once per round with every key asked of it, distinct, in
+// the order first asked. It loads what they name into the program's own
+// tables.
+deferred Loader(keys: i64[:]);
+
+// The rest of a field's resolution, once its loader has run: gives the
+// value for `key` to the slot.
+deferred Then(key: i64, s: Slot&);
+
+// The place a `then` gives its value to, with the calls a resolver gives
+// one with (api.goose).
+struct Slot { row: i64 }
+
+struct Pending { entry: i64, loader: i64, key: i64, then: Then, def: i64 }
+var laters: Pending[>..<] = [];
+var later_loaders: Loader[>..<] = [];
+var later_keys: i64[>..<] = [];
+
+// The keys seen for the loader being called this round: an open-addressing
+// set whose slots are current where their stamp is the round's.
+var seen_keys: i64[>..<] = [];
+var seen_stamps: i64[>..<] = [];
+var seen_stamp: i64 = 0;
+
+// The field whose value a resolver or a `then` is giving.
+var cur_def: i64 = -1;
+
+// Loader calls and rounds since the program started, for tests and tuning.
+var loader_calls: i64 = 0;
+var later_rounds: i64 = 0;
+
+fn ask_later(l: Loader, key: i64, then: Then) {
+    var li = position(later_loaders[..], l);
+    if li < 0 {
+        later_loaders.push(l);
+        li = later_loaders.len - 1;
+    }
+    laters.push(Pending { entry: entries.len, loader: li, key: key, then: then, def: cur_def });
+    entries.push(Entry { kind: E_LATER, i: laters.len - 1, .. });
+}
+
+// Runs rounds until nothing is asked.
+fn run_laters() {
+    var lo = 0;
+    while lo < laters.len {
+        let hi = laters.len;
+        later_rounds++;
+        // Each loader once, with its keys this round. Loaders asked only in
+        // earlier rounds have no keys and are not called.
+        var cap = 16;
+        while cap < 2 * (hi - lo) { cap *= 2; }
+        if seen_keys.len < cap {
+            seen_keys.resize(cap, 0);
+            seen_stamps.resize(cap, 0);
+        }
+        let mask = (cap - 1) as u64;
+        for l, li in later_loaders {
+            later_keys.clear();
+            seen_stamp++;
+            for k in lo..hi {
+                guard laters[k].loader == li else { continue; }
+                let key = laters[k].key;
+                var h = ((key as! u64) * 0x9E3779B97F4A7C15 >> 32) & mask;
+                var fresh = true;
+                while seen_stamps[h as! i64] == seen_stamp {
+                    if seen_keys[h as! i64] == key { fresh = false; break; }
+                    h = (h + 1) & mask;
+                }
+                guard fresh else { continue; }
+                seen_stamps[h as! i64] = seen_stamp;
+                seen_keys[h as! i64] = key;
+                later_keys.push(key);
+            }
+            guard later_keys.len > 0 else { continue; }
+            loader_calls++;
+            l(later_keys[..]);
+        }
+        for k in lo..hi {
+            let lt = laters[k];
+            let em = entries.len;
+            cur_def = lt.def;
+            var slot = Slot { row: k };
+            lt.then(lt.key, slot);
+            if entries.len == em {
+                put_text(E_ERROR, str("No value was given for ", field_label(lt.def), "."));
+            } else if span_end(em) != entries.len {
+                entries.resize(em);
+                put_text(E_ERROR, str("More than one value was given for ", field_label(lt.def), "."));
+            }
+            entries[lt.entry] = Entry { kind: E_REF, i: em, .. };
+        }
+        lo = hi;
+    }
+    laters.clear();
+    later_loaders.clear();
 }
 
 // --- phase 2: writing ------------------------------------------------------------------------
@@ -527,6 +645,8 @@ recursive fn guarded(mode: i64, t: i64, i: i64, sel: i64, def: i64) -> bool {
 // position had one.
 recursive fn complete_value(t: i64, i: i64, sel: i64, def: i64, nonnull: bool) {
     let e = entries[i];
+    // A deferred value: where its `then` gave it.
+    if e.kind == E_REF { complete_value(t, e.i, sel, def, nonnull); return; }
     if e.kind == E_NULL {
         if nonnull {
             give_up(str("Cannot return null for non-nullable field ", field_label(def), "."), sel, true);

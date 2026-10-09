@@ -914,6 +914,10 @@ NODE(Call)
     vector<TypeExpr *> tyargs;  // Explicit <T> list, normally empty (inferred).
     vector<Node *> args;
     FunVal *trailing = nullptr; // Trailing-block function value, if any.
+    // The one function this call may resolve to, whatever else its name
+    // reaches: a deferred type's case function calling its member, which the
+    // membership pass chose (deferred.h).
+    SFunction *pinned = nullptr;
     // A default<T>() the checker made (TypeCheck::DefaultCall), for a type
     // written elsewhere, whose sizes were checked there
     // (TypeCheck::ConstNamesIn).
@@ -1217,6 +1221,12 @@ struct SFunction {
     string cname;               // Its C symbol (the Goose name unless spelled out).
     bool isnested = false;
     SFunction *outer = nullptr;     // The function a nested one is declared in.
+    // Made by the membership pass (deferred.h) for this deferred type: a
+    // member's constructor or case function, which no diagnostic names and
+    // no standalone check reaches. `dmember` is the member it calls.
+    SEnum *deferredof = nullptr;
+    SFunction *dmember = nullptr;
+    bool isdctor = false;       // The constructor, rather than a case function.
     Block *body = nullptr;
     vector<FnSpec *> specs;     // Specializations (typecheck), owned by Ast.
 };
@@ -1235,6 +1245,10 @@ struct SVariant {
     string_view name;
     vector<Field> fields;
     bool has_payload = false;   // Distinguishes "Point" from "Point {}".
+    // A deferred type's member (docs/design/deferred_calls.md): the
+    // function this variant stores a call of, its fields that function's
+    // stored parameters. Null for the empty call and for ordinary enums.
+    SFunction *member = nullptr;
 };
 
 struct SEnum {
@@ -1245,6 +1259,16 @@ struct SEnum {
     vector<GenericParam> generics;
     vector<SVariant> variants;  // Stable once parsing completes; pointed at by TY_VARIANT.
     vector<EnumInst *> insts;   // Instantiations (typecheck), owned by Ast.
+    // `deferred Name(params) -> rets;` (docs/design/deferred_calls.md): an
+    // enum whose variant 0 is the empty call and whose other variants the
+    // membership pass (deferred.h) adds after resolution, one per member.
+    bool isdeferred = false;
+    vector<Param> dparams;      // The call-time signature.
+    vector<TypeExpr *> drets;
+    bool dhas_rets = false;
+    // The case function sets an invocation dispatches over, taking each
+    // variant by value and by reference (deferred.h); qualified names.
+    string_view dcall, dcallref;
 
     SVariant *FindVariant(string_view vname) {
         for (auto &v : variants) if (v.name == vname) return &v;

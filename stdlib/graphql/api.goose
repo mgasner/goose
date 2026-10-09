@@ -102,3 +102,49 @@ fn ::list<O, F>(r: graphql::Result<O>&) {
 
 // A field error: the field is null and the response's errors say why.
 fn ::error<O>(r: graphql::Result<O>&, msg: const u8[:]) { graphql::put_text(graphql::E_ERROR, msg); }
+
+// --- deferred values ------------------------------------------------------------------
+//
+// `r.later(loader, key, then)` gives a field's value once `loader` has been
+// called with `key`: after every resolver of the level, each loader asked
+// runs once with all its keys, then each `then(key, s)` gives its value to
+// the slot `s` with the calls below. A `then` may ask again, which waits for another
+// round. Both are stored calls: `graphql::Loader(load_authors)`,
+// `graphql::Then(author_name)`, with any fixed-size values to keep before
+// the parameters the library passes.
+
+fn ::later<O>(r: graphql::Result<O>&, l: graphql::Loader, key: i64, then: graphql::Then) {
+    graphql::ask_later(l, key, then);
+}
+
+fn ::later(s: graphql::Slot&, l: graphql::Loader, key: i64, then: graphql::Then) {
+    graphql::ask_later(l, key, then);
+}
+
+fn ::int(v: graphql::Slot&, x: i64) {
+    graphql::entries.push(graphql::Entry { kind: graphql::E_INT, i: x, f: x, .. });
+}
+
+fn ::float(v: graphql::Slot&, x: f64) {
+    graphql::entries.push(graphql::Entry { kind: graphql::E_FLOAT, f: x, .. });
+}
+
+fn ::boolean(v: graphql::Slot&, x: bool) {
+    graphql::entries.push(graphql::Entry { kind: graphql::E_BOOL, i: if x { 1 } else { 0 }, .. });
+}
+
+fn ::string(v: graphql::Slot&, s: const u8[:]) { graphql::put_text(graphql::E_STRING, s); }
+
+fn ::enum_value(v: graphql::Slot&, s: const u8[:]) { graphql::put_text(graphql::E_ENUM, s); }
+
+fn ::json(v: graphql::Slot&, s: const u8[:]) { graphql::put_text(graphql::E_JSON, s); }
+
+fn ::none(v: graphql::Slot&) { graphql::put_null(); }
+
+fn ::list<F>(v: graphql::Slot&) {
+    let l = graphql::begin_list();
+    F();
+    graphql::end_list(l);
+}
+
+fn ::error(v: graphql::Slot&, msg: const u8[:]) { graphql::put_text(graphql::E_ERROR, msg); }

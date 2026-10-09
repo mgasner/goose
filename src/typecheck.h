@@ -1861,6 +1861,8 @@ struct TypeCheck {
                              MatchInfo &best, TypeExpr *expected, string_view name);
     Val CheckCall(Call *c, TypeExpr *expected);
     Val CheckNamedCall(Call *c, Ident *id, TypeExpr *expected);
+    SEnum *DeferredOf(TypeExpr *t);
+    Val CheckInvocation(Call *c, Node *callee, const Val &cv, TypeExpr *expected);
     SFunction *LookupLocalFnEnv(string_view name, FnSpec *&env);
     Val CheckUfcsCall(Call *c, Dot *d, TypeExpr *expected);
     Val ResolveCall(Call *c, vector<SFunction *> &cands, FnSpec *env, string_view name, Val *preval,
@@ -2390,6 +2392,11 @@ struct TypeCheck {
             if (st->generics.empty()) GetStructInst(ast.StructOf(st, {}, st->line));
         for (auto en : ast.enums)
             if (en->generics.empty()) GetEnumInst(ast.EnumOf(en, {}, true, en->line));
+        // A deferred type whose every stored argument is fixed-size is built
+        // fixed-mode by its constructors, as a variant literal would be at a
+        // fixed-mode destination; otherwise variable mode is its only mode.
+        for (auto sf : ast.functions)
+            if (sf->isdctor) sf->rets[0]->enu->varmode = !GetEnumInst(sf->rets[0])->allfixed;
         // And the sizes in every function's signature, for its parameters' and
         // type parameters' names, and in every generic type's fields.
         for (auto sf : ast.functions) SignatureNames(sf->params, sf->rets, sf->generics);
@@ -2512,7 +2519,7 @@ struct TypeCheck {
     // from the others' and store its references wherever a global's may go,
     // inside a recursive cycle too.
     void CheckUnreached(SFunction *sf) {
-        if (!sf->specs.empty() || sf->isthread || sf->isnested) return;
+        if (!sf->specs.empty() || sf->isthread || sf->isnested || sf->deferredof) return;
         if (!sf->generics.empty()) return;
         for (auto &p : sf->params) if (!p.type) return;
         set<string_view> names = { sf->name };

@@ -2091,7 +2091,8 @@ Function values capture enclosing locals per §7.5, and cannot escape:
 storing them, returning them, or putting them in data is a compile error.
 Every call is direct and inlinable; HOFs compile to hardcoded loops
 (Lobster-style guarantee). There are no closures-as-objects and no runtime
-function pointers in v1.
+function pointers in v1. A call is stored as data
+through a deferred type (§8.3), which needs neither.
 
 A plain `return` inside a function value returns from the **lexically
 enclosing named function**, not from the HOF that calls the value — so a
@@ -2600,6 +2601,70 @@ let a = area(s);     // s: Shape — dispatches on the tag, like a match
 This is the language's "virtual function" idiom, without vtables or
 inheritance, and it keeps the closed-world exhaustiveness guarantee.
 
+### 8.3 Deferred calls
+
+A **deferred type** is a call stored as data: a function and the leading
+arguments it will be called with, kept in a variable, an array, a field or a
+queue, and called later with the rest.
+
+```goose
+deferred Job(now: i64) -> bool;          // what a stored call is called with, and returns
+
+fn resize(img: i64, width: i32, now: i64) -> bool { ... }
+fn expire(key: u8[], now: i64) -> bool { ... }
+
+var jobs: Job..[>..] = [];
+jobs.push(Job(resize, 17, 640));         // stores img = 17, width = 640
+jobs.push(Job(expire, "session:42"));    // stores key
+for j in jobs { if !j(clock()) { ... } } // calls resize or expire
+```
+
+* `deferred Name(params) -> rets;` is a top-level declaration, nominal like
+  `struct` and `enum`. Its parameters are the **call-time signature**: every
+  parameter has a type, none has a default, and any type a parameter may
+  have is allowed (references, slices and builders are passed at the call,
+  never stored). Results are as for `fn` (§7.1, §7.3). A deferred type is
+  not generic.
+* **Construction** `D(f, a1, ..., an)` names a function and its first `n`
+  arguments, which are stored. `f` is a top-level `fn` or `extern fn`: not
+  a nested function (its free variables live in a frame, §7.5), not a
+  `thread_fn`, not generic, every parameter typed. Its parameters after the
+  `n` stored ones must be exactly `D`'s, `var` included, and its results
+  exactly `D`'s. Where `f` names overloads, exactly one may fit. The stored
+  arguments are checked as a construction's fields are (§4.2), and every
+  one is written: `f`'s defaults are not used. A stored parameter is
+  **flat** (§1.1) and not resizable, so a deferred type is always flat.
+* **Invocation** `d(args)` calls the function `d` holds with its stored
+  arguments, then `args`. The callee may be any value of the type: a
+  variable, an element, a field (`b.on_press(3)`, fields first, §7.1), a
+  call's result. It is tag dispatch (§8.2) in every respect: the arguments
+  are evaluated before the call, a nonfixed result is built at the call's
+  destination (§4.3), the result's roots and the call's effects are those
+  of every function the type stores, and `return ... from` passes through
+  it (§7.9). A variable-mode value in storage gives the function its stored
+  arguments where they lie; a variable-size one is copied into the
+  function's by-value parameter, as a direct call would copy it.
+* **Membership is the program's.** The functions a deferred type stores are
+  every one some construction anywhere in the program names, in any module,
+  so a library can declare a type that the program importing it fills. The
+  set is decided from the source before checking: a construction in a
+  function never called still counts.
+* A deferred type is an ADT (§3.5) for everything else: modes, placement,
+  copying, equality (`==` compares the function and the stored arguments)
+  and printing (`resize { 17, 640 }`). Fixed mode is open to it only while
+  every stored argument of every member is fixed-size. Its calls have no
+  variant names to write: it cannot be `match`ed, and `D.f` names nothing.
+* **The empty call.** `D.empty` is a value of every deferred type, and its
+  zero value (§4.2): `default<D>()` (fixed mode), a missed `qpoll<D>()`
+  (§11.2). Invoking it aborts, "invoked an empty D" (§9.3). Test for it with
+  `d == D.empty`.
+* A function that can reach an invocation of a deferred type storing it is
+  in a call cycle through that invocation (§7.8): it is declared `recursive
+  fn`, and the cycle's rules apply at the invocation.
+* `from_bytes` has no verifier for a type containing a deferred type: the
+  bytes would choose the function, and the numbering of the stored
+  functions changes as a program does.
+
 ---
 
 ## 9. References, lifetimes, and safety
@@ -2776,6 +2841,7 @@ Aborts (message + exit; not catchable):
   conversions that change the value (§6.3; conversions to a float
   excepted);
 * division by zero (always);
+* invoking the empty call of a deferred type (§8.3);
 * `assert` failures, and the program's own `abort(msg)` (`msg` any `u8`
   array or slice; printed as `goose runtime error: <msg>`);
 * guard-page hits (stack budget exceeded) — safe abort, never corruption;
@@ -3681,12 +3747,15 @@ unmapped gap after each region turns runaway growth into a safe abort.
 ```
 program     := namespace? topdecl*             // imports may precede namespace
 namespace   := "namespace" ident ";"
-topdecl     := import | struct | enum | typealias | fndecl | globaldecl
+topdecl     := import | struct | enum | deferred | typealias | fndecl | globaldecl
 import      := "import" "."? ident ("." ident)* ";"
 declname    := ident | ident "::" ident | "::" ident   // the namespace, else the file's
 qname       := ident | ident "::" ident | "::" ident   // a declaration reference
 struct      := "struct" declname generics? "{" fieldlist "}"
 enum        := "enum" declname generics? "{" variant ("," variant)* ","? "}"
+deferred    := "deferred" declname "(" dparams? ")" ("->" rettypes)? ";"
+dparams     := dparam ("," dparam)* ","?
+dparam      := "var"? ident ":" type
 variant     := ident ( "{" fieldlist "}" )?
 fieldlist   := field ("," field)* ","?
 field       := ("let" | "const")? ident ":" type ("=" expr)? | "pad" intlit?

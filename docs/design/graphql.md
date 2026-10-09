@@ -31,7 +31,7 @@ shared memory. Each part is replaced with something that fits:
 |---|---|
 | Resolver map of closures | One resolver **function value** (the trailing block), which dispatches through **case functions** over a user enum of object handles (§3) |
 | Response tree, then serialize | Resolver results kept as flat **entries**, then written as JSON in one depth-first pass. Null propagation **truncates** the output back to a watermark (§5) |
-| DataLoaders over promises | **Breadth-first resolution**: a level of objects at a time, with one **batch hook** call per object type per level, before that level's resolvers (§5.1) |
+| DataLoaders over promises | **Breadth-first resolution**: a level of objects at a time, with one **batch hook** call per object type per level, before that level's resolvers (§5.1); and **deferred values**, stored calls that wait for a loader's round at the end of the level (§5.2) |
 | Exceptions or `Result` for errors | Field errors are values. Non-null propagation is **`return … from`** to the nearest nullable position (§5) |
 | Per-request allocation, GC | Per-request rows sit above the schema's in flat global tables and are **truncated** when the request ends (§6) |
 | Threads over shared data | **Shared-nothing workers**, each with its own copy of the data. Mutations are **replayed** on every copy, and large levels are **split** across workers (§8) |
@@ -222,8 +222,10 @@ about the size of the response.
 
 DataLoader batches by *demand*: resolvers ask a loader for keys, the loader
 waits for the event loop to drain, then makes one call. That needs promises,
-continuations and an event loop. Goose has none of them: function values
-cannot be stored.
+continuations and an event loop. Goose has no promises and no event loop,
+and function values cannot be stored; what it has since is the stored call
+(deferred types, `deferred_calls.md`), which §5.2 builds demand batching
+on. The schedule below came first and remains the cheaper of the two.
 
 Here the handles already are the keys. A field that gives an object gives
 its handle, usually an id, and loads nothing. The data is needed when the
@@ -244,12 +246,9 @@ tables, so workers can copy them. Skipping keys already loaded gives
 DataLoader's per-request cache. `request_serial` tells a cache when a new
 request has started.
 
-What it gives up against DataLoader: a resolver cannot defer a value until a
-batch it asked for comes back ("load, then transform"), because that needs
-a stored continuation. A loaded value is either a field of an object the next
-level reaches, or the object itself, so this has not been needed. A deferred
-entry ("key K of loader L, filled in at the end of the level") would fit the
-entry model if it ever is.
+What the schedule alone gives up against DataLoader: a resolver cannot
+defer a value until a batch it asked for comes back ("load, then
+transform"), because that needs a stored continuation. §5.2 adds it.
 
 `stdlib_graphql_batch.goose` checks the schedule:
 - one call per type per level, also for a union list;
@@ -257,6 +256,37 @@ entry model if it ever is.
 - the cache answering a later level;
 - introspection objects never reaching the hook;
 - batching inside the parts of a split level.
+
+### 5.2 Deferred values
+
+`r.later(loader, key, then)` is the deferred entry: an `E_LATER` entry
+standing for "key K of loader L, then T", filled in at the end of the
+level. `Loader` and `Then` are deferred types the library declares
+(`deferred Loader(keys: i64[:]); deferred Then(key: i64, s: Slot&);`), and
+the program's functions are their members. A row of `laters` holds the
+entry, the loader (an index into the loaders asked this round, which `==`
+on the stored calls finds), the key, the `then` and the field.
+
+After the level's resolvers, `run_laters` works in **rounds**:
+1. each loader asked this round is called once with its keys, distinct and
+   in the order first asked (an open-addressing set, reset by a stamp);
+2. each `then` asked this round runs, in order. It appends its value at the
+   end of the entries, checked for exactly one value as a resolver's is, and
+   the `E_LATER` becomes an `E_REF` to it;
+3. a `then` that asks again adds rows for the next round.
+
+Phase 2 follows an `E_REF` where it reads an entry (`complete_value`), so a
+deferred value is checked against its field's type, nulls and errors
+propagate, and paths are reported exactly as for one given directly. A
+`then` gives leaves and lists only: giving an object would need
+`Result<O>`, and a deferred type is not generic. Mutations run each
+top-level field's rounds before the next field.
+
+`stdlib_graphql_later.goose` checks one loader call per loader per round,
+chained rounds, lists of deferred values, a `then`'s errors and missing
+values, non-null propagation from a `then`, and that a pool's split levels
+answer exactly as one thread does. The cost against the batch hook and
+against graphql-js with DataLoader is in `bench/deferred/results.md`.
 
 ---
 

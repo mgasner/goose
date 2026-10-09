@@ -152,9 +152,12 @@ fn idle_tests() {
     let port = http::listener_port(l);
     thread_spawn(quick_server, l);
     let fd = http::connect("127.0.0.1", port, 5000);
-    http::send(fd, "POST /echo HTTP/1.1\r\nContent-Length: 6\r\nConnection: close\r\n\r\n");
-    for c in "slowly" {
-        sleep_ms(150);
+    // 1.5 s in all, past the engine's once-a-second sweep for idle connections.
+    let body = "slowly uploaded";
+    http::send(fd, str("POST /echo HTTP/1.1\r\nContent-Length: ", body.len,
+                       "\r\nConnection: close\r\n\r\n"));
+    for c in body {
+        sleep_ms(100);
         var one: u8[..1] = [];
         one.push(c);
         http::send(fd, one);

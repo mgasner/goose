@@ -75,5 +75,5 @@ HTTP/1.1 200 OK|Server: goose|Content-Type: text/plain|Content-Length: 13|Connec
 HTTP/1.1 400 Bad Request|Server: goose|Content-Type: text/plain|Content-Length: 0|Connection: close|||
 HTTP/1.1 200 OK|Server: goose|Content-Type: text/plain|Content-Length: 13|Connection: close|||
 -- idle
-HTTP/1.1 200 OK|Server: goose|Content-Type: application/octet-stream|Content-Length: 6|Connection: close||slowly|
+HTTP/1.1 200 OK|Server: goose|Content-Type: application/octet-stream|Content-Length: 15|Connection: close||slowly uploaded|
 silent connection: recv 0, closed after 300 ms or more: true

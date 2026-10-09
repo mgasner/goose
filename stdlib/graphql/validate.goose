@@ -551,6 +551,35 @@ fn request_error(msg: const u8[:]) {
     return false from prepare;
 }
 
+// Entry i of a JSON document as rows of `values`: the variables of a
+// request's envelope.
+recursive fn import_json(d: const json::Doc&, i: i64) -> i64 {
+    let k = (d.tape[i].head & 15) as i64;
+    let x = d.tape[i].data;
+    if k == json::K_OBJECT || k == json::K_ARRAY {
+        let obj = k == json::K_OBJECT;
+        let idx = push_value(Value { kind: if obj { V_OBJECT } else { V_LIST }, .. });
+        var prev = -1;
+        var j = i + 1;
+        while j < x as i64 {
+            var key = Name { .. };
+            if obj { key = add_text(json::text_of(d, j)); j += 1; }
+            let v = import_json(d, j);
+            values[v].key = key;
+            if prev >= 0 { values[prev].next = v; } else { values[idx].first = v; }
+            prev = v;
+            j = json::next(d, j);
+        }
+        return idx;
+    }
+    if k == json::K_STRING { return push_value(Value { kind: V_STRING, s: add_text(json::text_of(d, i)), .. }); }
+    if k == json::K_INT { let n = x as! i64; return push_value(Value { kind: V_INT, i: n, f: n, .. }); }
+    if k == json::K_UINT { return push_value(Value { kind: V_FLOAT, f: x, .. }); }
+    if k == json::K_FLOAT { return push_value(Value { kind: V_FLOAT, f: json::f64_of(x), .. }); }
+    if k == json::K_TRUE || k == json::K_FALSE { return push_value(Value { kind: V_BOOL, i: if k == json::K_TRUE { 1 } else { 0 }, .. }); }
+    return push_value(Value { kind: V_NULL, .. });
+}
+
 fn is_envelope(r: const u8[:]) -> bool {
     var i = 0;
     while i < r.len && (r[i] == ' ' || r[i] == '\n' || r[i] == '\r' || r[i] == '\t') { i++; }
@@ -572,23 +601,28 @@ fn prepare(request: const u8[:]) -> bool {
     var query = Name { .. };
     var have_query = !is_envelope(request);
     if !have_query {
-        if !parse_text(request, P_JSON) { return false; }
-        var c = values[json_root].first;
-        while c >= 0 {
-            let k = str_of(values[c].key);
-            let vk = values[c].kind;
+        let d = json::parse(request);
+        guard d.ok() else {
+            request_error(str("The request is not valid JSON: ", d.error.message, " (byte ", d.error.at, ")."));
+            return false;
+        }
+        let end = d.tape[0].data as i64;
+        var j = 1;
+        while j < end {
+            let k = json::text_of(d, j);
+            let vk = (d.tape[j + 1].head & 15) as i64;
             if k == "query" {
-                guard vk == V_STRING else { request_error("The \"query\" of a request must be a string."); return false; }
-                query = values[c].s;
+                guard vk == json::K_STRING else { request_error("The \"query\" of a request must be a string."); return false; }
+                query = add_text(json::text_of(d, j + 1));
                 have_query = true;
             } else if k == "operationName" {
-                guard vk == V_STRING || vk == V_NULL else { request_error("The \"operationName\" of a request must be a string."); return false; }
-                if vk == V_STRING { opname = values[c].s; }
+                guard vk == json::K_STRING || vk == json::K_NULL else { request_error("The \"operationName\" of a request must be a string."); return false; }
+                if vk == json::K_STRING { opname = add_text(json::text_of(d, j + 1)); }
             } else if k == "variables" {
-                guard vk == V_OBJECT || vk == V_NULL else { request_error("The \"variables\" of a request must be an object."); return false; }
-                if vk == V_OBJECT { given = c; }
+                guard vk == json::K_OBJECT || vk == json::K_NULL else { request_error("The \"variables\" of a request must be an object."); return false; }
+                if vk == json::K_OBJECT { given = import_json(d, j + 1); }
             }
-            c = values[c].next;
+            j = json::next(d, j + 1);
         }
         guard have_query else { request_error("A request must have a \"query\"."); return false; }
         if !parse_text(str_of(query), P_QUERY) { return false; }

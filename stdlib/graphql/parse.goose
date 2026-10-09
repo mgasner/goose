@@ -44,8 +44,6 @@ var args: Arg[>..] = [];
 var dirs: Dir[>..] = [];
 var frags: Frag[>..] = [];
 
-var json_root: i64 = -1;          // what a P_JSON parse read
-
 // The schema block's root names, if it has one.
 var schema_query: Name;
 var schema_mutation: Name;
@@ -58,11 +56,7 @@ fn parse_source(what: i64) -> bool {
     pos = 0;
     advance();
     if what == P_SDL { parse_sdl(); }
-    else if what == P_QUERY { parse_document(); }
-    else {
-        json_root = parse_value(M_JSON);
-        guard tok == T_EOF else { unexpected(); }
-    }
+    else { parse_document(); }
     return true;
 }
 
@@ -77,7 +71,6 @@ fn parse_text(s: const u8[:], what: i64) -> bool {
 
 let M_CONST = 0;     // a literal with no variables in it
 let M_VAR = 1;       // a literal in an operation, variables allowed
-let M_JSON = 2;      // JSON: quoted keys, no enums or variables
 
 fn push_value(v: Value) -> i64 {
     values.push(v);
@@ -101,12 +94,7 @@ recursive fn parse_value(mode: i64) -> i64 {
             guard tok != T_EOF else { unexpected(); }
             var key = Name { .. };
             if obj {
-                if mode == M_JSON {
-                    guard tok == T_STRING else { unexpected(); }
-                    key = take_string();
-                } else {
-                    key = take_name();
-                }
+                key = take_name();
                 expect_punct(':');
             }
             let v = parse_value(mode);
@@ -132,7 +120,7 @@ recursive fn parse_value(mode: i64) -> i64 {
         advance();
         return push_value(Value { kind: V_FLOAT, f: f, .. });
     }
-    if tok == T_STRING || (tok == T_BLOCK && mode != M_JSON) {
+    if tok == T_STRING || tok == T_BLOCK {
         let s = take_string();
         return push_value(Value { kind: V_STRING, s: s, .. });
     }
@@ -143,7 +131,6 @@ recursive fn parse_value(mode: i64) -> i64 {
             return push_value(Value { kind: V_BOOL, i: if b { 1 } else { 0 }, .. });
         }
         if at_name("null") { advance(); return push_value(Value { kind: V_NULL, .. }); }
-        guard mode != M_JSON else { unexpected(); }
         let n = take_name();
         return push_value(Value { kind: V_ENUM, s: n, .. });
     }

@@ -288,7 +288,9 @@ The library tells them apart by their first characters: a `{` followed by a
 `"` is JSON. With several operations in the document, `operationName` picks
 one.
 
-The response is JSON:
+The response is JSON, written by the `json` module: strings escaped as
+JSON requires, and floats as the shortest text that reads back as the same
+double, as JavaScript writes them (`5.0` is `5`, `1e21` is `1e+21`):
 
 * `{"data": ...}` when everything worked;
 * `{"data": ..., "errors": [...]}` when some fields failed (**field errors**);
@@ -528,5 +530,6 @@ which are global so that `f.int("x")` and `r.int(1)` work from your code.
   each field once.
 * One schema per program, and one request at a time per thread: a resolver
   or a batch hook must not call `execute`.
-* JSON in a request is parsed as the GraphQL value grammar's JSON subset:
-  `\u` escapes, numbers and nesting as JSON has them.
+* A JSON request is parsed by the `json` module (`docs/json.md`), strictly:
+  a request that is not valid JSON is a request error naming the byte where
+  it stops being JSON.

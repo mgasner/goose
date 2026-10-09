@@ -601,7 +601,7 @@ fn write_leaf(e: Entry, nt: i64) -> bool {
             reason.append("Float cannot represent non numeric value");
             return false;
         }
-        format(resp, e.f);
+        json::write_float(resp, e.f);
         return true;
     }
     if tn == "Boolean" {
@@ -612,7 +612,7 @@ fn write_leaf(e: Entry, nt: i64) -> bool {
     if tn == "String" || tn == "ID" {
         if e.kind == E_STRING || e.kind == E_ENUM { json_quote(resp, entry_text(e)); return true; }
         if e.kind == E_INT { resp.push('"'); format(resp, e.i); resp.push('"'); return true; }
-        if tn == "String" && e.kind == E_FLOAT { resp.push('"'); format(resp, e.f); resp.push('"'); return true; }
+        if tn == "String" && e.kind == E_FLOAT { resp.push('"'); json::write_float(resp, e.f); resp.push('"'); return true; }
         if tn == "String" && e.kind == E_BOOL { resp.append(if e.i != 0 { "\"true\"" } else { "\"false\"" }); return true; }
         format(reason, tn, " cannot represent value");
         return false;
@@ -620,7 +620,7 @@ fn write_leaf(e: Entry, nt: i64) -> bool {
     // A custom scalar: what the resolver gave, as JSON.
     if e.kind == E_STRING || e.kind == E_ENUM { json_quote(resp, entry_text(e)); return true; }
     if e.kind == E_INT { format(resp, e.i); return true; }
-    if e.kind == E_FLOAT { format(resp, e.f); return true; }
+    if e.kind == E_FLOAT { json::write_float(resp, e.f); return true; }
     if e.kind == E_BOOL { resp.append(if e.i != 0 { "true" } else { "false" }); return true; }
     if e.kind == E_JSON { resp.append(entry_text(e)); return true; }
     format(reason, tn, " cannot represent an object or list value");

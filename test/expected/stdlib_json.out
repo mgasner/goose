@@ -1,0 +1,97 @@
+-- writer
+{"id":7,"name":"tab\there \"quoted\" back\\slash \u0001","ratio":0.1,"ok":true,"tags":["a","é",null,18446744073709551615],"empty":{},"raw":[1,2]}
+{
+  "a": 1,
+  "b": [
+    -2,
+    [],
+    {
+      "c": false
+    }
+  ]
+}
+-- floats out
+0
+-0
+1
+-1.5
+0.1
+0.30000000000000004
+123456789.125
+1e+21
+100000000000000000000
+1.5e-7
+0.000001
+5e-324
+1.7976931348623157e+308
+2.2250738585072014e-308
+9007199254740992
+null
+null
+-- numbers in
+0 -> kind 3 int 0 true uint 0 true float 0
+-0 -> kind 3 int 0 true uint 0 true float 0
+42 -> kind 3 int 42 true uint 42 true float 42
+-9223372036854775808 -> kind 3 int -9223372036854775808 true uint 0 false float -9223372036854776000
+9223372036854775807 -> kind 3 int 9223372036854775807 true uint 9223372036854775807 true float 9223372036854776000
+9223372036854775808 -> kind 4 int 0 false uint 9223372036854775808 true float 9223372036854776000
+18446744073709551616 -> kind 5 int 0 false uint 0 false float 18446744073709552000
+1.5 -> kind 5 int 0 false uint 0 false float 1.5
+1e400 -> kind 5 int 0 false uint 0 false float null
+-1e-400 -> kind 5 int 0 true uint 0 false float -0
+2.4703282292062328e-324 -> kind 5 int 0 false uint 0 false float 5e-324
+0.1000000000000000055511151231257827021181583404541015625 -> kind 5 int 0 false uint 0 false float 0.1
+1.00000000000000011102230246251565404236316680908203125 -> kind 5 int 1 true uint 0 false float 1
+123456789012345678901234567890e-10 -> kind 5 int 0 false uint 0 false float 12345678901234567000
+01 -> error: unexpected text after the value
+1. -> error: invalid number
+- -> error: invalid number
+.5 -> error: unexpected character
+1e -> error: invalid number
++1 -> error: unexpected character
+-- documents
+ok true, 27 entries
+count 2, users 2, dup 1
+  Ada 36 langs 2 nick null false missing false
+  Alan 41 langs 0 nick null true missing false
+emoji bytes 4, second user Alan
+past the end false, wrong kind 0 false
+  member users kind 7
+  member count kind 3
+  member emoji kind 6
+  member dup kind 3
+  member dup kind 3
+{"users":[{"name":"Ada","age":36,"langs":["en","fr"]},{"name":"Alan","age":41,"nick":null}],"count":2,"emoji":"😀","dup":1,"dup":2}
+[]
+"\b\f\n\r\t/\u0000"
+-- errors
+error at 0: unexpected end of input
+error at 3: unexpected character
+error at 5: expected ':'
+error at 7: expected a string key
+error at 3: expected ',' or ']'
+error at 1: unterminated string
+error at 1: invalid escape
+error at 7: unpaired surrogate
+error at 1: control character in string
+error at 3: unexpected text after the value
+error at 0: invalid literal
+error at 0: invalid literal
+error at 1: expected a string key
+error at 1: invalid UTF-8
+error at 1: invalid UTF-8
+error at 5: unexpected end of input
+error at 0: unexpected character
+[[[1]]]
+error at 3: nesting too deep
+-- cursor
+ok true, count 2, first name Ada, second Alan, age 41.0
+raw ["en", "fr"] emoji bytes 4
+  Ada has 3 members
+  Alan has 3 members
+[1]] -> unexpected text after the value
+[][] -> unexpected text after the value
+{"a":1}} -> unexpected text after the value
+"open -> unterminated string
+[1]   -> ok
+bad literal kind 15, others 1 3

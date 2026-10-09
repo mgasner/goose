@@ -1,7 +1,7 @@
 # The Goose standard library
 
-The standard library has eleven modules under `stdlib/`: `std`, `dictionary`,
-`vec`, `math`, `os`, `binary`, `graphql`, `audio`, `gfx`, `physics`, and `ui`. Import each module by name,
+The standard library has twelve modules under `stdlib/`: `std`, `dictionary`,
+`vec`, `math`, `os`, `binary`, `json`, `graphql`, `audio`, `gfx`, `physics`, and `ui`. Import each module by name,
 for example `import std;`. The compiler locates the library in its source
 tree; use `--stdlib <dir>` or `GOOSE_STDLIB` to select another location.
 Everything is written in Goose except the C behind `os`
@@ -44,7 +44,7 @@ The library uses these conventions:
 * A function taking an element *by value* (`push_n`, `insert_at`, `fill`,
   `heap_push`) cannot take one that contains self-relative references, because
   those values cannot be copied (spec §3.9). Construct them in place.
-* The `std`, `dictionary`, `vec`, `math`, and `os` names are global; `binary`, `graphql`, `audio`,
+* The `std`, `dictionary`, `vec`, `math`, and `os` names are global; `binary`, `json`, `graphql`, `audio`,
   `gfx`, `physics`, and `ui` use their own namespaces. A local named `fill` or `count`
   shadows the corresponding global function, causing an error at a call.
 
@@ -478,6 +478,32 @@ Use offset reads for random access and cursors for sequential records.
 Applications still validate signatures, counts, indices and format-specific
 limits after checking the read. The WAD loader in
 [`31_mini_doom.goose`](../samples/31_mini_doom.goose) shows both styles.
+
+## json
+
+`import json;` reads and writes JSON, in Goose (`stdlib/json/`): a writer,
+a document parser that checks the whole text into a flat tape, and a
+cursor that indexes the text and parses values only when they are read.
+Doubles are written shortest round trip and read correctly rounded.
+[`json.md`](json.md) is the guide and reference; [`design/json.md`](design/json.md)
+is the design.
+
+```goose
+fn writer<A>(out: A&) -> Writer<A>                   // w.object() { … }, w.array() { … }, w.key(k),
+fn pretty_writer<A>(out: A&, indent: i64) -> Writer<A>   // w.string/int/uint/float/boolean/none/raw(v), w.field(k, v)
+fn parse(text: const u8[:]) -> Doc                   // d.ok(), d.error { at, message }, d.root() -> Value
+fn cursor(text: const u8[:]) -> Cursor               // c.ok(), c.error, c.root() -> Lazy
+fn write_string<A>(out: A&, s: const u8[:])
+fn write_int<A>(out: A&, v: i64)    fn write_uint<A>(out: A&, v: u64)    fn write_float<A>(out: A&, x: f64)
+fn parse_float(s: const u8[:]) -> f64, bool
+```
+
+A `Value` (of a document) and a `Lazy` (of a cursor) read the same way:
+`v.get(key)`, `v.at(i)`, `v.each() { x => … }`, `v.members() { k, x => … }`,
+`v.count()`, `v.kind()`, and `v.int()`/`float()`/`string()`/`boolean()`, with
+`try_` forms that also say whether the value was one. A lookup that finds
+nothing gives a missing value, which reads as defaults, so chains need no
+checks along the way.
 
 ## graphql
 

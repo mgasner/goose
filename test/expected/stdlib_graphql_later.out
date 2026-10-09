@@ -1,0 +1,22 @@
+{ books { title authorName } }
+  calls: authors[0, 2, 4, 1, 3] (1 in 1 round(s))
+  {"data":{"books":[{"title":"book0","authorName":"author0"},{"title":"book1","authorName":"author2"},{"title":"book2","authorName":"author4"},{"title":"book3","authorName":"author1"},{"title":"book4","authorName":"author3"},{"title":"book5","authorName":"author0"}]}}
+{ books { authorCountry } }
+  calls: authors[0, 2, 4, 1, 3] countries[0, 2, 1] (2 in 2 round(s))
+  {"data":{"books":[{"authorCountry":"NZ"},{"authorCountry":"JP"},{"authorCountry":"PT"},{"authorCountry":"PT"},{"authorCountry":"NZ"},{"authorCountry":"NZ"}]}}
+{ books { authorName authorCountry tags } }
+  calls: authors[0, 2, 4, 1, 3] nothing(7) countries[0, 2, 1] (3 in 2 round(s))
+  {"data":{"books":[{"authorName":"author0","authorCountry":"NZ","tags":["#0","#1"]},{"authorName":"author2","authorCountry":"JP","tags":["#1","#2"]},{"authorName":"author4","authorCountry":"PT","tags":["#2","#3"]},{"authorName":"author1","authorCountry":"PT","tags":["#3","#4"]},{"authorName":"author3","authorCountry":"NZ","tags":["#4","#5"]},{"authorName":"author0","authorCountry":"NZ","tags":["#5","#6"]}]}}
+{ book(id: 4) { rating forgotten } }
+  calls: nothing(1) (1 in 1 round(s))
+  {"data":{"book":{"rating":null,"forgotten":null}},"errors":[{"message":"no rating yet","locations":[{"line":1,"column":17}],"path":["book","rating"]},{"message":"No value was given for Book.forgotten.","locations":[{"line":1,"column":24}],"path":["book","forgotten"]}]}
+{ books { title strict } }
+  calls: nothing(6) (1 in 1 round(s))
+  {"data":null,"errors":[{"message":"Cannot return null for non-nullable field Book.strict.","locations":[{"line":1,"column":17}],"path":["books",2,"strict"]}]}
+{ book(id: 1) { title digits authorName } }
+  calls: nothing(1) authors[2] (2 in 1 round(s))
+  {"data":{"book":{"title":"book1","digits":[10,11,12],"authorName":"author2"}}}
+{ books { title } }
+  calls: (0 in 0 round(s))
+  {"data":{"books":[{"title":"book0"},{"title":"book1"},{"title":"book2"},{"title":"book3"},{"title":"book4"},{"title":"book5"}]}}
+pool: 10/10 match

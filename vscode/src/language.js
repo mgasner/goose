@@ -62,7 +62,7 @@ function qualifiedName(ts, start) {
 function declarations(source) {
     const ts = tokens(source);
     const result = [];
-    const kinds = { fn: 'Function', thread_fn: 'Function', struct: 'Struct', enum: 'Enum', type: 'TypeParameter', let: 'Constant', const: 'Constant', var: 'Variable', namespace: 'Namespace' };
+    const kinds = { fn: 'Function', thread_fn: 'Function', struct: 'Struct', enum: 'Enum', deferred: 'Enum', type: 'TypeParameter', let: 'Constant', const: 'Constant', var: 'Variable', namespace: 'Namespace' };
     let depth = 0;
     for (let i = 0; i < ts.length; i++) {
         const token = ts[i];

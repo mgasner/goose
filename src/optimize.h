@@ -724,6 +724,7 @@ inline Node *Dot::Cp1(Inliner &inl) const {
 inline Node *Call::Cp1(Inliner &inl) const {
     auto c = inl.ast.New<Call>(line, inl.Cp(callee));
     c->tyargs = tyargs;
+    c->pinned = pinned;
     for (auto a : args) c->args.push_back(inl.Cp(a));
     c->firstdefault = firstdefault;
     c->ndefaults = ndefaults;

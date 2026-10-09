@@ -1,0 +1,37 @@
+0
+1
+3
+6
+10
+15
+21
+28
+36
+45
+55
+66
+78
+91
+105
+120
+136
+integer 42
+integer 5
+real 2.5
+integer 1
+text 'literal'
+text 'carol'
+text 'ar'
+text ''
+blob X'010203'
+blob X''
+null NULL
+text 'blue'
+real -1.5
+42 2.5 'literal' -1.5
+true
+'carol'X'010203'NULL7 true
+5 text values
+3 :b @a2 2 0
+true B-A-2
+true

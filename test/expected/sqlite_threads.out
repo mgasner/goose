@@ -1,0 +1,9 @@
+open true
+reader saw at most 800: true
+written 800
+rows 800
+worker 0: 200 rows, sum 19900
+worker 1: 200 rows, sum 19900
+worker 2: 200 rows, sum 19900
+worker 3: 200 rows, sum 19900
+cleaned up true

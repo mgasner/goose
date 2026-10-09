@@ -1,8 +1,9 @@
 # SQLite — Design
 
-Status: proposal. Nothing here is implemented yet. §12 records a spike that
-ran the Goose side of this design against the system SQLite through a toy
-layer.
+Status: implemented, as described here; `docs/stdlib.md` is the reference.
+§12 records the spike that preceded it, and §15 what implementing it
+changed. Checking SQL at compile time is a separate design,
+`docs/design/sqlite_checked.md`.
 
 `import sqlite;` gives a Goose program SQLite: open a database, run SQL with
 bound parameters, read rows straight into Goose values, transactions,
@@ -194,8 +195,8 @@ adds its own types by qualifying the declaration:
 
 ```goose
 enum Color { Red, Green }
-fn sqlite::bind(s: sqlite::Stmt, i: i32, c: Color) -> i32 {
-    sqlite::bind(s, i, match c { Red => "red", Green => "green" })
+fn sqlite::bind(s: sqlite::Stmt, i: i64, c: Color) -> bool {
+    return sqlite::bind(s, i, match c { Red => "red", Green => "green" });
 }
 sqlite::exec(db, "insert into t values (?)", Color.Green);
 ```
@@ -250,7 +251,7 @@ Its costs, which are why it is the second form and not the only one:
   statement outlives the call. That is one copy of each parameter, which
   is also what any binding that does not pin its arguments pays.
 * `?NNN`, `:name` and `@name` parameters work through `prepare` plus
-  `bind_index(s, ":name") -> i32`. The convenience forms are positional.
+  `param_index(s, ":name") -> i64`. The convenience forms are positional.
 * Binding too few or too many parameters is a misuse (§6). SQLite would
   silently bind NULL to the missing ones.
 
@@ -262,7 +263,7 @@ Its costs, which are why it is the second form and not the only one:
 |---|---|---|
 | `query(db, sql, args…) { r => T }` | `T[>..], bool` | every row, each built in place in the result |
 | `each(db, sql, args…) { r => … }` | `bool` | stream rows without collecting them |
-| `one(db, sql, args…) { r => T }` | `T, bool` (`false`: no row or error) | a lookup by key |
+| `one(db, sql, args…) { r => … }` | `bool, bool`: whether there was a row, whether the statement ran | a lookup by key; the block gets the first row |
 | `scalar_int` / `scalar_real` / `scalar_text` | `i64 / f64 / u8[]`, `bool` | `select count(*)` |
 
 Each one also has a `_params` form taking a `const Param[:]` (§4.2).
@@ -276,17 +277,17 @@ Accessors on `Row`, with SQLite's own conversions (an integer column read
 with `real` is converted, as `sqlite3_column_double` does):
 
 ```goose
-fn int(r: Row, i: i32) -> i64          // NULL reads as 0
-fn real(r: Row, i: i32) -> f64
-fn text(r: Row, i: i32) -> u8[]        // copied; fits u8[], u8[varint] and u8[..k] fields
-fn text_into(r: Row, i: i32, out: u8[>..]&)   // append to a builder instead
-fn blob(r: Row, i: i32) -> u8[]
-fn blob_into(r: Row, i: i32, out: u8[>..]&)
-fn is_null(r: Row, i: i32) -> bool
-fn column_type(r: Row, i: i32) -> i32  // INTEGER, FLOAT, TEXT, BLOB, NULL
+fn int(r: Row, i: i64) -> i64          // NULL reads as 0
+fn real(r: Row, i: i64) -> f64
+fn text(r: Row, i: i64) -> u8[]        // copied; fits u8[], u8[varint] and u8[..k] fields
+fn text_into(r: Row, i: i64, out: u8[>..]&)   // append to a builder instead
+fn blob(r: Row, i: i64) -> u8[]
+fn blob_into(r: Row, i: i64, out: u8[>..]&)
+fn is_null(r: Row, i: i64) -> bool
+fn column_type(r: Row, i: i64) -> i32  // INTEGER, FLOAT, TEXT, BLOB, NULL
 fn column_count(r: Row) -> i32
-fn column_name(r: Row, i: i32) -> u8[]
-fn value(r: Row, i: i32) -> Value
+fn column_name(r: Row, i: i64) -> u8[]
+fn value(r: Row, i: i64) -> Value..
 ```
 
 * **NULL** has no Goose value type (no `Option<T>`, stdlib_design §2.2).
@@ -360,9 +361,12 @@ eventually rolls back. The design detects this instead:
   block**. The only way that happens is the block having been left (or
   §7.1's mistake), so the layer **rolls the transaction back first** and
   then runs the call in autocommit, as the program meant.
-* `transaction(tx) { inner => … }` nests as a `SAVEPOINT`. Nested
-  transactions share the token, and the savepoint depth is checked when
-  each one ends.
+* `transaction(tx) { inner => … }` nests as a `SAVEPOINT`, with a token of
+  its own: each level has one. A call carrying an outer level's token while
+  inner levels are open means their blocks were left, so those savepoints
+  are rolled back and the outer transaction goes on. That covers an inner
+  transaction in a function of its own, which a `return` leaves while the
+  outer block continues.
 * `transaction` itself ends with the token it started with. If it is no
   longer current, the transaction was already rolled back underneath it,
   which is a misuse.
@@ -580,3 +584,52 @@ What the spike changed in the design:
    round trip.
 6. Add `samples/NN_sqlite_*.goose`: a small inventory tool, and the
    single-writer worker fed by a queue.
+
+---
+
+## 15. What implementing it changed
+
+* **`one` returns `bool, bool`**, whether there was a row and whether the
+  statement ran, and gives the row to its block. A generic function cannot
+  name its block's result type, so it has no `T` to return when there is
+  no row. A checked statement knows the type (`sqlite_checked.md`), and its
+  `one<T>` returns the row.
+* **Indices are `i64`** and `bind` returns `bool`, so `sqlite::int(r, i)`
+  takes a loop variable without a cast. The layer still takes `i32`.
+* **Each nesting level has its own token** (§7). An inner transaction left
+  early is rolled back alone when the outer block next uses the
+  connection.
+* **`transaction` is `BEGIN IMMEDIATE`**: a writer waits for the write lock
+  up front, under `busy_timeout`, instead of failing on its first write
+  when another connection got there first. `read_transaction` is the
+  deferred form, for a consistent snapshot. A transaction begun with SQL
+  (`exec(db, "begin")`) stays SQL's: `transaction()` inside one is a
+  misuse, since the tokens could not account for it.
+* **The layer keeps each connection's last failure itself.** A failed
+  `COMMIT` is rolled back so the connection is in autocommit after the
+  block whatever happened, and that rollback would otherwise replace
+  SQLite's message for the commit.
+* **A statement is one statement.** SQL with a second statement after the
+  first fails to prepare, with its offset, instead of SQLite's silent
+  ignoring of the rest. `exec_script` runs several.
+* **Nested `each` over the same SQL** gets a second cached statement, so
+  the cache may hold several copies of one SQL. Eviction drops the least
+  recently used statement that is not mid-step, and only then one that is.
+  That one is an `each` left early, or an outer `each` that has not stepped
+  for a cache's worth of statements, whose next step is then a misuse
+  rather than a wrong row.
+* **Builders.** The layer appends to a Goose `u8[>..]` the way the
+  runtime's `gs_bld_append` does, from its own declaration of the
+  header-and-stack pair (`gs_sql_builder`). `api_check.py` maps `u8[>..]&`
+  to it.
+* **The argument-count overloads are generated** by
+  `scripts/sqlite_arity.py` into a marked region of `stdlib/sqlite.goose`,
+  0 to 16 parameters for `exec`, `query`, `each`, `one` and the three
+  scalars. The test suite checks the region is current.
+* **Misuse messages name the layer's entry point**: `exec` on a closed
+  connection reports `sqlite::prepare`, the call that found the handle
+  stale. The abort's location is the module's `check()`, since the C side
+  has no Goose line to report.
+* **Platforms**: built and tested on macOS (Apple clang). The JIT does not
+  run on macOS in this repository (TinyCC has no system headers there), so
+  the TinyCC runs of these tests happen on the Linux and Windows CI.

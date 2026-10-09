@@ -85,6 +85,12 @@ calls it, so they are compiled and run as part of the test suite.
 |---|---|
 | [24_call_c](24_call_c.goose) | `extern fn` to libm and to a small C header (`call_c.h`): scalars, a slice, a struct through a reference, a string builder C appends to. Build with `goose --include call_c.h ...`. |
 
+## Databases
+
+| Sample | What it shows |
+|---|---|
+| [33_sqlite_inventory](33_sqlite_inventory.goose) | A shop's inventory with the `sqlite` module: a writer `thread_fn` owns the database and applies commands sent over a typed queue, while the main thread reports through a read-only connection of its own to the same WAL file. Parameters as arguments, rows built straight into structs by `query`, the scalar forms, SQLite's own errors as values, and a sale as a transaction that a `return` leaves early, rolled back at the connection's next use. Run with `sqlite_inventory < data/sqlite_inventory.stdin`; build with `cc ... @$(goose --sqlite-link cc)`. |
+
 ## Serialization
 
 | Sample | What it shows |

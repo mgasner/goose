@@ -114,7 +114,7 @@ def have_gfx(exe):
 
 def native_link(exe, cc, module):
     """The link inputs a program using a stdlib module with a native layer
-    (gfx, physics, ui) needs with this toolchain, as a list for CC.compile's
+    (gfx, physics, sqlite, ui) needs with this toolchain, as a list for CC.compile's
     `libs`: the response file cmake/<module>.cmake wrote. An empty list when
     the compiler was built without that module."""
     code, out, _ = run_capture([exe, f"--{module}-link", "msvc" if cc.style == "msvc" else "cc"])
@@ -137,10 +137,14 @@ def ui_link(exe, cc):
     return native_link(exe, cc, "ui")
 
 
+def sqlite_link(exe, cc):
+    return native_link(exe, cc, "sqlite")
+
+
 # The stdlib modules with a native layer, and the pattern of a program's own
 # import of one: the layers it links. The ui module draws through gfx, so a
 # program showing its ui imports both.
-NATIVE_MODULES = ("audio", "gfx", "physics", "ui")
+NATIVE_MODULES = ("audio", "gfx", "physics", "sqlite", "ui")
 
 
 def native_imports(text):
@@ -155,6 +159,7 @@ GFX_UNAVAILABLE = "built without SDL3"
 GFX_NO_DEVICE = "gfx: no GPU device"
 PHYSICS_UNAVAILABLE = "built without Box3D"
 UI_UNAVAILABLE = "built without Nuklear"
+SQLITE_UNAVAILABLE = "built without SQLite"
 AUDIO_UNAVAILABLE = "built without SDL3 audio"
 
 
@@ -167,6 +172,8 @@ def native_unavailable(module, err):
         return GFX_UNAVAILABLE in err or GFX_NO_DEVICE in err
     if module == "ui":
         return UI_UNAVAILABLE in err
+    if module == "sqlite":
+        return SQLITE_UNAVAILABLE in err
     return PHYSICS_UNAVAILABLE in err
 
 

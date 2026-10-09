@@ -395,7 +395,9 @@ which the in-process backend is built from, SDL3, which the `gfx` graphics
 module is built from, Box3D, which the `physics` module is built from, and
 Nuklear, which the `ui` module is built from. The compiler builds without
 these submodules, but the corresponding features are unavailable: JIT
-execution, graphics, physics, or windows of widgets.
+execution, graphics, physics, or windows of widgets. SQLite, which the
+`sqlite` module is built from, is vendored in `third_party/sqlite` and needs
+no submodule.
 
 ```bash
 git clone --recursive https://github.com/aardappel/goose
@@ -465,6 +467,12 @@ build/goose samples/28_physics_boxes.goose
 build/goose -o boxes.c samples/28_physics_boxes.goose && cc boxes.c goose_runtime.o -o boxes @$(build/goose --gfx-link cc) @$(build/goose --physics-link cc)
 ```
 
+A program using `sqlite` links what `goose --sqlite-link` names:
+
+```bash
+build/goose -o inventory.c samples/33_sqlite_inventory.goose && cc inventory.c goose_runtime.o -o inventory @$(build/goose --sqlite-link cc)
+```
+
 A program using `ui` links what `goose --ui-link` names, with the gfx one,
 since its windows are drawn through gfx:
 
@@ -503,7 +511,8 @@ code --install-extension vscode/goose-language.vsix
   on Box3D ([how it is built](docs/design/physics.md)), and `ui`, fonts,
   [text rendering and game HUDs](docs/stdlib.md#text-rendering-and-game-huds),
   windows and widgets on Nuklear, drawn through gfx
-  ([how it is built](docs/design/ui.md)).
+  ([how it is built](docs/design/ui.md)), and `sqlite`, SQLite databases
+  ([how it is built](docs/design/sqlite.md)).
 * [Benchmarks](bench/summary.md): the numbers, with the
   [full results](bench/results.md) and the [design](bench/design.md) behind them.
 * [Implementation notes](docs/implementation.md): how the compiler works, pass

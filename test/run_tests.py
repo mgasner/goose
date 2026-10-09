@@ -24,14 +24,16 @@ the backend refuses outright is counted as a skip, not a failure.
 
 The audio/ tests use the SDL3 PCM mixer without a device, the gfx/ tests
 use the SDL3 graphics module, the physics/ tests the Box3D
-physics module and the ui/ tests the Nuklear ui module. They always parse,
+physics module, the sqlite/ tests the SQLite module and the ui/ tests the
+Nuklear ui module. They always parse,
 typecheck and generate C; they build and run where the compiler has the
 native layers they use built in -- their category's, and any other they
 import, as a ui test drawing through gfx does -- linking what `goose
---audio-link`, `--gfx-link`, `--physics-link` or `--ui-link` names, and a machine without a
+--audio-link`, `--gfx-link`, `--physics-link`, `--sqlite-link` or `--ui-link` names, and a machine without a
 GPU device counts as a skip for gfx. A fixture there with `// error:`
 markers is a rejection test, as in errors_tc/. test/api_check.py checks
-stdlib/audio.goose, stdlib/gfx.goose, stdlib/physics.goose and stdlib/ui.goose against their C
+stdlib/audio.goose, stdlib/gfx.goose, stdlib/physics.goose, stdlib/sqlite.goose and
+stdlib/ui.goose against their C
 layers' own lists of functions, structs and constants.
 
 Profiles keep the CI coverage deliberate: baseline compares Goose/native C
@@ -1151,6 +1153,7 @@ def main():
     native = {"audio": tc.audio_link(exe, cc) if cc else [],
               "gfx": tc.gfx_link(exe, cc) if cc else [],
               "physics": tc.physics_link(exe, cc) if cc else [],
+              "sqlite": tc.sqlite_link(exe, cc) if cc else [],
               "ui": tc.ui_link(exe, cc) if cc else []}
     print(f"profile: {args.profile}; C backend: {cc.desc if cc else 'none'}; "
           f"JIT backend: {'TinyCC' if jit else 'none'}; " +
@@ -1350,6 +1353,17 @@ def main():
             r.ok(what)
     for module in native:
         r.show_task(api, module)
+
+    # stdlib/sqlite.goose's argument-count overloads are generated.
+    def sqlite_arity():
+        code, out, err = tc.run_capture([sys.executable, tc.REPO_ROOT / "scripts" / "sqlite_arity.py",
+                                         "--check"])
+        what = "sqlite-arity stdlib/sqlite.goose's generated overloads are up to date"
+        if code != 0:
+            r.fail(what, out + err)
+        else:
+            r.ok(what)
+    r.show_task(sqlite_arity)
 
     for f in tests:
         r.show(lambda f=f: fixtures[f].result().front)

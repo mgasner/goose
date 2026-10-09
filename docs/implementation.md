@@ -99,6 +99,7 @@ process started with (`ulimit -s`), which nothing in the executable sets.
 | `--gfx-link msvc\|cc` | print the response file of link inputs a program using `gfx` needs (`gfx.h`, `GfxLinkFile`) |
 | `--physics-link msvc\|cc` | the same for `physics` (`physics.h`, `PhysicsLinkFile`) |
 | `--ui-link msvc\|cc` | the same for `ui` (`ui.h`, `UiLinkFile`) |
+| `--sqlite-link msvc\|cc` | the same for `sqlite` (`sqlite.h`, `SqliteLinkFile`) |
 | `--multi-test a.goose b.goose ...` | compile each file in turn with the other flags, as a process of its own on it would (an `Ast` and a compile thread each, which is all the state a compile has), each file's output on both streams ending in a line `==== goose --multi-test: exit <code> <file>`; an `-o` names each file's C with `%` for its name. It runs no programs and writes no dump files. The test runner's batches of compiler runs (`docs/testing.md`) |
 | `--compile-shader f [--shader-source msl\|hlsl]` | hidden: what a shader compiles to, without a program around it |
 
@@ -3745,9 +3746,14 @@ the same way over Box3D, in `src/physics/`, its functions `gs_phys_*` and
 their JIT definitions `AddPhysicsSymbols`; `docs/design/physics.md`
 describes it. **The ui layer** behind `stdlib/ui.goose` is built the same
 way over Nuklear, in `src/ui/`, its functions `gs_ui_*` and their JIT
-definitions `AddUiSymbols`; `docs/design/ui.md` describes it. Codegen notes
-which of the three a program calls in `NativeLayers` (`utils.h`), by symbol
-prefix, for the JIT run to register.
+definitions `AddUiSymbols`; `docs/design/ui.md` describes it. **The sqlite
+layer** behind `stdlib/sqlite.goose` is built the same way over the SQLite
+amalgamation vendored in `third_party/sqlite`, in `src/sqlite/`, its
+functions `gs_sql_*` and their JIT definitions `AddSqliteSymbols`;
+`docs/design/sqlite.md` describes it. Unlike the others it may be called
+from a `thread_fn`, so `gs_sql_` is not among the prefixes the thread check
+rejects. Codegen notes which of the layers a program calls in `NativeLayers`
+(`utils.h`), by symbol prefix, for the JIT run to register.
 
 **Varints**: ULEB128 read/write/size, zigzag for signed positions, the
 one-byte fast path macros `GS_ULEB_READ`/`GS_ULEB_SIZE` for length prefixes

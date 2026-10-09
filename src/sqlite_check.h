@@ -123,8 +123,8 @@ using SqlErr = function<void(Line, const string &)>;
 using SqlStr = function<StrLit *(Node *)>;
 
 inline const char *no_sql_check_error =
-    "this compiler was built without SQLite, which checked SQL needs; restore "
-    "third_party/sqlite and reconfigure";
+    "this compiler was built without SQLite, which checked SQL needs; run "
+    "scripts/fetch_sqlite.py and reconfigure";
 
 // The directory part of a path, with its separator: where schema_file's
 // relative paths start.

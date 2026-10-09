@@ -152,8 +152,9 @@ where the ui drew solid color. Between them they call every function of the
 layer.
 
 The `sqlite/` tests exercise the SQLite module (`docs/design/sqlite.md`) in
-the same way, linking `goose --sqlite-link`. SQLite is vendored, so every
-compiler has the layer unless it was configured with `-DGOOSE_SQLITE=OFF`.
+the same way, linking `goose --sqlite-link`, where SQLite was fetched into
+`third_party/sqlite` (`scripts/fetch_sqlite.py`) before configuring; CI
+fetches it in both jobs.
 The tests run on in-memory databases, except `sqlite_threads` and
 `sqlite_images`, which use a file of a random name in the working directory
 and delete it. `run_tests.py` also checks that the argument-count overloads

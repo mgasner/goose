@@ -16,8 +16,8 @@ inline constexpr bool have_sqlite = false;
 
 // What running an sqlite program in this process says when the layer is not
 // built in. The test runners report it as a skip.
-inline const char *no_sqlite_error = "this compiler was built without SQLite; restore "
-                                     "third_party/sqlite and reconfigure";
+inline const char *no_sqlite_error = "this compiler was built without SQLite; run "
+                                     "scripts/fetch_sqlite.py and reconfigure";
 
 // The response file of link inputs a program built from the generated C
 // needs to use sqlite (cmake/sqlite.cmake), for --sqlite-link.

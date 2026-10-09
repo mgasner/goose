@@ -92,8 +92,10 @@ open question.
 
 * **SQLite** is the official amalgamation (`sqlite3.c`, `sqlite3.h`,
   public domain), vendored into `third_party/sqlite/` at a pinned release
-  with a README naming the version and its SHA3 checksum. SQLite is not
-  distributed as a git repository, so this is a copy and not a submodule.
+  by `scripts/fetch_sqlite.py`, which checks the download's SHA3-256. SQLite
+  is not distributed as a git repository a submodule could pin, and 9.5 MB
+  of generated C is not worth committing, so the two files are fetched and
+  ignored; `third_party/sqlite/README.md` is the instructions.
 * **`cmake/sqlite.cmake`** builds SQLite and the layer, `goose_sqlite`
   (`src/sqlite/`), into one static archive. As for gfx and physics, the
   archive is linked into `goose` for JIT runs, and its link inputs go to
@@ -111,8 +113,8 @@ open question.
   symbols with `tcc_add_symbol` (`AddSqliteSymbols`), and a compiler
   without the layer refuses the run. `gs_sql_` is **not** added to the
   `thread_fn` check in `src/typecheck.h` (§8).
-* **Opting out**: `-DGOOSE_SQLITE=OFF` or a checkout without
-  `third_party/sqlite`. Programs still typecheck and generate C, and only
+* **Opting out**: `-DGOOSE_SQLITE=OFF`, or a checkout where
+  `scripts/fetch_sqlite.py` has not been run. Programs still typecheck and generate C, and only
   running one in-process fails: "this compiler was built without SQLite".
 * **API check**: `src/sqlite/sqlite_api.h` lists every function once
   (`GS_SQL_API`) and every constant, and `test/api_check.py` checks

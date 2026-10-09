@@ -396,8 +396,10 @@ module is built from, Box3D, which the `physics` module is built from, and
 Nuklear, which the `ui` module is built from. The compiler builds without
 these submodules, but the corresponding features are unavailable: JIT
 execution, graphics, physics, or windows of widgets. SQLite, which the
-`sqlite` module is built from, is vendored in `third_party/sqlite` and needs
-no submodule.
+`sqlite` module and checked SQL are built from, is not a submodule:
+`python scripts/fetch_sqlite.py` downloads the pinned release into
+`third_party/sqlite`, checking its hash, before configuring
+([instructions](third_party/sqlite/README.md)).
 
 ```bash
 git clone --recursive https://github.com/aardappel/goose

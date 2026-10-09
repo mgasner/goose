@@ -1732,10 +1732,12 @@ elsewhere, and smaller, until the program sets a scale.
 ## sqlite
 
 SQLite databases: open one, run SQL with bound parameters, read rows straight
-into Goose values, transactions, backups and in-memory images. SQLite 3.54
-is vendored (`third_party/sqlite`) and built into the compiler, so unlike
-`gfx` and `physics` it needs no submodule; `-DGOOSE_SQLITE=OFF` leaves it
-out. A program using it links what `goose --sqlite-link msvc|cc` prints
+into Goose values, transactions, backups and in-memory images. Optional:
+SQLite 3.54 is vendored into `third_party/sqlite` by
+`python scripts/fetch_sqlite.py` before configuring
+(`third_party/sqlite/README.md`), and built into the compiler; without it,
+or with `-DGOOSE_SQLITE=OFF`, programs using `sqlite` still typecheck and
+generate C, and only running one in-process fails. A program using it links what `goose --sqlite-link msvc|cc` prints
 (`cc app.c -o app @<it>`). Everything is in namespace `sqlite`;
 `samples/33_sqlite_inventory.goose` is a complete program,
 `design/sqlite.md` how it works.

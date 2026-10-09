@@ -67,12 +67,13 @@ Test fixtures are grouped by category; `run_tests.py` stays at the root of `test
 | `goose_in_goose/` | A Goose-written compiler used as one multi-file bootstrap regression: build and run three generations, check a C fixed point and repeated self-checks of the stage-2 compiler, and compare JIT/native self-compilation. |
 | `gfx/` | The `gfx` graphics module: headless rendering, textures, compute, frames and input, a runtime misuse, shaders from files and from the program; shader and threading rejections (fixtures with `// error:` markers). The programs hold their shaders; the shader files beside them are for the file form of `embed_shader` and `--compile-shader`. `gfx/window/` is the windowed showcase, not part of the suite. |
 | `physics/` | The `physics` module: worlds, bodies, every kind of shape and geometry, all joint kinds, queries, events, recording and replay, a runtime misuse, and the threading rejection. |
+| `sqlite/` | The `sqlite` module: connections, every column type and NULL, failures and their codes, parameters at every argument count and as `Param` arrays, rows into structs, the statement cache, transactions nested and left early, threads sharing a WAL file, backups and images, and each kind of misuse aborting with its reason. Checked SQL: a schema and statements checked at compile time, rows into declared and generated structs, named parameters from structs, `Nullable` columns, schema files, migrations, the run-time failures of typed reads, drift, and one `sqlite_err_*` rejection fixture per diagnostic. |
 | `ui/` | The `ui` module: fonts, windows and layout, widgets, popups and menus, text editing, style, drawing and the input queries, charts, rendering and input through headless gfx, whether the keys and the mouse are the ui's, a runtime misuse, the layer's misuse messages, and the threading rejection. |
 | `errors/`, `errors_tc/` | Expected parser/resolver and semantic rejections. |
 | `expected/` | Shared output and runtime-diagnostic expectations. |
 | `run_tests.py` | The Python test runner. |
 | `compiler_roots.cpp` | Root-set join laws, feedback on weakening, order-independent equality and the deliberate comparison projections; compiled and run in both native profiles. |
-| `api_check.py` | Checks `stdlib/gfx.goose`, `stdlib/physics.goose` and `stdlib/ui.goose` against their C layers' headers; run by `run_tests.py`. |
+| `api_check.py` | Checks `stdlib/gfx.goose`, `stdlib/physics.goose`, `stdlib/sqlite.goose` and `stdlib/ui.goose` against their C layers' headers; run by `run_tests.py`. |
 
 Positive fixtures are discovered one level below `test/`; nested import helpers
 run through their entry programs. `goose_in_goose/` is handled separately as one
@@ -149,6 +150,19 @@ context with input of their own and print what comes back and what was
 drawn; `ui_render` draws through headless gfx and reads back pixels only
 where the ui drew solid color. Between them they call every function of the
 layer.
+
+The `sqlite/` tests exercise the SQLite module (`docs/design/sqlite.md`) in
+the same way, linking `goose --sqlite-link`, where SQLite was fetched into
+`third_party/sqlite` (`scripts/fetch_sqlite.py`) before configuring; CI
+fetches it in both jobs.
+The tests run on in-memory databases, except `sqlite_threads` and
+`sqlite_images`, which use a file of a random name in the working directory
+and delete it. `run_tests.py` also checks that the argument-count overloads
+of `stdlib/sqlite.goose` are what `scripts/sqlite_arity.py` generates, and
+compares `goose --sqlite-types` on `sqlite_checked.goose` with
+`expected/sqlite_types.out`. The checked-SQL tests (those declaring a
+`sqlite::schema`) need the compiler's own SQLite and are skipped, with a
+note, by a compiler built without it.
 
 `api_check.py` compares the functions, structs, and constants in
 `stdlib/gfx.goose`, `stdlib/physics.goose` and `stdlib/ui.goose` with their C

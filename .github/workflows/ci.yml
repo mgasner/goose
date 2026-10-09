@@ -62,6 +62,11 @@ jobs:
       # CMAKE_BUILD_TYPE is what the single-config generators read and --config
       # is what the Visual Studio generator reads; passing both builds Debug
       # (asserts on) everywhere.
+      # SQLite, which the sqlite module and checked SQL are built from, is
+      # fetched rather than committed (third_party/sqlite/README.md).
+      - name: Fetch SQLite
+        run: python scripts/fetch_sqlite.py
+
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
 
@@ -98,6 +103,9 @@ jobs:
       # useful sanitizer stacks and compiler build time modest. Generated C
       # disables only alignment checks because Goose deliberately packs data;
       # the compiler itself retains the full undefined-behavior checks.
+      - name: Fetch SQLite
+        run: python scripts/fetch_sqlite.py
+
       - name: Configure instrumented compiler
         run: >-
           cmake -S . -B build-sanitize -DCMAKE_BUILD_TYPE=Debug

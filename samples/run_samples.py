@@ -92,6 +92,7 @@ def main():
     native = {"audio": tc.audio_link(exe, cc) if cc else [],
               "gfx": tc.gfx_link(exe, cc) if cc else [],
               "physics": tc.physics_link(exe, cc) if cc else [],
+              "sqlite": tc.sqlite_link(exe, cc) if cc else [],
               "ui": tc.ui_link(exe, cc) if cc else []}
     gpulock = threading.BoundedSemaphore(args.gpu_jobs) if args.gpu_jobs else None
 

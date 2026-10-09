@@ -1,0 +1,15 @@
+add widget 10 2.50
+add gadget 3 12.00
+add gizmo 25 0.75
+add widget 1 1.00
+sell widget 4
+sell gadget 5
+sell sprocket 1
+restock gadget 5
+sell gadget 5
+sell gizmo 20
+report
+restock sprocket 3
+sell widget 6
+sell widget 1
+report

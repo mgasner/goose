@@ -1,0 +1,15 @@
+commit: true count 2
+rollback: false count 2
+in transaction: false
+  inside: 4
+inner: false
+  after inner: 3 in transaction true
+inner 2: true
+nested committed, count 4
+left early: in transaction false count 4
+not left: count 6
+after inner left early: [40, 41]
+  a true b false: NOT NULL constraint failed: u.v
+committed false, rows in u 0
+read: 8 in transaction true
+sql transaction rolled back, count 8

@@ -1,0 +1,17 @@
+open true, schema version 2
+ids 1 2
+rows true
+  1 alice (no email) 9.25
+  2 bob bob@example.com 7.0
+one: true bob
+none: false [] false
+  alice: 2 posts, latest hello
+  bob: 1 posts, latest bob's
+  carol: 0 posts, latest -
+  brief 1 alice 9.25 -
+  brief 2 bob 7.0 -
+  brief 3 carol 1.5 -
+name bytes 13
+total 17.75 true
+scalar 1
+  each alice

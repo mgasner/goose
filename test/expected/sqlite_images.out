@@ -1,0 +1,16 @@
+backup true
+copy: a=1,b=2,c=3
+removed true
+backup to a directory that is not there: false unable to open database file
+serialize true true true
+deserialize true
+other: 6
+other grew: 10, the original: 6
+garbage: false true
+blob 1: valid true, 3 items
+  1 one
+  2 two
+  3 three
+blob 2: valid false, 0 items
+interrupted after 3: ran false, code true interrupted
+usable after: 3

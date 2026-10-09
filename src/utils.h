@@ -78,6 +78,7 @@ struct NativeLayers {
     bool audio = false;
     bool gfx = false;
     bool physics = false;
+    bool sqlite = false;
     bool ui = false;
 };
 

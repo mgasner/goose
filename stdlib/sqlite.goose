@@ -149,6 +149,7 @@ extern "gs_sql_backup" fn backup_raw(db: u64, token: i64, path: const u8[:]) -> 
 extern "gs_sql_serialize" fn serialize_raw(db: u64, token: i64, out: u8[>..]&) -> bool;
 extern "gs_sql_deserialize" fn deserialize_raw(db: u64, token: i64, image: const u8[:]) -> bool;
 extern "gs_sql_forget" fn forget_raw(db: u64, sql: const u8[:]);
+extern "gs_sql_fail" fn fail_raw(db: u64, code: i32, msg: const u8[:]);
 extern "gs_sql_cached_count" fn cached_count_raw(db: u64) -> i64;
 
 extern "gs_sql_begin" fn begin_raw(db: u64, token: i64, immediate: bool) -> i64;
@@ -176,6 +177,8 @@ extern "gs_sql_column_text" fn column_text(st: u64, i: i32, out: u8[>..]&);
 extern "gs_sql_column_blob" fn column_blob(st: u64, i: i32, out: u8[>..]&);
 extern "gs_sql_column_name" fn column_name_into(st: u64, i: i32, out: u8[>..]&);
 extern "gs_sql_column_decltype" fn column_decltype_into(st: u64, i: i32, out: u8[>..]&);
+extern "gs_sql_fail_row" fn fail_row_raw(st: u64, i: i32, msg: const u8[:]);
+extern "gs_sql_row_failed" fn row_failed_raw(st: u64) -> bool;
 
 // --- the library -------------------------------------------------------------------
 
@@ -583,12 +586,18 @@ fn collect<F>(s: Stmt) {
     check();
     while rc == ROW {
         out.push(F(Row { h: s.h }));
+        // A value the row's type cannot hold (a checked statement's typed
+        // read) ends the rows there. The row is already built where it
+        // belongs, so it stays, the field that failed left zero or empty:
+        // false says the last row is that one.
+        if row_failed_raw(s.h) { break; }
         rc = step_raw(s.h);
         check();
     }
+    let failed = row_failed_raw(s.h);
     reset_raw(s.h);
     check();
-    return out, rc == DONE;
+    return out, rc == DONE && !failed;
 }
 
 // Each row to F, and whether the statement ran to its end.
@@ -597,12 +606,14 @@ fn each_row<F>(s: Stmt) -> bool {
     check();
     while rc == ROW {
         F(Row { h: s.h });
+        if row_failed_raw(s.h) { break; }
         rc = step_raw(s.h);
         check();
     }
+    let failed = row_failed_raw(s.h);
     reset_raw(s.h);
     check();
-    return rc == DONE;
+    return rc == DONE && !failed;
 }
 
 // The first row to F, if there is one: whether there was, and whether the
@@ -611,9 +622,10 @@ fn first_row<F>(s: Stmt) -> bool, bool {
     let rc = step_raw(s.h);
     check();
     if rc == ROW { F(Row { h: s.h }); }
+    let failed = row_failed_raw(s.h);
     reset_raw(s.h);
     check();
-    return rc == ROW, rc == ROW || rc == DONE;
+    return rc == ROW && !failed, (rc == ROW || rc == DONE) && !failed;
 }
 
 fn bind_all(s: Stmt, ps: const Param[:]) {
@@ -644,12 +656,165 @@ fn one_params<F>(db: Db, sql: const u8[:], ps: const Param[:]) -> bool, bool {
     return first_row(s, F);
 }
 
+// The first row through F as a value: F gets the row and whether there is
+// one, and builds the value either way, so a type with no default still has
+// one when there is no row. Checked statements' one<T> lowers to this.
+fn first_value<F>(s: Stmt) {
+    let rc = if s.h != 0 { step_raw(s.h) } else { ERROR };
+    check();
+    let v = F(Row { h: s.h }, rc == ROW);
+    var failed = false;
+    if s.h != 0 {
+        failed = row_failed_raw(s.h);
+        reset_raw(s.h);
+        check();
+    }
+    return v, rc == ROW && !failed;
+}
+
+// --- checked SQL ---------------------------------------------------------------------------
+// docs/design/sqlite_checked.md. sqlite::schema(...) and sqlite::statement(...)
+// are compile-time builtins: the compiler applies the schema's migrations to
+// a database of its own, prepares each statement against it, and checks the
+// calls that use them. They leave these values behind.
+
+// A schema declared with sqlite::schema(migration, ...): which one, in the
+// program's list.
+struct Schema { id: i64 }
+// A statement declared with sqlite::statement(SCHEMA, sql).
+struct Statement { id: i64 }
+fn schema_of(id: i64) -> Schema { Schema { id: id } }
+fn statement_of(id: i64) -> Statement { Statement { id: id } }
+
+// A value a column may hold or not: what a field needs for a column that
+// can be NULL.
+// `has` is false for NULL, and `v` then holds the type's default.
+struct Nullable<T> { has: bool = false, v: T }
+fn none<T>() -> Nullable<T> { return Nullable<T> { .. }; }
+fn some<T>(v: T) -> Nullable<T> { return Nullable<T> { has: true, v: v }; }
+// Text, as a field holds it: sqlite::some("x") is a Nullable<u8[]>.
+fn some(v: const u8[:]) -> Nullable<u8[]> { return Nullable<u8[]> { has: true, v: v }; }
+fn bind<T>(s: Stmt, i: i64, v: const Nullable<T>&) -> bool {
+    if !v.has { return bind(s, i, Null {}); }
+    return bind(s, i, v.v);
+}
+
+// What the compiler found a checked statement to be, which open() compares
+// with what the database file makes of it.
+struct Expected { sql: const u8[:], params: i64, decltypes: const u8[:] }
+
+// The schema's version a database is at: PRAGMA user_version.
+fn user_version(db: Db) -> i64 {
+    let v, ok = scalar_int(db, "pragma user_version");
+    return v;
+}
+
+// Applies the migrations a database has not had, each in a transaction with
+// the version it brings the database to, then checks that every statement
+// the program was compiled with prepares to what the compiler saw.
+fn migrate_schema(db: Db, migrations: const u8[:][:], expected: const Expected[:]) -> bool {
+    let at = user_version(db);
+    if at > migrations.len {
+        fail_raw(db.h, SCHEMA, str("the database is at schema version ", at,
+                                    ", newer than the ", migrations.len, " this program knows"));
+        return false;
+    }
+    for i in at..migrations.len {
+        let ok = transaction(db) { db =>
+            exec_script(db, migrations[i]) && exec_script(db, str("pragma user_version = ", i + 1))
+        };
+        if !ok { return false; }
+    }
+    for e in expected {
+        if !matches(db, e) { return false; }
+    }
+    return true;
+}
+
+// Whether the database prepares a statement to what the compiler saw: its
+// parameters, its columns and their declared types.
+fn matches(db: Db, e: const Expected&) -> bool {
+    let s, ok = prepare(db, e.sql);
+    if !ok {
+        fail_raw(db.h, SCHEMA, str("the database does not match the program: ", error(db), ": ", e.sql));
+        return false;
+    }
+    var have: u8[>..] = [];
+    for i in column_count(s) {
+        if i > 0 { have.push(','); }
+        format(have, column_decltype(s, i));
+    }
+    if param_count(s) != e.params || have != e.decltypes {
+        fail_raw(db.h, SCHEMA, str("the database does not match the program: columns (", have,
+                                    ") where it was compiled for (", e.decltypes, "): ", e.sql));
+        return false;
+    }
+    return true;
+}
+
+fn open_schema(path: const u8[:], def: OpenDef, migrations: const u8[:][:], expected: const Expected[:]) -> Db, bool {
+    let db, ok = open(path, def);
+    if !ok { return db, false; }
+    return db, migrate_schema(db, migrations, expected);
+}
+
+// Reading a column into a field narrower than SQLite's value: a value that
+// does not fit is the row's failure, which stops the rows being read, not
+// an abort, since the data is not the program's.
+fn fail_row(r: Row, i: i64, msg: const u8[:]) {
+    fail_row_raw(r.h, i as i32, msg);
+    check();
+}
+fn int_in(r: Row, i: i64, lo: i64, hi: i64, what: const u8[:]) -> i64 {
+    let v = int(r, i);
+    if v < lo || v > hi {
+        fail_row(r, i, str(v, " does not fit ", what));
+        return 0;
+    }
+    return v;
+}
+fn read_i8(r: Row, i: i64) -> i8 { int_in(r, i, -128, 127, "i8") as i8 }
+fn read_i16(r: Row, i: i64) -> i16 { int_in(r, i, -32768, 32767, "i16") as i16 }
+fn read_i32(r: Row, i: i64) -> i32 { int_in(r, i, -2147483648, 2147483647, "i32") as i32 }
+fn read_u8(r: Row, i: i64) -> u8 { int_in(r, i, 0, 255, "u8") as u8 }
+fn read_u16(r: Row, i: i64) -> u16 { int_in(r, i, 0, 65535, "u16") as u16 }
+fn read_u32(r: Row, i: i64) -> u32 { int_in(r, i, 0, 4294967295, "u32") as u32 }
+fn read_u64(r: Row, i: i64) -> u64 { int_in(r, i, 0, 9223372036854775807, "u64") as u64 }
+fn read_bool(r: Row, i: i64) -> bool { int_in(r, i, 0, 1, "bool") != 0 }
+fn read_f32(r: Row, i: i64) -> f32 { real(r, i) as f32 }
+// Text or a blob for a field of capacity `cap`.
+fn text_cap(r: Row, i: i64, cap: i64) -> u8[] {
+    if byte_count(r, i) > cap {
+        fail_row(r, i, str(byte_count(r, i), " bytes do not fit a u8[..", cap, "]"));
+        var none: u8[>..] = [];
+        return none;
+    }
+    return text(r, i);
+}
+fn blob_cap(r: Row, i: i64, cap: i64) -> u8[] {
+    if byte_count(r, i) > cap {
+        fail_row(r, i, str(byte_count(r, i), " bytes do not fit a u8[..", cap, "]"));
+        var none: u8[>..] = [];
+        return none;
+    }
+    return blob(r, i);
+}
+// A field of the program's own type, through its `sqlite::read` overload:
+// fn sqlite::read(r: sqlite::Row, i: i64, out: T&) -> bool.
+fn read_value<T>(r: Row, i: i64) -> T {
+    var v = default<T>();
+    if !read(r, i, v) { fail_row(r, i, "sqlite::read refused the value"); }
+    return v;
+}
+
 // --- generated by scripts/sqlite_arity.py: begin ---
 // exec(db, sql, args...) -> bool: runs a statement, ignoring any rows.
 // query(db, sql, args...) { r => T } -> T[>..], bool: every row, built by the block.
 // each(db, sql, args...) { r => ... } -> bool: each row to the block.
 // one(db, sql, args...) { r => ... } -> bool, bool: the first row to the block;
 //     whether there was one, and whether the statement ran.
+// one_of(db, sql, args...) { r, has => T } -> T, bool: the first row as a value,
+//     which the block builds with or without a row; what one<T> lowers to.
 // scalar_int / scalar_real / scalar_text(db, sql, args...) -> v, bool: the first
 //     column of the first row; false for no row or a failure.
 
@@ -675,6 +840,11 @@ fn one<F>(db: Db, sql: const u8[:]) -> bool, bool {
     let s = statement_for(db, sql, 0);
     if s.h == 0 { return false, false; }
     return first_row(s, F);
+}
+
+fn one_of<F>(db: Db, sql: const u8[:]) {
+    let s = statement_for(db, sql, 0);
+    return first_value(s, F);
 }
 
 fn scalar_int(db: Db, sql: const u8[:]) -> i64, bool {
@@ -729,6 +899,14 @@ fn one<A1, F>(db: Db, sql: const u8[:], a1: A1) -> bool, bool {
     if s.h == 0 { return false, false; }
     bind(s, 1, a1);
     return first_row(s, F);
+}
+
+fn one_of<A1, F>(db: Db, sql: const u8[:], a1: A1) {
+    let s = statement_for(db, sql, 1);
+    if s.h != 0 {
+        bind(s, 1, a1);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1>(db: Db, sql: const u8[:], a1: A1) -> i64, bool {
@@ -790,6 +968,15 @@ fn one<A1, A2, F>(db: Db, sql: const u8[:], a1: A1, a2: A2) -> bool, bool {
     bind(s, 1, a1);
     bind(s, 2, a2);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, F>(db: Db, sql: const u8[:], a1: A1, a2: A2) {
+    let s = statement_for(db, sql, 2);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2>(db: Db, sql: const u8[:], a1: A1, a2: A2) -> i64, bool {
@@ -858,6 +1045,16 @@ fn one<A1, A2, A3, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3) -> bool,
     bind(s, 2, a2);
     bind(s, 3, a3);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, A3, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3) {
+    let s = statement_for(db, sql, 3);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+        bind(s, 3, a3);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2, A3>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3) -> i64, bool {
@@ -933,6 +1130,17 @@ fn one<A1, A2, A3, A4, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: 
     bind(s, 3, a3);
     bind(s, 4, a4);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, A3, A4, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4) {
+    let s = statement_for(db, sql, 4);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+        bind(s, 3, a3);
+        bind(s, 4, a4);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2, A3, A4>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4) -> i64, bool {
@@ -1015,6 +1223,18 @@ fn one<A1, A2, A3, A4, A5, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, 
     bind(s, 4, a4);
     bind(s, 5, a5);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, A3, A4, A5, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5) {
+    let s = statement_for(db, sql, 5);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+        bind(s, 3, a3);
+        bind(s, 4, a4);
+        bind(s, 5, a5);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2, A3, A4, A5>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5) -> i64, bool {
@@ -1104,6 +1324,19 @@ fn one<A1, A2, A3, A4, A5, A6, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: 
     bind(s, 5, a5);
     bind(s, 6, a6);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, A3, A4, A5, A6, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6) {
+    let s = statement_for(db, sql, 6);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+        bind(s, 3, a3);
+        bind(s, 4, a4);
+        bind(s, 5, a5);
+        bind(s, 6, a6);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2, A3, A4, A5, A6>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6) -> i64, bool {
@@ -1200,6 +1433,20 @@ fn one<A1, A2, A3, A4, A5, A6, A7, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, 
     bind(s, 6, a6);
     bind(s, 7, a7);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, A3, A4, A5, A6, A7, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7) {
+    let s = statement_for(db, sql, 7);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+        bind(s, 3, a3);
+        bind(s, 4, a4);
+        bind(s, 5, a5);
+        bind(s, 6, a6);
+        bind(s, 7, a7);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2, A3, A4, A5, A6, A7>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7) -> i64, bool {
@@ -1303,6 +1550,21 @@ fn one<A1, A2, A3, A4, A5, A6, A7, A8, F>(db: Db, sql: const u8[:], a1: A1, a2: 
     bind(s, 7, a7);
     bind(s, 8, a8);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, A3, A4, A5, A6, A7, A8, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8) {
+    let s = statement_for(db, sql, 8);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+        bind(s, 3, a3);
+        bind(s, 4, a4);
+        bind(s, 5, a5);
+        bind(s, 6, a6);
+        bind(s, 7, a7);
+        bind(s, 8, a8);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2, A3, A4, A5, A6, A7, A8>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8) -> i64, bool {
@@ -1413,6 +1675,22 @@ fn one<A1, A2, A3, A4, A5, A6, A7, A8, A9, F>(db: Db, sql: const u8[:], a1: A1, 
     bind(s, 8, a8);
     bind(s, 9, a9);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, A3, A4, A5, A6, A7, A8, A9, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9) {
+    let s = statement_for(db, sql, 9);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+        bind(s, 3, a3);
+        bind(s, 4, a4);
+        bind(s, 5, a5);
+        bind(s, 6, a6);
+        bind(s, 7, a7);
+        bind(s, 8, a8);
+        bind(s, 9, a9);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2, A3, A4, A5, A6, A7, A8, A9>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9) -> i64, bool {
@@ -1530,6 +1808,23 @@ fn one<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, F>(db: Db, sql: const u8[:], a1:
     bind(s, 9, a9);
     bind(s, 10, a10);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9, a10: A10) {
+    let s = statement_for(db, sql, 10);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+        bind(s, 3, a3);
+        bind(s, 4, a4);
+        bind(s, 5, a5);
+        bind(s, 6, a6);
+        bind(s, 7, a7);
+        bind(s, 8, a8);
+        bind(s, 9, a9);
+        bind(s, 10, a10);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9, a10: A10) -> i64, bool {
@@ -1654,6 +1949,24 @@ fn one<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, F>(db: Db, sql: const u8[:]
     bind(s, 10, a10);
     bind(s, 11, a11);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9, a10: A10, a11: A11) {
+    let s = statement_for(db, sql, 11);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+        bind(s, 3, a3);
+        bind(s, 4, a4);
+        bind(s, 5, a5);
+        bind(s, 6, a6);
+        bind(s, 7, a7);
+        bind(s, 8, a8);
+        bind(s, 9, a9);
+        bind(s, 10, a10);
+        bind(s, 11, a11);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9, a10: A10, a11: A11) -> i64, bool {
@@ -1785,6 +2098,25 @@ fn one<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, F>(db: Db, sql: const 
     bind(s, 11, a11);
     bind(s, 12, a12);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9, a10: A10, a11: A11, a12: A12) {
+    let s = statement_for(db, sql, 12);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+        bind(s, 3, a3);
+        bind(s, 4, a4);
+        bind(s, 5, a5);
+        bind(s, 6, a6);
+        bind(s, 7, a7);
+        bind(s, 8, a8);
+        bind(s, 9, a9);
+        bind(s, 10, a10);
+        bind(s, 11, a11);
+        bind(s, 12, a12);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9, a10: A10, a11: A11, a12: A12) -> i64, bool {
@@ -1923,6 +2255,26 @@ fn one<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, F>(db: Db, sql: c
     bind(s, 12, a12);
     bind(s, 13, a13);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9, a10: A10, a11: A11, a12: A12, a13: A13) {
+    let s = statement_for(db, sql, 13);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+        bind(s, 3, a3);
+        bind(s, 4, a4);
+        bind(s, 5, a5);
+        bind(s, 6, a6);
+        bind(s, 7, a7);
+        bind(s, 8, a8);
+        bind(s, 9, a9);
+        bind(s, 10, a10);
+        bind(s, 11, a11);
+        bind(s, 12, a12);
+        bind(s, 13, a13);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9, a10: A10, a11: A11, a12: A12, a13: A13) -> i64, bool {
@@ -2068,6 +2420,27 @@ fn one<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, F>(db: Db, s
     bind(s, 13, a13);
     bind(s, 14, a14);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9, a10: A10, a11: A11, a12: A12, a13: A13, a14: A14) {
+    let s = statement_for(db, sql, 14);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+        bind(s, 3, a3);
+        bind(s, 4, a4);
+        bind(s, 5, a5);
+        bind(s, 6, a6);
+        bind(s, 7, a7);
+        bind(s, 8, a8);
+        bind(s, 9, a9);
+        bind(s, 10, a10);
+        bind(s, 11, a11);
+        bind(s, 12, a12);
+        bind(s, 13, a13);
+        bind(s, 14, a14);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9, a10: A10, a11: A11, a12: A12, a13: A13, a14: A14) -> i64, bool {
@@ -2220,6 +2593,28 @@ fn one<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, F>(db: 
     bind(s, 14, a14);
     bind(s, 15, a15);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9, a10: A10, a11: A11, a12: A12, a13: A13, a14: A14, a15: A15) {
+    let s = statement_for(db, sql, 15);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+        bind(s, 3, a3);
+        bind(s, 4, a4);
+        bind(s, 5, a5);
+        bind(s, 6, a6);
+        bind(s, 7, a7);
+        bind(s, 8, a8);
+        bind(s, 9, a9);
+        bind(s, 10, a10);
+        bind(s, 11, a11);
+        bind(s, 12, a12);
+        bind(s, 13, a13);
+        bind(s, 14, a14);
+        bind(s, 15, a15);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9, a10: A10, a11: A11, a12: A12, a13: A13, a14: A14, a15: A15) -> i64, bool {
@@ -2379,6 +2774,29 @@ fn one<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, F>
     bind(s, 15, a15);
     bind(s, 16, a16);
     return first_row(s, F);
+}
+
+fn one_of<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, F>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9, a10: A10, a11: A11, a12: A12, a13: A13, a14: A14, a15: A15, a16: A16) {
+    let s = statement_for(db, sql, 16);
+    if s.h != 0 {
+        bind(s, 1, a1);
+        bind(s, 2, a2);
+        bind(s, 3, a3);
+        bind(s, 4, a4);
+        bind(s, 5, a5);
+        bind(s, 6, a6);
+        bind(s, 7, a7);
+        bind(s, 8, a8);
+        bind(s, 9, a9);
+        bind(s, 10, a10);
+        bind(s, 11, a11);
+        bind(s, 12, a12);
+        bind(s, 13, a13);
+        bind(s, 14, a14);
+        bind(s, 15, a15);
+        bind(s, 16, a16);
+    }
+    return first_value(s, F);
 }
 
 fn scalar_int<A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16>(db: Db, sql: const u8[:], a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8, a9: A9, a10: A10, a11: A11, a12: A12, a13: A13, a14: A14, a15: A15, a16: A16) -> i64, bool {

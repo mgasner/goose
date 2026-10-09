@@ -1,8 +1,10 @@
 # Checked SQL — Design
 
-Status: exploration. It extends `docs/design/sqlite.md` (open question 3
-there), and nothing here is implemented. §8 records a probe of what SQLite
-itself can tell a compiler about a query, which every claim below rests on.
+Status: implemented, as described here, all three layers. It extends
+`docs/design/sqlite.md` (open question 3 there); `docs/stdlib.md` is the
+reference. §8 records the probe of what SQLite itself can tell a compiler
+about a query, which the design rests on, and §13 what implementing it
+changed.
 
 The unchecked API of `sqlite.md` finds a misspelled column, a wrong
 parameter count or a row read into the wrong field when the statement runs.
@@ -72,7 +74,7 @@ let SCHEMA = sqlite::schema("""
 let users_above = sqlite::statement(SCHEMA, "select id, name, email, score from users where score > ?");
 let add_user    = sqlite::statement(SCHEMA, "insert into users(name, email) values (:name, :email) returning id");
 let post_counts = sqlite::statement(SCHEMA, """
-    select u.name, count(p.id) as "posts!" from users u
+    select u.name as "name!", count(p.id) as "posts: integer!" from users u
     left join posts p on p.user_id = u.id group by u.id
     """);
 
@@ -84,7 +86,7 @@ fn main() {
     let db, ok = sqlite::open("app.db", SCHEMA);       // migrates, then verifies (§7)
     if !ok { abort(str("open: ", sqlite::error(db))); }
 
-    let id, added = sqlite::one<i64>(db, add_user, NewUser { name: "alice", email: sqlite::null() });
+    let id, added = sqlite::one<i64>(db, add_user, NewUser { name: "alice", email: sqlite::none<u8[]>() });
     let users, ok2 = sqlite::rows<User>(db, users_above, 5.0);
     let counts, ok3 = sqlite::rows<PostCount>(db, post_counts);
     for c in counts { print(c.name, ": ", c.posts); }
@@ -95,14 +97,16 @@ What the compiler rejects in it:
 
 ```
 app.goose:16: error: sqlite: no such column: nam
-    let users_above = sqlite::statement(SCHEMA, "select id, nam, email ...
-                                                           ^
-app.goose:31: error: users_above takes 1 parameter, given 2
-app.goose:31: error: sqlite::rows<User>: column email (users.email) can be NULL;
-    declare the field as sqlite::Nullable<u8[]>, or select coalesce(email, '') as email
-app.goose:31: error: sqlite::rows<User>: User has no field for column score
-    (fields match columns by name; rename the field or alias the column)
+app.goose:31: error: sqlite::rows: users_above takes 1 parameter, given 2
+app.goose:31: error: sqlite::rows: column email can be NULL (users.email); declare field
+    email as sqlite::Nullable<u8[]>, or select coalesce(...) as "email!" if it never is
+app.goose:31: error: sqlite::rows: User has no field for column score (fields match columns
+    by name: rename the field, alias the column, or leave it out of the select); a struct
+    that matches it: struct User { id: i64, name: u8[], email: sqlite::Nullable<u8[]>, score: f64 }
 ```
+
+(Each is a fixture in `test/sqlite/sqlite_err_*.goose`; the lines are wrapped
+here.)
 
 ---
 
@@ -230,9 +234,10 @@ Goose has no optional scalar (stdlib_design §2.2), so a column that can be
 NULL needs a field that can say so:
 
 ```goose
-struct Nullable<T> { null: bool = true, v: T }
-fn null<T>() -> Nullable<T>
+struct Nullable<T> { has: bool = false, v: T }    // v is T's default when !has
+fn none<T>() -> Nullable<T>
 fn some<T>(v: T) -> Nullable<T>
+fn some(v: const u8[:]) -> Nullable<u8[]>         // text, as a field holds it
 ```
 
 A non-`Nullable` field for a column that can be NULL is a compile error,
@@ -395,22 +400,38 @@ Conclusions:
 
 ## 10. What the compiler needs
 
-* **SQLite in the compiler at check time.** It is linked already for JIT
-  runs. A compiler built without it (`GOOSE_SQLITE=OFF`) rejects
-  `sqlite::schema` and `sqlite::statement` with "this compiler was built
-  without SQLite, which checked statements need". It cannot skip the
-  check, since `rows<T>`'s decoder comes from it.
-* **Builtins in a library namespace.** `embed_shader` is a global builtin.
-  These belong to `sqlite::`, and only a program that imports the module
-  should see them. The mechanism (a builtin declared in
-  `stdlib/sqlite.goose`, or global names `sql_schema` / `sql_statement`
-  re-exported) is open (§11).
-* **A per-program table of checked statements**, emitted as static data
-  for §7.
-* **Structural expansion** of `rows<T>`, `one<T>`, `each<T>` and struct
-  binding over `T`'s fields, in the checker that already does it for
-  `format` and `from_bytes`.
-* **(Layer 3 only)** a type expression computed by a builtin.
+As built:
+
+* **SQLite in the compiler at check time** (`src/sqlite_check.h`). It is
+  linked already for JIT runs. The catalog of schemas and statements is the
+  `Ast`'s, filled from the declarations as parsed, so a statement may be
+  checked before or after its schema, and whichever pass needs one first
+  prepares it. A compiler built without SQLite (`GOOSE_SQLITE=OFF`) rejects
+  checked SQL with "this compiler was built without SQLite, which checked
+  SQL needs", and the test runner skips those tests there. It cannot skip
+  the check, since `rows<T>`'s decoder comes from it.
+* **Lowering, not builtins** (`src/typecheck_sqlite.h`). The checker, about
+  to resolve a call named `sqlite::…`, rewrites a checked one in place into
+  the library call it stands for, then resolves that. `rows<T>` becomes
+  `query(db, "<sql>", args…) { r => T { f: read(r, i), … } }`, `one<T>`
+  becomes `one_of(…) { r, has => if has { T {…} } else { T's default } }`,
+  and `each<T>` puts a `let` of the decoded row in front of the program's
+  block. The declarations become `schema_of(K)` and `statement_of(N)`, and
+  `open(path, S)` becomes `open_schema(path, def, migrations, expected)`
+  with the migrations and every statement's expected shape as literals.
+  Everything after the checker sees ordinary calls: no pass changed.
+* **No per-program table** is needed for §7. The expectations are literals
+  in the `open` and `migrate` calls, which the lowering knows by scanning
+  the program's globals for statements of that schema.
+* **Struct binding** projects each named parameter's field. From a struct
+  literal, its initializers are used directly. From a variable or a field
+  path, `arg.field` is read. Another expression has to be bound to a local
+  first.
+* **Row types** (`row_type`) are made before name resolution: the parser
+  keeps `type X = sqlite::row_type(q);` as written (so `--dump` and the
+  roundtrip test see it), and resolution first prepares `q`, writes
+  `struct X { … }` as source and parses it into the program. No type is
+  computed by the checker.
 
 The cost at compile time is one in-memory database per schema and one
 prepare per statement, small next to compiling the program's C.
@@ -419,9 +440,10 @@ prepare per statement, small next to compiling the program's C.
 
 ## 11. Open questions
 
-1. **Namespaced builtins.** How a library declares compile-time builtins
-   only its importers see. `embed_shader` should move to `gfx::` by the
-   same mechanism.
+1. **Namespaced builtins.** Not needed after all: the lowering recognizes
+   `sqlite::` calls by their qualified name before it resolves them (§10),
+   and only a program that imports the module can name them. A general
+   mechanism, for `embed_shader` to move to `gfx::`, is still open.
 2. **Nullable's spelling.** `sqlite::Nullable<T>` is a value type the
    standard library has so far declined to have (stdlib_design §2.2). It
    could be justified here because NULL is data, not absence, and if it
@@ -442,22 +464,49 @@ prepare per statement, small next to compiling the program's C.
 
 ---
 
-## 12. Plan
+## 12. Implemented
 
-Each step is useful on its own and builds on the previous one:
+All six steps of the plan:
 
-1. `sqlite::schema` and `sqlite::statement`: compile-time prepare, errors
-   mapped into literals, argument counts checked at call sites, migrations
-   and `user_version` at run time.
+1. `sqlite::schema` (and `schema_file`) and `sqlite::statement`:
+   compile-time prepare, errors mapped into literals, argument counts
+   checked at call sites, migrations and `user_version` at run time.
 2. Struct binding of named parameters.
 3. `rows<T>` / `one<T>` / `each<T>`: name matching, the §4.2 type table,
-   `Nullable<T>`, the §4.3 rule with `!` / `?` aliases, `sqlite::read`.
-   Error messages that print the matching struct.
-4. The drift check at `open`.
+   `Nullable<T>`, the §4.3 rule with `!` / `?` aliases, and `sqlite::read`.
+   Error messages print the matching struct.
+4. The drift check at `open` and `migrate`.
 5. `goose --sqlite-types`.
-6. Only then, if wanted: `sqlite::row_type`.
+6. `sqlite::row_type`.
 
-Tests go in `test/sqlite/checked/`: one error fixture per diagnostic in §1,
-§3 and §4 (`errors_tc/`-style), run-time outcome tests for each §4.2 case,
-the outer-join rule including the probe's `left join`, and a drift test
-that edits a table under a compiled program.
+The tests are in `test/sqlite/`. `sqlite_checked` covers the three layers
+end to end. `sqlite_checked_more` covers `schema_file`, `migrate`, a program
+type through `sqlite::read`, each run-time failure of §4.2, drift, and a
+database newer than the program. The `sqlite_err_*` fixtures have one
+diagnostic each. The runner also compares `--sqlite-types` with
+`expected/sqlite_types.out`.
+
+---
+
+## 13. What implementing it changed
+
+* **`Nullable<T>` is `{ has, v }`**, with `none<T>()` and `some(v)`:
+  `null` is a Goose keyword, which no field or function can be named. A
+  concrete `some(const u8[:]) -> Nullable<u8[]>` makes `some("x")` the
+  text a field holds, rather than a `Nullable` of a borrowed slice.
+* **Markers combine with types**: `as "posts: integer!"` (or
+  `"posts!: integer"`). A generated row type needs the type for any
+  expression column, `count(*)` included (§4.3).
+* **A row that fails a typed read stays in `rows`' result**, the field
+  that failed left zero or empty, and `rows` returns false. The row was
+  already built in place in the result, and an array of variable-size rows
+  cannot drop its last element. `one<T>` and `each<T>` stop the same way.
+* **`one<T>` needs a `T` with a default**, to return when there is no
+  row: the struct's own field defaults or its types' (the checker's
+  `DefaultValue`); the error says so where there is none.
+* **Statements are globals only**, and `sqlite::statement` anywhere else
+  is an error. `--sqlite-types` names each struct after its global
+  (`users_above` gives `UsersAboveRow`).
+* **The drift check compares declared types as text**, the same SQLite
+  reporting both, and the parameter count. A file whose table changed
+  shape fails to open with the first statement that differs.

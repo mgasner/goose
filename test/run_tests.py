@@ -1179,6 +1179,16 @@ def main():
     # kept beside what it rejects (for gfx, shaders).
     native_errors = [f for f in tests if f.parent.name in native and error_markers(f)]
     tests = [f for f in tests if f not in native_errors]
+    # Checked SQL is checked by the compiler's own SQLite: a compiler built
+    # without it rejects those programs, so they are skipped there.
+    has_sql = tc.run_capture([exe, "--sqlite-link", "cc"])[0] == 0
+    if not has_sql:
+        checked = [f for f in tests + native_errors
+                   if f.parent.name == "sqlite" and re.search(r"sqlite::schema", f.read_text(encoding="utf-8"))]
+        tests = [f for f in tests if f not in checked]
+        native_errors = [f for f in native_errors if f not in checked]
+        if checked:
+            print(f"skip {len(checked)} checked-SQL test(s) (compiler built without SQLite)")
 
     # The generated programs below take long to check; they start before the
     # fixtures. Their files are written here, before any job reads them.
@@ -1364,6 +1374,20 @@ def main():
         else:
             r.ok(what)
     r.show_task(sqlite_arity)
+    has_sql_types = tc.run_capture([exe, "--sqlite-link", "cc"])[0] == 0
+
+    # What --sqlite-types prints for the checked SQL test's statements.
+    def sqlite_types():
+        f = HERE / "sqlite" / "sqlite_checked.goose"
+        code, out, err = r.goose("--sqlite-types", f)
+        want = (HERE / "expected" / "sqlite_types.out").read_text(encoding="utf-8")
+        what = f"sqlite-types {f.name}"
+        if code != 0 or joined(out) != joined(want):
+            r.fail(what, f"exit {code}\n{out}{err}")
+        else:
+            r.ok(what)
+    if has_sql_types:
+        r.show_task(sqlite_types)
 
     for f in tests:
         r.show(lambda f=f: fixtures[f].result().front)

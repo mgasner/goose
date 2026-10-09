@@ -620,6 +620,10 @@ inline void EnumDecl::Dump(string &s, int ind) const {
 }
 
 inline void AliasDecl::Dump(string &s, int) const {
+    if (!al->rowstmt.empty()) {
+        Append(s, "type ", al->qname, " = sqlite::row_type(", al->rowstmt, ");");
+        return;
+    }
     Append(s, "type ", al->qname, " = ");
     al->type->Dump(s);
     s += ";";

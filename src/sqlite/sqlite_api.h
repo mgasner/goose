@@ -87,6 +87,7 @@ typedef struct { struct gs_sql_rhdr *hdr; struct gs_sql_stack *stk; } gs_sql_bui
     X(uint8_t, gs_sql_serialize, (uint64_t db, int64_t token, gs_sql_builder out)) \
     X(uint8_t, gs_sql_deserialize, (uint64_t db, int64_t token, gs_sql_bytes image)) \
     X(void, gs_sql_forget, (uint64_t db, gs_sql_bytes sql)) \
+    X(void, gs_sql_fail, (uint64_t db, int32_t code, gs_sql_bytes msg)) \
     X(int64_t, gs_sql_cached_count, (uint64_t db)) \
     /* Transactions. */ \
     X(int64_t, gs_sql_begin, (uint64_t db, int64_t token, uint8_t immediate)) \
@@ -113,7 +114,10 @@ typedef struct { struct gs_sql_rhdr *hdr; struct gs_sql_stack *stk; } gs_sql_bui
     X(void, gs_sql_column_text, (uint64_t st, int32_t i, gs_sql_builder out)) \
     X(void, gs_sql_column_blob, (uint64_t st, int32_t i, gs_sql_builder out)) \
     X(void, gs_sql_column_name, (uint64_t st, int32_t i, gs_sql_builder out)) \
-    X(void, gs_sql_column_decltype, (uint64_t st, int32_t i, gs_sql_builder out))
+    X(void, gs_sql_column_decltype, (uint64_t st, int32_t i, gs_sql_builder out)) \
+    /* Rows decoded by checked statements (docs/design/sqlite_checked.md). */ \
+    X(void, gs_sql_fail_row, (uint64_t st, int32_t i, gs_sql_bytes msg)) \
+    X(uint8_t, gs_sql_row_failed, (uint64_t st))
 
 #define GS_SQL_PROTO(ret, name, params) ret name params;
 GS_SQL_API(GS_SQL_PROTO)

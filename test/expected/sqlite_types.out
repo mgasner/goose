@@ -1,0 +1,14 @@
+// sqlite_checked.goose:19: users_above
+struct UsersAboveRow { id: i64, name: u8[], email: sqlite::Nullable<u8[]>, score: f64 }
+// sqlite_checked.goose:20: user_by_id
+struct UserByIdRow { id: i64, name: u8[], email: sqlite::Nullable<u8[]>, score: f64 }
+// sqlite_checked.goose:21: add_user
+struct AddUserRow { id: i64 }
+// sqlite_checked.goose:23: post_counts
+struct PostCountsRow { name: u8[], posts: i64, latest: sqlite::Nullable<u8[]> }
+// sqlite_checked.goose:27: names
+struct NamesRow { name: u8[] }
+// sqlite_checked.goose:28: total
+struct TotalRow { total: f64 }
+// sqlite_checked.goose:36: briefs
+struct BriefsRow { name: u8[], id: i64, score: f64 }

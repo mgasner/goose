@@ -39,6 +39,9 @@ def overloads(n):
                f"    if s.h == 0 {{ return false; }}\n{binds}    return each_row(s, F);\n}}\n")
     out.append(f"fn one{generics('F')}{head} -> bool, bool {{\n{prep}"
                f"    if s.h == 0 {{ return false, false; }}\n{binds}    return first_row(s, F);\n}}\n")
+    out.append(f"fn one_of{generics('F')}{head} {{\n{prep}"
+               + (f"    if s.h != 0 {{\n{binds.replace('    bind', '        bind')}    }}\n" if n else "")
+               + "    return first_value(s, F);\n}\n")
     for name, typ, read, zero in (("scalar_int", "i64", "int", "0"),
                                   ("scalar_real", "f64", "real", "0.0")):
         out.append(f"fn {name}{generics()}{head} -> {typ}, bool {{\n{prep}"
@@ -60,6 +63,8 @@ def generated():
              "// each(db, sql, args...) { r => ... } -> bool: each row to the block.\n"
              "// one(db, sql, args...) { r => ... } -> bool, bool: the first row to the block;\n"
              "//     whether there was one, and whether the statement ran.\n"
+             "// one_of(db, sql, args...) { r, has => T } -> T, bool: the first row as a value,\n"
+             "//     which the block builds with or without a row; what one<T> lowers to.\n"
              "// scalar_int / scalar_real / scalar_text(db, sql, args...) -> v, bool: the first\n"
              "//     column of the first row; false for no row or a failure.\n"]
     for n in range(MAX_ARGS + 1):

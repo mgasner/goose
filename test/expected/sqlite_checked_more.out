@@ -1,0 +1,20 @@
+migrate true, version 2
+  read 2 ok true
+    apple Color.Red 5 APL
+    lime Color.Green 12 LIM
+  read 3 ok false
+  column 2 (qty): 1000 does not fit i8
+    apple Color.Red 5 APL
+    lime Color.Green 12 LIM
+    bulk Color.Blue 0 BLK
+  read 2 ok false
+  column 3 (code): 4 bytes do not fit a u8[..3]
+    apple Color.Red 5 APL
+    lime Color.Green 12 
+  read 2 ok false
+  column 1 (color): sqlite::read refused the value
+    apple Color.Red 5 APL
+    lime Color.Red 12 LIM
+drifted: false true the database does not match the program: columns (BLOB,TEXT,REAL,TEXT) where it was compiled for (TEXT,TEXT,INTEGER,TEXT): select name, color, qty, code from items order by id
+newer: false the database is at schema version 7, newer than the 2 this program knows
+removed true

@@ -104,6 +104,7 @@ typedef struct {
     int64_t sqllen;
     int64_t used;         /* the connection's clock when last handed out or stepped */
     int on_row;           /* the last step returned SQLITE_ROW */
+    int row_failed;       /* a value of this row did not fit what it was read into */
 } sql_stmt;
 
 static sqlite3_mutex *sql_lock;
@@ -648,6 +649,7 @@ uint64_t gs_sql_prepare(uint64_t db, int64_t token, gs_sql_bytes sql) {
             sqlite3_clear_bindings(s->st);
             s->used = c->clock;
             s->on_row = 0;
+            s->row_failed = 0;
             uint64_t h = sql_handle(s->gen, i);
             sqlite3_mutex_leave(sql_lock);
             return h;
@@ -702,6 +704,7 @@ uint64_t gs_sql_prepare(uint64_t db, int64_t token, gs_sql_bytes sql) {
     s->sqllen = sql.len;
     s->used = c->clock;
     s->on_row = 0;
+    s->row_failed = 0;
     s->gen++;
     uint64_t h = sql_handle(s->gen, slot);
     sql_evict(conn, c->cache_cap, s);
@@ -801,6 +804,7 @@ void gs_sql_reset(uint64_t st) {
     if (!s) return;
     sqlite3_reset(s->st);
     s->on_row = 0;
+    s->row_failed = 0;
 }
 
 uint8_t gs_sql_readonly(uint64_t st) {
@@ -888,4 +892,38 @@ void gs_sql_column_decltype(uint64_t st, int32_t i, gs_sql_builder out) {
         return;
     }
     sql_append_str(out, sqlite3_column_decltype(s->st, i));
+}
+
+/* --- rows of checked statements ----------------------------------------------- */
+
+/* A value of the current row did not fit the field it was read into: an
+   outcome of the data, not a misuse. The connection keeps it as its error
+   (MISMATCH), and the loop reading the rows stops. */
+void gs_sql_fail_row(uint64_t st, int32_t i, gs_sql_bytes msg) {
+    sql_stmt *s = sql_stmt_of(st, "fail_row");
+    if (!s) return;
+    char buf[512];
+    const char *name = s->on_row && i >= 0 && i < sqlite3_column_count(s->st)
+                           ? sqlite3_column_name(s->st, i) : "?";
+    snprintf(buf, sizeof buf, "column %d (%s): %.*s", i, name ? name : "?",
+             (int)(msg.len > 400 ? 400 : msg.len), msg.data ? (const char *)msg.data : "");
+    sql_set_error(s->owner, SQLITE_MISMATCH, buf, -1);
+    s->row_failed = 1;
+}
+
+uint8_t gs_sql_row_failed(uint64_t st) {
+    sql_stmt *s = sql_stmt_of(st, "row_failed");
+    return s ? (uint8_t)s->row_failed : 0;
+}
+
+/* --- errors the Goose side finds ---------------------------------------------- */
+
+/* A failure found by the module rather than by SQLite: a database that does
+   not match the schema a program was compiled against. */
+void gs_sql_fail(uint64_t db, int32_t code, gs_sql_bytes msg) {
+    sql_conn *c = sql_conn_of(db, "fail");
+    if (!c) return;
+    char *text = sql_cstr(msg);
+    sql_set_error(c, code, text ? text : "out of memory", -1);
+    free(text);
 }

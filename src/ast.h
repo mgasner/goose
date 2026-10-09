@@ -15,6 +15,7 @@ struct SStruct;
 struct SEnum;
 struct SVariant;
 struct SAlias;
+struct SqlCatalog;
 struct Ast;
 struct VarDef;
 struct FnSpec;
@@ -1283,6 +1284,10 @@ struct SAlias {
     string_view qname;
     Line line;
     TypeExpr *type = nullptr;
+    // `type X = sqlite::row_type(q);`: the statement global, as written. Such
+    // an alias has no type; it becomes `struct X` before resolution
+    // (sqlite_check.h, ExpandSqlRowTypes).
+    string_view rowstmt;
 };
 
 // The namespace a nominal type was declared in; "" for every other type.
@@ -1976,6 +1981,10 @@ struct Ast {
     // by codegen: a shader file's by its path as resolved from the file
     // calling it, a shader given as source by that file, stage and source.
     map<string, string> shaders;
+
+    // Checked SQL's schemas and statements, as the compiler's own SQLite
+    // made them out (sqlite_check.h); null until a program has any.
+    shared_ptr<SqlCatalog> sqlcat;
 
     // Every checked tree that runs outside a function body: the global
     // initializers. `f` gets the slot, so a pass that rewrites trees can

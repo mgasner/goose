@@ -54,6 +54,8 @@ add_executable(goose
     src/audio.h
     src/physics.h
     src/sqlite.h
+    src/sqlite_check.h
+    src/typecheck_sqlite.h
     src/ui.h
 )
 

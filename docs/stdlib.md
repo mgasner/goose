@@ -1866,3 +1866,95 @@ next use, from outside the block, or at `close`. Inside the block use the
 block's handle: the outer one looks the same as having left, rolls the
 transaction back, and the block's next use of its own handle aborts. Naming
 the block's parameter `db`, as above, makes that impossible.
+
+### Checked SQL
+
+SQL written in the program can be checked when the program is compiled.
+The compiler applies the schema to a database of its own (the same SQLite),
+prepares each statement there, and checks every call that uses it: the
+parameters, and the fields the rows are read into. `design/sqlite_checked.md`
+is the design.
+
+```goose
+let SCHEMA = sqlite::schema("""
+    create table users(id integer primary key, name text not null, email text) strict;
+    """, """
+    alter table users add column score real not null default 0;
+    """);
+let by_score = sqlite::statement(SCHEMA, "select id, name, email from users where score > ?");
+let add_user = sqlite::statement(SCHEMA, "insert into users(name, email) values (:name, :email)");
+
+struct User { id: i64, name: u8[], email: sqlite::Nullable<u8[]> }
+struct NewUser { name: u8[], email: sqlite::Nullable<u8[]> }
+
+let db, ok = sqlite::open("app.db", SCHEMA);    // migrates, then checks the file (below)
+sqlite::exec(db, add_user, NewUser { name: "alice", email: sqlite::some("a@x") });
+let users, ran = sqlite::rows<User>(db, by_score, 5.0);
+```
+
+```goose
+sqlite::schema(migration, ...)            // a global's initializer: the migrations, in order
+sqlite::schema_file(path, ...)            // the same, read from files beside the source
+sqlite::statement(SCHEMA, sql)            // a global's initializer: one statement
+fn rows<T>(db, q, args...) -> T[>..], bool     // every row as a T
+fn one<T>(db, q, args...) -> T, bool           // the first row; T's default and false if none
+fn each<T>(db, q, args...) { row => ... } -> bool
+fn open(path, SCHEMA, def = OpenDef {}) -> Db, bool
+fn migrate(db: Db, SCHEMA) -> bool
+fn user_version(db: Db) -> i64
+type X = sqlite::row_type(q);             // a struct with a field per column of q
+```
+
+The unchecked forms take a checked statement in place of SQL text too
+(`exec(db, q, args...)`, `query`, `each`, `one`, `scalar_*`), with their
+arguments counted against its parameters. A statement with named parameters
+(`:name`, `@name`, `$name`) takes one struct instead, whose fields bind them
+by name.
+
+**Rows.** `rows<T>`, `one<T>` and `each<T>` read each row into `T`. A struct's
+fields match the columns by name (case aside), in any order. Every column
+needs a field, and every field a column unless it has a default. A
+non-struct `T` reads a statement of one column. A field's type must be one
+its column's declared type reads as:
+
+| Column declared | Fields |
+|---|---|
+| INTEGER | `i64` and every other integer, `bool` (0 or 1), `f64` |
+| REAL | `f64`, `f32` |
+| TEXT | `u8[]`, `u8[varint]`, `u8[..k]` |
+| BLOB | `u8[]`, `u8[varint]`, `u8[..k]` |
+| NUMERIC, or an expression | any of these |
+| any | a type with `fn sqlite::read(r: sqlite::Row, i: i64, out: T&) -> bool` |
+
+A value its field cannot hold (an integer out of an `i8`'s range, text longer
+than a `u8[..k]`, a `read` returning false) stops the rows there, and the
+call returns false, with the column in `error(db)` and the code `MISMATCH`.
+The rows read so far are kept, the failing one last, the field left zero or
+empty.
+
+**NULL.** A column that can be NULL needs a `Nullable` field:
+
+```goose
+struct Nullable<T> { has: bool = false, v: T }
+fn none<T>() -> Nullable<T>        fn some<T>(v: T) -> Nullable<T>
+fn some(v: const u8[:]) -> Nullable<u8[]>
+```
+
+A column can be NULL unless it is a table column declared `NOT NULL` (or an
+`INTEGER PRIMARY KEY`) in a statement without an outer join. Everything else
+can be, as far as the compiler can tell: an expression, and every column of
+a statement with a `LEFT JOIN`. The column's alias says otherwise:
+`count(*) as "n!"` is never NULL, and `x as "x?"` may be. A generated row
+type also needs an expression's type, in the alias too: `as "n: integer!"`.
+
+**The database file.** `open(path, SCHEMA)` applies the migrations the file
+has not had, each in a transaction, numbering them in `PRAGMA user_version`.
+It then prepares every statement of the schema and compares each with what
+the compiler saw: its parameters and its columns' declared types. A file
+that differs, or whose version is newer than the program's migrations,
+fails to open, `code(db)` being `SCHEMA` and `error(db)` saying what
+differs.
+
+`goose --sqlite-types app.goose` prints a struct for every statement, named
+after its global (`by_score` gives `struct ByScoreRow`), to copy into the
+program.

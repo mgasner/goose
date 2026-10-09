@@ -1,0 +1,16 @@
+{ authors { name books { title author { name } } } }
+  calls: authors(40/40) books(120/120) authors(0/120)
+  {"data":{"authors":[{"name":"author0","books":[{"title":"book0","author":{"name":"author0"}},{"title":"book1","author":{"name":"author7"}},{ ...
+{ authors { books { reviews } } }
+  calls: reviews(120/120)
+  {"data":{"authors":[{"books":[{"reviews":0},{"reviews":1},{"reviews":2}]},{"books":[{"reviews":3},{"reviews":4},{"reviews":0}]},{"books":[{" ...
+{ everything { ... on Author { name } ... on Book { title reviews } } }
+  calls: authors(40/40) books(120/120) reviews(120/120)
+  {"data":{"everything":[{"name":"author0"},{"name":"author1"},{"name":"author2"},{"name":"author3"},{"name":"author4"},{"name":"author5"},{"n ...
+{ authors { name books { author { name } } } }
+  calls: authors(40/40) books(120/120) authors(0/120)
+  {"data":{"authors":[{"name":"author0","books":[{"author":{"name":"author0"}},{"author":{"name":"author7"}},{"author":{"name":"author14"}}]}, ...
+{ __type(name: "Book") { name fields { name } } }
+  calls:
+  {"data":{"__type":{"name":"Book","fields":[{"name":"title"},{"name":"author"},{"name":"reviews"}]}}}
+pool: 10/10 match

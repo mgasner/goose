@@ -1,0 +1,57 @@
+Unknown type "Nope".
+Syntax Error: Unexpected <EOF>. (line 1, column 20)
+Query root type must be provided.
+Union type U can only include Object types, it cannot include Int.
+The type of Query.a(x:) must be Input Type.
+There can be only one type named "Query". (line 1, column 34)
+Interface field I.y expected but T does not provide it.
+-- execution
+{"data":{"pets":[{"__typename":"Dog","name":"rex","barks":true},{"__typename":"Cat","name":"tom","lives":9},{"__typename":"Dog","name":"fido \"jr\"","barks":true}]}}
+{"data":{"pet":{"name":"tom","friend":null},"p":null}}
+{"data":{"strict":null},"errors":[{"message":"Cannot return null for non-nullable field Query.strict.","locations":[{"line":1,"column":3}],"path":["strict",1]}]}
+{"data":{"grid":[[0,1,2],[3,4,5]]}}
+{"data":{"search":[{"name":"tom","lives":9}]}}
+{"data":{"search":[{"__typename":"Dog"}]}}
+{"data":{"sum":6,"one":4}}
+{"data":{"a":"hi","b":null,"c":null}}
+{"data":{"now":{"t":1},"broken":null,"big":null,"ratio":1.5},"errors":[{"message":"the database is on fire","locations":[{"line":1,"column":7}],"path":["broken"]},{"message":"Int cannot represent non 32-bit signed integer value: 5000000000 (field Query.big)","locations":[{"line":1,"column":14}],"path":["big"]}]}
+{"data":null,"errors":[{"message":"Cannot return null for non-nullable field Dog.mustHave.","locations":[{"line":1,"column":15}],"path":["pets",0,"mustHave"]}]}
+{"data":{"pets":[{"name":"rex","age":5},{"name":"tom","age":2},{"name":"fido \"jr\"","age":1}]}}
+{"data":{"pets":[{"a":5},{"a":2},{"a":1}]}}
+{"errors":[{"message":"Must provide operation name if query contains multiple operations."}]}
+{"data":{"b":"Query"}}
+{"data":{"a":1,"b":11}}
+{"data":{"pet":{"name":"fido \"jr\"","friend":{"name":"rex","friend":{"name":"tom"}}}}}
+-- request errors
+{"errors":[{"message":"Cannot query field \"nope\" on type \"Pet\".","locations":[{"line":1,"column":10}]}]}
+{"errors":[{"message":"Field \"pets\" of type \"[Pet!]!\" must have a selection of subfields. Did you mean \"pets { ... }\"?","locations":[{"line":1,"column":3}]}]}
+{"errors":[{"message":"Field \"name\" must not have a selection since type \"String!\" has no subfields.","locations":[{"line":1,"column":10}]}]}
+{"errors":[{"message":"Field \"pet\" argument \"id\" of type \"ID!\" is required, but it was not provided.","locations":[{"line":1,"column":3}]}]}
+{"errors":[{"message":"There can be only one argument named \"id\".","locations":[{"line":1,"column":14}]},{"message":"Unknown argument \"x\" on field \"Query.pet\".","locations":[{"line":1,"column":21}]}]}
+{"errors":[{"message":"Variable \"$id\" of required type \"ID!\" was not provided.","locations":[{"line":1,"column":7}]}]}
+{"errors":[{"message":"Variable \"$id\" of type \"Int\" used in position expecting type \"ID!\".","locations":[{"line":1,"column":23}]}]}
+{"errors":[{"message":"Variable \"$k\" is never used.","locations":[{"line":1,"column":7}]}]}
+{"errors":[{"message":"Value \"ROBOT\" does not exist in \"Kind\" enum.","locations":[{"line":1,"column":10}]}]}
+{"errors":[{"message":"Field \"Filter.kind\" of required type \"Kind!\" was not provided.","locations":[{"line":1,"column":10}]}]}
+{"errors":[{"message":"Variable \"$f\" got invalid value {\"kind\":\"FISHY\"}; Enum \"Kind\" cannot represent non-enum value: \"FISHY\".","locations":[{"line":1,"column":7}]}]}
+{"errors":[{"message":"Cannot spread fragment \"F\" within itself.","locations":[{"line":1,"column":48}]}]}
+{"errors":[{"message":"Unknown fragment \"Missing\".","locations":[{"line":1,"column":10}]},{"message":"Fragment cannot be spread here as objects of type \"Pet\" can never be of type \"Query\".","locations":[{"line":1,"column":21}]}]}
+{"errors":[{"message":"Unknown directive \"@foo\".","locations":[{"line":1,"column":15}]}]}
+{"errors":[{"message":"Fragment \"Unused\" is never used.","locations":[{"line":1,"column":19}]}]}
+{"errors":[{"message":"This anonymous operation must be the only defined operation.","locations":[{"line":1,"column":36}]},{"message":"Variable \"$x\" is never used in operation \"Q\".","locations":[{"line":1,"column":9}]}]}
+{"errors":[{"message":"Must provide operation name if query contains multiple operations."}]}
+{"errors":[{"message":"Unknown operation named \"C\"."}]}
+{"errors":[{"message":"Subscriptions are not supported.","locations":[{"line":1,"column":1}]}]}
+{"errors":[{"message":"Syntax Error: Unexpected <EOF>.","locations":[{"line":1,"column":15}]}]}
+{"errors":[{"message":"Syntax Error: Expected \":\", found \"}\"."}]}
+{"errors":[{"message":"A request must have a \"query\"."}]}
+{"data":{"pets":[{"name":"rex"},{"name":"tom"},{"name":"fido \"jr\""}]}}
+-- introspection
+{"data":{"__type":{"name":"Cat","kind":"OBJECT","fields":[{"name":"id","type":{"kind":"NON_NULL","name":null,"ofType":{"name":"ID"}}},{"name":"name","type":{"kind":"NON_NULL","name":null,"ofType":{"name":"String"}}},{"name":"age","type":{"kind":"NON_NULL","name":null,"ofType":{"name":"Int"}}},{"name":"kind","type":{"kind":"NON_NULL","name":null,"ofType":{"name":"Kind"}}},{"name":"mustHave","type":{"kind":"NON_NULL","name":null,"ofType":{"name":"Int"}}},{"name":"friend","type":{"kind":"INTERFACE","name":"Pet","ofType":null}}]}}}
+{"data":{"__type":{"fields":[{"name":"id","isDeprecated":false,"deprecationReason":null},{"name":"name","isDeprecated":false,"deprecationReason":null},{"name":"age","isDeprecated":false,"deprecationReason":null},{"name":"kind","isDeprecated":false,"deprecationReason":null},{"name":"mustHave","isDeprecated":false,"deprecationReason":null},{"name":"friend","isDeprecated":false,"deprecationReason":null},{"name":"lives","isDeprecated":true,"deprecationReason":"No longer supported"}],"interfaces":[{"name":"Pet"}]}}}
+{"data":{"__type":{"enumValues":[{"name":"DOG"},{"name":"CAT"}],"all":[{"name":"DOG","deprecationReason":null},{"name":"CAT","deprecationReason":null},{"name":"FISH","deprecationReason":"no fish"}]}}}
+{"data":{"__type":{"kind":"INTERFACE","possibleTypes":[{"name":"Dog"},{"name":"Cat"}]},"any":{"possibleTypes":[{"name":"Dog"},{"name":"Cat"}]}}}
+{"data":{"__type":{"inputFields":[{"name":"kind","defaultValue":null,"type":{"name":null,"kind":"NON_NULL","ofType":{"name":"Kind"}}},{"name":"minAge","defaultValue":"0","type":{"name":"Int","kind":"SCALAR","ofType":null}}]}}}
+{"data":{"__type":{"description":"When something happened."},"nope":null}}
+{"data":{"__schema":{"queryType":{"name":"Query"},"mutationType":{"name":"Mutation"},"types":[{"name":"Int"},{"name":"Float"},{"name":"String"},{"name":"Boolean"},{"name":"ID"},{"name":"__Schema"},{"name":"__Type"},{"name":"__TypeKind"},{"name":"__Field"},{"name":"__InputValue"},{"name":"__EnumValue"},{"name":"__Directive"},{"name":"__DirectiveLocation"},{"name":"Time"},{"name":"Kind"},{"name":"Pet"},{"name":"Dog"},{"name":"Cat"},{"name":"Any"},{"name":"Filter"},{"name":"Query"},{"name":"Mutation"}]}}}
+{"data":{"__schema":{"directives":[{"name":"skip","locations":["FIELD","FRAGMENT_SPREAD","INLINE_FRAGMENT"],"args":[{"name":"if","defaultValue":null}]},{"name":"include","locations":["FIELD","FRAGMENT_SPREAD","INLINE_FRAGMENT"],"args":[{"name":"if","defaultValue":null}]},{"name":"deprecated","locations":["FIELD_DEFINITION","ARGUMENT_DEFINITION","INPUT_FIELD_DEFINITION","ENUM_VALUE"],"args":[{"name":"reason","defaultValue":"\"No longer supported\""}]},{"name":"specifiedBy","locations":["SCALAR"],"args":[{"name":"url","defaultValue":null}]}]}}}

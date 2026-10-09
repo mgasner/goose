@@ -1,0 +1,14 @@
+{"data":{"books":[{"id":"Book:0","title":"The Winter of Atlas 0","year":1928,"genre":"HISTORY","author":{"name":"Ada Lovelace"}},{"id":"Book:1","title":"The Stone of Garden 1","year":2006,"genre":"HISTORY","author":{"name":"Grace Hopper"}},{"id":"Book:2","title":"The Garden of Harbor 2","year":1903,"genre":"HISTORY","author":{"name":"Alan Turing"}}]}}
+{"data":{"book":{"title":"The Winter of Winter 42","rating":null}}}
+{"data":{"rateBook":{"title":"The Winter of Winter 42","rating":5.0}}}
+{"data":{"rateBook":{"rating":3.5}}}
+{"data":{"book":{"title":"The Winter of Winter 42","rating":3.5}}}
+{"data":{"search":[{"__typename":"Author","name":"Ada Lovelace"}],"more":[{"id":"Book:1216","title":"The Orbit of Orbit 1216","author":{"name":"Ada Lovelace"}}]}}
+{"data":{"node":{"id":"Author:3","name":"Edsger Dijkstra"},"missing":null}}
+{"data":{"books":[{"title":"The Lantern of Stone 100","genre":"HISTORY"},{"title":"The Engine of Atlas 103","genre":"HISTORY"}]}}
+{"data":null,"errors":[{"message":"stars must be from 1 to 5","locations":[{"line":1,"column":12}],"path":["rateBook"]}]}
+{"data":null,"errors":[{"message":"first and after must not be negative","locations":[{"line":1,"column":3}],"path":["books"]}]}
+{"errors":[{"message":"Cannot query field \"publisher\" on type \"Book\".","locations":[{"line":1,"column":30}]}]}
+{"errors":[{"message":"Syntax Error: Unexpected <EOF>.","locations":[{"line":1,"column":17}]}]}
+{"data":{"__type":{"name":"Book","fields":[{"name":"id","type":{"kind":"NON_NULL","name":null,"ofType":{"name":"ID"}}},{"name":"title","type":{"kind":"NON_NULL","name":null,"ofType":{"name":"String"}}},{"name":"year","type":{"kind":"NON_NULL","name":null,"ofType":{"name":"Int"}}},{"name":"genre","type":{"kind":"NON_NULL","name":null,"ofType":{"name":"Genre"}}},{"name":"author","type":{"kind":"NON_NULL","name":null,"ofType":{"name":"Author"}}},{"name":"rating","type":{"kind":"SCALAR","name":"Float","ofType":null}}]}}}
+the pool's answers match the main thread's: true

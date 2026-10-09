@@ -1,0 +1,10 @@
+split one at a time: 3/3 match
+in flight together: 30/30 small and 6/6 big match
+errors from parts match: true
+null propagation matches: true
+{"data":{"strictUsers":null},"...n-nullable field User.mustHave.","locations":[{"line":1,"column":22}],"path":["strictUsers",150,"mustHave"]}]}
+is_mutation: true false false
+{"data":{"setScore":1000}}
+after sync: {"data":{"total":2797}} from 20/20 replies
+after 30 more syncs: {"data":{"total":5100}} from 40/40 replies
+stopped

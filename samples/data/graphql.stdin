@@ -1,0 +1,13 @@
+{"query": "{ books(first: 3) { id title year genre author { name } } }"}
+{"query": "query($id: ID!) { book(id: $id) { title rating } }", "variables": {"id": "Book:42"}}
+{"query": "mutation { rateBook(id: \"Book:42\", stars: 5) { title rating } }"}
+{"query": "mutation Rate($id: ID!) { rateBook(id: $id, stars: 2) { rating } }", "variables": {"id": "Book:42"}}
+{"query": "{ book(id: \"Book:42\") { title rating } }"}
+{"query": "{ search(text: \"Ada Love\") { __typename ... on Author { name } } more: search(text: \"Orbit of Orbit 12\") { ... on Book { id title author { name } } } }"}
+{"query": "{ node(id: \"Author:3\") { id ... on Author { name } } missing: node(id: \"Book:99999\") { id } }"}
+{"query": "{ books(first: 2, genre: HISTORY, after: 100) { title genre } }"}
+{"query": "mutation { rateBook(id: \"Book:42\", stars: 9) { title } }"}
+{"query": "{ books(first: -1) { title } }"}
+{"query": "{ book(id: \"Book:1\") { title publisher } }"}
+{"query": "{ books { title ", "variables": null}
+{"query": "{ __type(name: \"Book\") { name fields { name type { kind name ofType { name } } } } }"}

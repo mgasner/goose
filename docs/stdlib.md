@@ -1,7 +1,7 @@
 # The Goose standard library
 
-The standard library has ten modules under `stdlib/`: `std`, `dictionary`,
-`vec`, `math`, `os`, `binary`, `audio`, `gfx`, `physics`, and `ui`. Import each module by name,
+The standard library has eleven modules under `stdlib/`: `std`, `dictionary`,
+`vec`, `math`, `os`, `binary`, `graphql`, `audio`, `gfx`, `physics`, and `ui`. Import each module by name,
 for example `import std;`. The compiler locates the library in its source
 tree; use `--stdlib <dir>` or `GOOSE_STDLIB` to select another location.
 Everything is written in Goose except the C behind `os`
@@ -44,7 +44,7 @@ The library uses these conventions:
 * A function taking an element *by value* (`push_n`, `insert_at`, `fill`,
   `heap_push`) cannot take one that contains self-relative references, because
   those values cannot be copied (spec §3.9). Construct them in place.
-* The `std`, `dictionary`, `vec`, `math`, and `os` names are global; `binary`, `audio`,
+* The `std`, `dictionary`, `vec`, `math`, and `os` names are global; `binary`, `graphql`, `audio`,
   `gfx`, `physics`, and `ui` use their own namespaces. A local named `fill` or `count`
   shadows the corresponding global function, causing an error at a call.
 
@@ -478,6 +478,45 @@ Use offset reads for random access and cursors for sequential records.
 Applications still validate signatures, counts, indices and format-specific
 limits after checking the read. The WAD loader in
 [`31_mini_doom.goose`](../samples/31_mini_doom.goose) shows both styles.
+
+## graphql
+
+`import graphql;` is a GraphQL server engine, written in Goose
+(`stdlib/graphql/`). It loads a schema from SDL. It parses and validates
+requests (a GraphQL document, or JSON with `query`, `variables` and
+`operationName`), runs them through the program's resolvers, and writes JSON
+responses. It also runs requests on a pool of worker threads, each with its
+own copy of the data, and keeps those copies in step after mutations.
+[`graphql.md`](graphql.md) is the guide and reference;
+[`design/graphql.md`](design/graphql.md) is the design.
+
+```goose
+fn load_schema(sdl: const u8[:]) -> u8[>..]          // "" or why not
+fn execute<O, T, B, F>(request: const u8[:], root: O, out: u8[>..]&)   // F: resolver, T: type_of, B: batch hook
+fn execute<O, T, F>(request: const u8[:], root: O, out: u8[>..]&)
+fn execute<O, F>(request: const u8[:], root: O, out: u8[>..]&)
+fn is_mutation(request: const u8[:]) -> bool
+fn pool(workers: i64) -> Pool
+fn serve<C, O, A, T, B, F>(workers: i64, root: O)    // a worker's loop; A applies a change C
+fn serve<C, O, A, T, F>(workers: i64, root: O)
+fn serve<C, O, A, F>(workers: i64, root: O)
+fn submit(p: Pool&, request: const u8[:]) -> i64
+fn receive(p: Pool&) -> Reply                        // { id, body }
+fn sync<C>(p: Pool&, changes: C[:])
+fn stop(p: Pool&)
+```
+
+A resolver has the shape `fn resolve(o: Obj.Variant, f: graphql::Field&, r:
+graphql::Result<Obj>&)`, one case function per variant of the program's handle
+enum. It reads arguments with `f.int(name)`, `f.string(name)`, `f.has(name)`
+and `f.arg(name)`, and gives the field's value with `r.int`, `r.float`,
+`r.boolean`, `r.string`, `r.enum_value`, `r.json`, `r.none`, `r.object(handle)`,
+`r.list() { ... }` or `r.error(msg)`. These are global functions, so UFCS
+finds them from the program's own code. Requests run a level of objects at a
+time: the batch hook `fn batch(objs: Obj[:], sel: graphql::Selection&)` is
+called once per object type per level, before that level's resolvers, and
+`sel.has(name)` says which fields they will be asked for, so a backend sees
+one call per type per level.
 
 ## gfx
 

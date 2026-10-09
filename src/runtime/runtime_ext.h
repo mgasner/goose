@@ -5,8 +5,9 @@
    it uses here as codegen does (CodeGen::EmitCoreTypes, CT). An --include
    header follows this and may use what it defines. The generated program
    calls the OS primitives behind stdlib/os.goose (spec §7.10, defined in
-   runtime_os.h) directly from `extern "gs_os_..." fn` declarations; no
-   prototype is emitted for a function declared here. */
+   runtime_os.h) and the sockets behind stdlib/http.goose (runtime_net.h)
+   directly from `extern "gs_os_..." fn` and `extern "gs_net_..." fn`
+   declarations; no prototype is emitted for a function declared here. */
 
 #ifdef GS_RUNTIME_OBJECT
 #pragma pack(push, 1)
@@ -49,3 +50,16 @@ GS_API int64_t gs_os_time_ns(void);
 GS_API int64_t gs_os_clock_ns(void);
 GS_API void gs_os_sleep_ms(int64_t ms);
 GS_API uint64_t gs_os_random_u64(void);
+GS_API int64_t gs_net_listen(sl_u8 host, int64_t port, int64_t backlog);
+GS_API int64_t gs_net_port(int64_t fd);
+GS_API int64_t gs_net_open(int64_t lfd, int64_t idle_ms);
+GS_API int64_t gs_net_wait(int64_t id, gs_rref buf);
+GS_API uint8_t gs_net_write(int64_t id, int64_t h, sl_u8 a, sl_u8 b);
+GS_API void gs_net_done(int64_t id, int64_t h, sl_u8 rest, int64_t need, uint8_t close_);
+GS_API int64_t gs_net_live(int64_t id);
+GS_API void gs_net_close(int64_t id);
+GS_API int64_t gs_net_connect(sl_u8 host, int64_t port, int64_t timeout_ms);
+GS_API uint8_t gs_net_send(int64_t fd, sl_u8 data);
+GS_API int64_t gs_net_recv(int64_t fd, gs_rref out, int64_t max);
+GS_API void gs_net_close_fd(int64_t fd);
+GS_API int64_t gs_net_date(sl_u8 out);

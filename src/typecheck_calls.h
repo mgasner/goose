@@ -42,12 +42,57 @@ inline Val TypeCheck::CheckCall(Call *c, TypeExpr *expected) {
     SlotScope ss(*this, false);
     if (auto d = Is<Dot>(c->callee)) return CheckUfcsCall(c, d, expected);
     if (auto id = Is<Ident>(c->callee)) return CheckNamedCall(c, id, expected);
+    // Any other callee is a value, which only a deferred type's can be.
+    Val cv;
+    {
+        PathScope ps(*this, c->callee);
+        cv = CheckV(c->callee, nullptr);
+    }
+    if (DeferredOf(cv.type)) return CheckInvocation(c, c->callee, cv, expected);
     Error(c, "this expression cannot be called");
 }
 
+// The deferred type a value of type t holds, directly or through a plain
+// reference; null for any other type (docs/design/deferred_calls.md).
+inline SEnum *TypeCheck::DeferredOf(TypeExpr *t) {
+    if (!t) return nullptr;
+    if (IsPlainRef(t)) t = t->ref->sub;
+    return t->kind == TY_ENUM && t->enu->en->isdeferred ? t->enu->en : nullptr;
+}
+
+// An invocation `d(args)` of a deferred value: tag dispatch over the case
+// functions the membership pass made (deferred.h), with d first. A
+// variable-mode value in storage binds its payload by reference, where it
+// lies; anything else by value (§8.1).
+inline Val TypeCheck::CheckInvocation(Call *c, Node *callee, const Val &cv, TypeExpr *expected) {
+    auto en = DeferredOf(cv.type);
+    auto et = IsPlainRef(cv.type) ? cv.type->ref->sub : cv.type;
+    auto byref = et->enu->varmode && (IsPlainRef(cv.type) || IsNonFixedLValue(cv));
+    if (c->trailing) Error(c, cat("a ", en->qname, " is called with its arguments, not a block"));
+    if (!c->tyargs.empty()) Error(c, cat("a ", en->qname, " is called without type arguments"));
+    c->args.insert(c->args.begin(), callee);
+    c->callee = ast.New<Ident>(c->line, byref ? en->dcallref : en->dcall, en->ns);
+    return CheckCall(c, expected);
+}
+
 inline Val TypeCheck::CheckNamedCall(Call *c, Ident *id, TypeExpr *expected) {
-    if (LookupVar(id->name, id->ns))
+    // A deferred type's case function calling its member (deferred.h).
+    if (c->pinned) {
+        vector<SFunction *> cands { c->pinned };
+        Node *nopre = nullptr;
+        return ResolveCall(c, cands, nullptr, c->pinned->name, nullptr, nopre, nullptr, expected);
+    }
+    if (auto vd = LookupVar(id->name, id->ns)) {
+        if (DeferredOf(vd->type)) {
+            Val cv;
+            {
+                PathScope ps(*this, id);
+                cv = CheckV(id, nullptr);
+            }
+            return CheckInvocation(c, id, cv, expected);
+        }
         Error(c, cat(id->name, " is a variable, not a function"));
+    }
     const FnValBind *fb;
     if (auto t = LookupTypeParam(id->name, fb))
         Error(c, cat("type parameter ", id->name, " is bound to the type ", TypeStr(t),
@@ -142,9 +187,20 @@ inline Val TypeCheck::CheckUfcsCall(Call *c, Dot *d, TypeExpr *expected) {
         return v;
     }
     if (rt->kind == TY_STRUCT) {
-        for (auto &f : rt->struc->st->fields)
-            if (!f.ispad && f.name == d->name)
-                Error(c, cat("field ", d->name, " is not callable"));
+        for (size_t fi = 0; fi < rt->struc->st->fields.size(); fi++) {
+            auto &f = rt->struc->st->fields[fi];
+            if (f.ispad || f.name != d->name) continue;
+            // A field holding a deferred call is invoked (fields come first, §7.1).
+            if (!optional && DeferredOf(GetStructInst(rt)->ftypes[fi])) {
+                Val cv;
+                {
+                    PathScope ps(*this, d);
+                    cv = CheckV(d, nullptr);
+                }
+                return CheckInvocation(c, d, cv, expected);
+            }
+            Error(c, cat("field ", d->name, " is not callable"));
+        }
     }
     // Past the variables, which a member call passes over, the name resolves
     // as a call's does (§11.1): a type parameter of the name hides the
@@ -1807,6 +1863,18 @@ inline void TypeCheck::VerifyLiterals() {
 }
 
 inline void TypeCheck::ValidateCycle(FnSpec *spec, Node *callnode) {
+    // A deferred type's case function is recursive where its member is
+    // (deferred.h), and the cycle runs through an invocation of it.
+    if (!spec->sf->isrec) {
+        SFunction *viacase = spec->sf->deferredof ? spec->sf : nullptr;
+        for (auto i = (int)frames.size() - 1; i >= 0 && !viacase; i--)
+            if (auto f = frames[i].sf; f && f->deferredof && f->dmember == spec->sf) viacase = f;
+        if (viacase && viacase->dmember)
+            Error(callnode, cat("recursive call cycle through ", viacase->dmember->name,
+                                ", stored as ", viacase->deferredof->qname,
+                                " and invoked from inside its own call, which is not declared "
+                                "`recursive fn` (§7.8)"));
+    }
     if (!spec->sf->isrec)
         Error(callnode, cat("recursive call cycle through ", spec->sf->name,
                             ", which is not declared `recursive fn` (§7.8)"));

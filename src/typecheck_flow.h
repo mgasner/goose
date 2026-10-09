@@ -1367,6 +1367,9 @@ inline Val TypeCheck::CheckMatch(MatchExpr *m, TypeExpr *expected, bool wantvalu
     } else if (st->kind == TY_ENUM) {
         enumtype = st;
     }
+    if (enumtype && enumtype->enu->en->isdeferred)
+        Error(m, cat(enumtype->enu->en->qname, " is a deferred type: call its value, or compare "
+                     "it with ", enumtype->enu->en->name, ".empty, rather than match it"));
     auto entry = SaveFlow();
     Val result;
     auto resultreach = false;

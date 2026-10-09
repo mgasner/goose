@@ -779,6 +779,35 @@ checked exactly as for a `match` — add a variant and this stops compiling
 until it gets its case. Variant types (`Shape.Circle`) are ordinary types you
 can name and pass around.
 
+### Calls you keep for later
+
+Sometimes the cases are not yours to list: a scheduler, an event loop or a
+library wants to keep "call this, with these arguments, later" for functions
+it has never heard of. A **deferred type** is that, as data:
+
+```goose
+deferred Job(now: i64) -> bool;      // what every stored call is called with
+
+fn resize(img: i64, width: i32, now: i64) -> bool { ... }
+fn expire(key: u8[], now: i64) -> bool { ... }
+
+var jobs: Job..[>..] = [];
+jobs.push(Job(resize, 17, 640));     // resize, with img and width kept
+jobs.push(Job(expire, "session:42"));
+for j in jobs { if !j(clock()) { print("failed: ", j); } }
+```
+
+`Job(resize, 17, 640)` keeps the function and its first arguments; `j(t)`
+calls it with the rest. There is no function pointer behind it: the
+compiler collects every function the program stores as a `Job`, in every
+module, makes each one a variant of an enum, and the call is a case-function
+dispatch on its tag. So everything above holds: it is as small as its
+largest call's arguments (here, a variable-size `Job..` because one keeps a
+string), it copies and compares like any enum, and it crosses a thread queue
+as its bytes. What it keeps must be flat: no references, which could
+dangle by the time the call happens. `Job.empty` is the call that is not
+one, which aborts if called, and is what a missed `qpoll` gives.
+
 ---
 
 ## 10. Linking things without pointers

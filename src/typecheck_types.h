@@ -186,6 +186,15 @@ inline void TypeCheck::BuildVariant(EnumInst *inst, size_t vi) {
             Error(en->line, cat("field ", v.fields[i].name, " of variant ", en->name, ".", v.name,
                                 " cannot be ", zs, ": ", TypeStr(ft), " (§3.4)"));
         auto c = ClassOf(ft);
+        // A deferred call's stored arguments are flat and never resizable,
+        // so the type keeps the thread and queue properties its declarer
+        // chose whatever members a program adds (deferred_calls.md §3.2).
+        if (v.member && (!IsFlat(ft) || c == SC_RESIZABLE))
+            Error(v.member->line,
+                  cat(v.member->qname, " cannot be stored as ", en->qname, ": its stored ",
+                      "parameter ", v.fields[i].name, " is ", TypeStr(ft), ", which is ",
+                      c == SC_RESIZABLE ? "resizable" : "not flat (it holds a reference)",
+                      "; a deferred call stores flat, non-resizable values"));
         if (c == SC_RESIZABLE) {
             if (i != lastreal)
                 Error(en->line, cat("resizable field ", v.fields[i].name, " of variant ",
@@ -412,7 +421,17 @@ inline bool TypeCheck::VerifiableElem(TypeExpr *t, TypeExpr *elem, string &why) 
                       "array or one of its variants");
             return false;
         }
-        case TY_STRUCT: case TY_ENUM: case TY_VARIANT:
+        case TY_ENUM:
+            // A verified tag would still let the bytes choose which function
+            // runs, and tags change with the program's members, so a deferred
+            // type has no verifier (deferred_calls.md §3.7).
+            if (t->enu->en->isdeferred) {
+                why = cat(t->enu->en->qname, " is a deferred type, whose stored calls an "
+                          "image cannot choose");
+                return false;
+            }
+            return !AnyField(t, [&](TypeExpr *ft) { return !VerifiableElem(ft, elem, why); });
+        case TY_STRUCT: case TY_VARIANT:
             return !AnyField(t, [&](TypeExpr *ft) { return !VerifiableElem(ft, elem, why); });
         case TY_ARRAY: return VerifiableElem(t->arr->sub, elem, why);
         default: return ImageSafe(t, why);
@@ -547,6 +566,23 @@ inline void TypeCheck::ValidateType(TypeExpr *t, Line l, int pos) {
             auto inst = GetEnumInst(t);
             if (!inst->validated && !t->enu->varmode)
                 Error(l, cat("enum ", t->enu->en->name, " contains itself by value"));
+            if (inst->validated && !t->enu->varmode && !inst->allfixed && t->enu->en->isdeferred) {
+                // Name a member whose stored arguments made it so: membership
+                // is the whole program's, so it may be anywhere.
+                auto en = t->enu->en;
+                string who;
+                for (size_t vi = 0; vi < en->variants.size() && who.empty(); vi++)
+                    for (auto ft : inst->vftypes[vi])
+                        if (ft && ClassOf(ft) != SC_FIXED) {
+                            auto m = en->variants[vi].member;
+                            who = cat(m->qname, " (", ast.sources[m->line.fileidx].first, ":",
+                                      m->line.line, ")");
+                            break;
+                        }
+                Error(l, cat("deferred type ", en->qname, " stores a variable-size value for ",
+                             who, ", so it can only be used in variable mode (", en->name,
+                             "..)"));
+            }
             if (inst->validated && !t->enu->varmode && !inst->allfixed)
                 Error(l, cat("enum ", t->enu->en->name, " has non-fixed-size payloads and "
                              "can only be used in variable mode (",

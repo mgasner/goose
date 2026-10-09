@@ -516,7 +516,11 @@ finds them from the program's own code. Requests run a level of objects at a
 time: the batch hook `fn batch(objs: Obj[:], sel: graphql::Selection&)` is
 called once per object type per level, before that level's resolvers, and
 `sel.has(name)` says which fields they will be asked for, so a backend sees
-one call per type per level.
+one call per type per level. A resolver that only knows what to load once it
+runs gives `r.later(graphql::Loader(load), key, graphql::Then(give))`: after
+the level's resolvers, each loader runs once with all its keys, then each
+`give(key, s: graphql::Slot&)` gives the value (spec §8.3 has the stored
+calls these are).
 
 ## gfx
 

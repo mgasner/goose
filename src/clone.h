@@ -70,6 +70,7 @@ inline Node *Call::Clone1(Ast &ast) const {
     auto c = ast.New<Call>(line, callee->Clone(ast));
     c->tyargs = tyargs;
     c->implicit = implicit;
+    c->pinned = pinned;
     for (size_t i = 0; i < args.size(); i++)
         if (!IsDefaultArg(i)) c->args.push_back(args[i]->Clone(ast));
     c->trailing = (FunVal *)CloneOrNull(ast, (Node *)trailing);

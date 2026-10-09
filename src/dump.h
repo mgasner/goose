@@ -601,6 +601,25 @@ inline void StructDecl::Dump(string &s, int ind) const {
 }
 
 inline void EnumDecl::Dump(string &s, int ind) const {
+    if (en->isdeferred) {
+        Append(s, "deferred ", en->qname, "(");
+        for (size_t i = 0; i < en->dparams.size(); i++) {
+            if (i) s += ", ";
+            if (en->dparams[i].isvar) s += "var ";
+            Append(s, en->dparams[i].name, ": ");
+            en->dparams[i].type->Dump(s);
+        }
+        s += ")";
+        if (en->dhas_rets) {
+            s += " -> ";
+            for (size_t i = 0; i < en->drets.size(); i++) {
+                if (i) s += ", ";
+                en->drets[i]->Dump(s);
+            }
+        }
+        s += ";";
+        return;
+    }
     Append(s, "enum ", en->qname);
     DumpGenerics(s, en->generics);
     s += " {";

@@ -137,6 +137,11 @@ inline void ResolveTypeNames(Ast &ast) {
         auto adt = t->var->adt;
         if (adt->kind != TY_ENUM) continue;  // E.g. a generic param; typecheck decides.
         auto name = t->var->name;
+        // Its calls are the compiler's to name (deferred.h).
+        if (adt->enu->en->isdeferred)
+            ErrorAt(t, cat(adt->enu->en->qname, " is a deferred type, whose calls have no "
+                           "variant names to write: construct one as ", adt->enu->en->name,
+                           "(function, arguments...)"));
         auto found = adt->enu->en->FindVariant(name);
         if (!found)
             ErrorAt(t, cat("enum ", adt->enu->en->name, " has no variant named ", name));

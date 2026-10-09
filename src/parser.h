@@ -159,6 +159,7 @@ struct Parser {
         switch (lex.tok) {
             case T_STRUCT: ParseStructDecl(); return;
             case T_ENUM:   ParseEnumDecl();   return;
+            case T_DEFERRED: ParseDeferredDecl(); return;
             case T_TYPE: {
                 lex.Next();
                 auto al = new SAlias();
@@ -298,6 +299,51 @@ struct Parser {
         }
         Expect(T_RCURLY, "enum declaration");
         BindGenericNames(firsttype, en->generics);
+        ast.NS(en->ns).enummap[en->name] = en;
+        ast.topdecls.push_back(New<EnumDecl>(line, en));
+    }
+
+    // `deferred Name(params) -> rets;` (docs/design/deferred_calls.md): an
+    // enum with one variant, the empty call, until the membership pass
+    // (deferred.h) adds one per member the program stores.
+    void ParseDeferredDecl() {
+        auto line = CurLine();
+        lex.Next();
+        auto en = new SEnum();
+        ast.enums.push_back(en);
+        en->isdeferred = true;
+        en->name = ParseDeclName("deferred declaration");
+        en->ns = curns;
+        en->qname = ast.QualifiedName(en->ns, en->name);
+        en->line = line;
+        CheckFreshTypeName(en->ns, en->name);
+        if (lex.tok == T_LT) Error("a deferred type cannot be generic");
+        Expect(T_LPAREN, "deferred declaration");
+        while (lex.tok != T_RPAREN) {
+            Param p;
+            p.isvar = IsNext(T_VAR);
+            p.name = ExpectIdent("deferred declaration");
+            for (auto &prev : en->dparams)
+                if (prev.name == p.name) Error(cat("duplicate parameter name: ", p.name));
+            Expect(T_COLON, "deferred declaration (every parameter has a type)");
+            p.type = ParseType();
+            if (lex.tok == T_ASSIGN)
+                Error(cat("parameter ", p.name, " of a deferred type cannot have a default"));
+            en->dparams.push_back(p);
+            if (!IsNext(T_COMMA)) break;
+        }
+        Expect(T_RPAREN, "deferred declaration");
+        if (IsNext(T_ARROW)) {
+            en->dhas_rets = true;
+            for (;;) {
+                en->drets.push_back(ParseType());
+                if (!IsNext(T_COMMA)) break;
+            }
+        }
+        Expect(T_SEMI, "deferred declaration");
+        SVariant empty;
+        empty.name = "empty";
+        en->variants.push_back(empty);
         ast.NS(en->ns).enummap[en->name] = en;
         ast.topdecls.push_back(New<EnumDecl>(line, en));
     }

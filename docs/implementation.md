@@ -46,6 +46,7 @@ single translation unit, included in the order the driver lists them.
 |---|---|---|---|
 | Parse | `lexer.h`, `parser.h`, `ParseProgram` in `main.cpp` | source files, following `import` | the `Ast`: nodes, type expressions, symbols per namespace, globals in initialization order |
 | Resolve | `resolve.h` (`ResolveTypeNames`) | type names as written | struct/enum/generic kinds, aliases substituted away |
+| Deferred members | `deferred.h` (`CollectDeferredMembers`) | the resolved `Ast` | each deferred type's variants, one per stored function, and their constructors and case functions; constructions rewritten into constructor calls (§3.12) |
 | Typecheck | `typecheck*.h` (`TypeCheckProgram`) | the `Ast` | one `FnSpec` per specialization with a cloned, annotated body; `StructInst`/`EnumInst`; `VarDef`s; the store record; every diagnostic of §3--§11; the shader blobs `embed_shader` compiles (`gfx.h`, `shaderc.c`) |
 | Optimize | `optimize.h`, `optimize_basecase.h`, `optimize_tre.h` (`Optimizer`) | live specializations | bodies rewritten in place (inlined, folded, loops), liveness and use counts |
 | BCE | `bce.h` (`BCE::RunAll`) | live specializations | `Index::nobc`, `SliceExpr::nobc`, `ForLoop::fixedlen`, per-loop `hoistrefs` |
@@ -2251,6 +2252,42 @@ error; the result's provenance is the merge of the arms' (deeper root,
 exact only when the same, writable only if all are). The cases get every
 argument written: a call that would dispatch only by leaving parameters to
 their defaults is an error.
+
+**Deferred calls** (`deferred.h`, spec §8.3, `design/deferred_calls.md`).
+A deferred type is an `SEnum` marked `isdeferred`, with its call-time
+`dparams` and `drets` and one variant at parse time, `empty`. The
+membership pass runs after resolution, which has already rejected any
+written variant of one (`ResolveTypeNames`), and before checking. It scans
+`Ast::allnodes` in parse order for a `Call` whose callee names a deferred
+type, resolves its first argument to the one function that can be stored
+with that many stored arguments (`Unfit`, comparing types by their resolved
+text), and adds one variant per (type, function), whose fields are the
+stored parameters (`SVariant::member`). For each type it then writes the
+case functions `deferred__D__call` and `deferred__D__callref`, one per
+variant, taking it by value and by reference, whose body calls the member
+with the payload's fields and the call-time parameters (non-scalar fields
+through `copy`, §4.1) or, for `empty`, aborts; and per member a
+constructor `deferred__D__new__f` from the stored parameters to a `D`
+built as a variant literal. The construction becomes a call of the
+constructor. Every generated function names its type (`deferredof`) and
+member (`dmember`); calls the pass resolved itself carry the target
+(`Call::pinned`), which `CheckNamedCall` takes over the name's overload
+set. `CheckUnreached` skips them. The checker's setup gives the
+constructors a fixed-mode result where every payload is fixed-size
+(`isdctor`), so constructions meet fixed-mode storage, `==` included, as a
+variant literal would. An invocation is recognized where a call's callee
+is a value (`CheckInvocation`): a variable (`CheckNamedCall`), a field
+(`CheckUfcsCall`, fields first) or any other expression (`CheckCall`). It
+becomes a call of the by-reference set when the callee is variable-mode
+storage, else of the by-value set, with the callee first, which resolves by
+tag dispatch like any case function call; nothing past the checker knows
+it was one. A back edge through a case function reports the member it
+calls (`ValidateCycle`). `BuildVariant` rejects a non-flat or resizable
+stored parameter at the member's declaration, `ValidateType` names a
+member storing a variable-size value where fixed mode is used,
+`VerifiableElem` refuses a deferred type to `from_bytes`, and `CheckMatch`
+and `CheckVariantConst` refuse a match and a variant name other than
+`empty`.
 
 **Nested functions** (`DeclareLocalFn`, §7.5): checking a declaration
 records a `DeclSite` for the function, under the environment declaring it

@@ -52,6 +52,13 @@ language's type and lifetime rules make this memory model safe to use.
 * **Threads that share nothing.** A worker is compiled as a separate program
   with its own memory, and flat values cross typed queues as a `memcpy`. Data
   races, locks, atomics and memory orderings do not exist in the language.
+* **Stored calls without function pointers.** `deferred Job(now: i64);`
+  declares a call to keep for later: `Job(resize, 17, 640)` stores a
+  function and its first arguments, and `j(now)` makes the call. The
+  compiler collects every function a program stores, across modules, into
+  an enum, so a stored call is a tag byte and its arguments (9 bytes for
+  one `u64`, where a `std::function` is 32), and calling it is a tag
+  dispatch, not an indirect call ([benchmarks](bench/deferred/results.md)).
 * **Generics and higher-order functions with no overhead.** An untyped
   parameter is generic. Function values are compile-time entities, so
   `xs.filter() { it > 0 }` compiles to the loop it looks like and builds its

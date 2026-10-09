@@ -404,8 +404,37 @@ if !write_file_atomic("saves/slot1.sav", image) { write_stderr("not saved\n"); }
 ```
 
 `exit(code)` and `abort(msg)` are builtins, since the checker knows they
-diverge. Subprocesses and networking are not in v1; they arrive as
-`extern fn`s when a program needs them.
+diverge. Subprocesses are not in v1; networking is the `http` module's.
+
+## http
+
+`import http;` is an HTTP/1.1 server and client (`stdlib/http.goose`), on
+the sockets in `src/runtime/runtime_net.h`, for macOS, Linux and the BSDs.
+[`http.md`](http.md) is the guide; [`design/http.md`](design/http.md) is the
+design; `bench/http/` measures it against nginx and libuv.
+
+```goose
+fn serve<F>(port: i64, host: const u8[:] = "0.0.0.0", limits: Limits = Limits { .. }) -> bool
+fn serve_on<F>(listener: i64, limits: Limits = Limits { .. }) -> bool   // F(req: Request&, res: Response&)
+fn listen(port: i64, host: const u8[:] = "0.0.0.0") -> i64    fn listener_port(listener: i64) -> i64
+fn header(req: Request&, name: const u8[:]) -> const u8[:], bool
+fn query_param(req: Request&, name: const u8[:]) -> const u8[:], bool
+fn decode(out: u8[>..]&, s: const u8[:], plus: bool = false) -> bool
+fn set_header(res: Response&, name: const u8[:], value: const u8[:]) -> bool
+fn parse(s: u8[:], req: Request&, limits: Limits) -> i64, i64     // (n, 0), (0, need), (-status, 0)
+fn fetch(c: Client&, method: const u8[:], url: const u8[:], buf: u8[>..]&, rep: Reply&,
+         body: const u8[:] = "", headers: const u8[:] = "") -> bool
+fn get(url: const u8[:], buf: u8[>..]&, rep: Reply&) -> bool
+fn post(url: const u8[:], body: const u8[:], content_type: const u8[:], buf: u8[>..]&, rep: Reply&) -> bool
+fn close(c: Client&)
+```
+
+Each worker calls `serve`, which runs an event loop of its own over the
+connections it accepts; workers share nothing. A handler fills in
+`res.status`, `res.content_type`, `res.body` and extra headers, and the
+server frames the response. Keep-alive, pipelining, chunked request bodies
+and `Expect: 100-continue` are handled, and malformed or oversized requests
+are refused. There is no TLS.
 
 ## binary
 

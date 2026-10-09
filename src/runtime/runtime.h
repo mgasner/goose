@@ -9,9 +9,9 @@
    macros, the configuration, the helpers that must inline (arithmetic,
    checks, varints, slice pool spans), the data stack state the emitted code
    reads, and declarations of the rest. That rest (runtime_impl.h,
-   runtime_threads.h, and runtime_os.h after runtime_ext.h) needs the
-   platform's headers, which no program's unit includes, and is built one
-   of two ways:
+   runtime_threads.h, and runtime_os.h and runtime_net.h after
+   runtime_ext.h) needs the platform's headers, which no program's unit
+   includes, and is built one of two ways:
 
    - Standalone (`goose --standalone`, and every JIT run): one translation
      unit holds it all, and everything the runtime defines is static.

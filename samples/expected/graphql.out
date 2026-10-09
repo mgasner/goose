@@ -1,6 +1,6 @@
 {"data":{"books":[{"id":"Book:0","title":"The Winter of Atlas 0","year":1928,"genre":"HISTORY","author":{"name":"Ada Lovelace"}},{"id":"Book:1","title":"The Stone of Garden 1","year":2006,"genre":"HISTORY","author":{"name":"Grace Hopper"}},{"id":"Book:2","title":"The Garden of Harbor 2","year":1903,"genre":"HISTORY","author":{"name":"Alan Turing"}}]}}
 {"data":{"book":{"title":"The Winter of Winter 42","rating":null}}}
-{"data":{"rateBook":{"title":"The Winter of Winter 42","rating":5.0}}}
+{"data":{"rateBook":{"title":"The Winter of Winter 42","rating":5}}}
 {"data":{"rateBook":{"rating":3.5}}}
 {"data":{"book":{"title":"The Winter of Winter 42","rating":3.5}}}
 {"data":{"search":[{"__typename":"Author","name":"Ada Lovelace"}],"more":[{"id":"Book:1216","title":"The Orbit of Orbit 1216","author":{"name":"Ada Lovelace"}}]}}

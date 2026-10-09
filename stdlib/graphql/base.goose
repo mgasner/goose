@@ -10,6 +10,7 @@
 namespace graphql;
 
 import std;
+import json;
 
 // --- names and text --------------------------------------------------------
 
@@ -121,22 +122,10 @@ var fork_min_items: i64 = 16;      // the fewest items one part may get
 var errs: u8[>..] = [];
 var nerrs: i64 = 0;
 
-var source: u8[>..] = [];          // the text being parsed: SDL, a query, JSON
+var source: u8[>..] = [];          // the text being parsed: SDL or a query
 var source_is_query = false;       // whether errors may cite locations in it
 
-fn json_quote<A>(out: A&, s: const u8[:]) {
-    out.push('"');
-    for c in s {
-        if c == '"' { out.append("\\\""); }
-        else if c == '\\' { out.append("\\\\"); }
-        else if c == '\n' { out.append("\\n"); }
-        else if c == '\r' { out.append("\\r"); }
-        else if c == '\t' { out.append("\\t"); }
-        else if c < 32 { out.append("\\u00"); out.push("0123456789abcdef"[c >> 4]); out.push("0123456789abcdef"[c & 15]); }
-        else { out.push(c); }
-    }
-    out.push('"');
-}
+fn json_quote<A>(out: A&, s: const u8[:]) { json::write_string(out, s); }
 
 // The line and column of a byte of `source`, both from 1.
 fn line_col(at: i64) -> i64, i64 {
@@ -190,7 +179,6 @@ var tend: i64 = 0;
 // What `parse_source` parses.
 let P_SDL = 0;
 let P_QUERY = 1;
-let P_JSON = 2;
 
 fn is_name_start(c: u8) -> bool { (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' }
 fn is_digit(c: u8) -> bool { c >= '0' && c <= '9' }

@@ -1,0 +1,7 @@
+The standard JSON benchmark corpus, unmodified, fetched 2026-10-09.
+
+twitter.json, citm_catalog.json
+  https://github.com/simdjson/simdjson, jsonexamples/ at master
+  (Apache-2.0 / MIT).
+canada.json
+  https://github.com/miloyip/nativejson-benchmark, data/ at master (MIT).

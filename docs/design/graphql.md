@@ -133,14 +133,16 @@ parallelism.
 
 `prepare(request)` runs the whole front end, which ends with `cur_op`
 selected or with errors:
-1. the envelope, as JSON, into the value table;
+1. the envelope, parsed by `json::parse`, its variables copied from the
+   document's tape into the value table;
 2. the document;
 3. validation of every operation and fragment;
 4. selecting the operation;
 5. coercing the variables.
 
-Parsing follows `18_json`: a lexer over a global `source`, recursive descent,
-and every syntax error one `return false from parse_source`. Validation
+Parsing GraphQL follows `18_json`: a lexer over a global `source`, recursive
+descent, and every syntax error one `return false from parse_source`. JSON
+is the `json` module's (`json.md`). Validation
 reports every error it finds, with graphql-js's messages and with
 locations. Variables are coerced in place: an ID given as an integer becomes
 a string, and an enum given as a JSON string becomes an enum value. That is
@@ -438,9 +440,9 @@ write responses themselves, which needs per-worker I/O through `extern fn`.
 3. **Field ids.** If profiles ever show `f.is(...)` string compares, the
    schema can number fields and expose `f.id`.
 4. **Overlapping-fields validation**, subscriptions, type extensions, `@oneOf`.
-5. **A `json` module.** The library parses JSON with its own value grammar.
-   Promoting `18_json` would serve other programs, but GraphQL no longer
-   depends on it.
+5. **A `json` module.** Done: `stdlib/json` parses the envelope and writes
+   strings and floats (`json.md`). Resolvers could also take a
+   `json::Writer` for custom scalars, in place of `r.json(text)`.
 6. **Shared read-only snapshots** across workers would remove the per-worker
    copies. This is a language question (spec appendix B, item 9).
 7. **Deferred loads**, if a case turns up that the batch hook cannot serve

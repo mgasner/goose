@@ -43,7 +43,7 @@ Interface field I.y expected but T does not provide it.
 {"errors":[{"message":"Unknown operation named \"C\"."}]}
 {"errors":[{"message":"Subscriptions are not supported.","locations":[{"line":1,"column":1}]}]}
 {"errors":[{"message":"Syntax Error: Unexpected <EOF>.","locations":[{"line":1,"column":15}]}]}
-{"errors":[{"message":"Syntax Error: Expected \":\", found \"}\"."}]}
+{"errors":[{"message":"The request is not valid JSON: expected ':' (byte 6)."}]}
 {"errors":[{"message":"A request must have a \"query\"."}]}
 {"data":{"pets":[{"name":"rex"},{"name":"tom"},{"name":"fido \"jr\""}]}}
 -- introspection

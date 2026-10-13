@@ -920,20 +920,34 @@ inline const string *TypeCheck::EmbedShader(Call *c, vector<Node *> &args) {
 // reference into it stored, which every store the checker has seen is on
 // record for (storeevents). The receiver is named directly, or through a
 // reference variable or parameter, in which case the array behind the
-// reference is what shrinks.
+// reference is what shrinks, or is the tail field of a struct named so
+// (`res.body`, through fields held by value), which is that struct's own
+// resizable part: the struct's root is what shrinks, as for the struct.
 inline void TypeCheck::CheckGrowShrink(Node *at, const char *op, Node *recv, const Val &rv) {
-    auto id = Is<Ident>(recv);
+    auto base = recv;
+    while (auto d = Is<Dot>(base)) {
+        auto ot = d->obj->exprtype;
+        if (!d->IsField() || !ot) return GrowShrinkReceiverError(at, op);
+        if (ot->kind == TY_REF) ot = Is<Ident>(d->obj) ? ot->ref->sub : nullptr;
+        if (!ot || ot->kind != TY_STRUCT) return GrowShrinkReceiverError(at, op);
+        base = d->obj;
+    }
+    auto id = Is<Ident>(base);
     auto vd = id ? id->vdef : nullptr;
     auto at_type = rv.type->kind == TY_REF ? rv.type->ref->sub : rv.type;
-    if (!vd || at_type->kind != TY_ARRAY)
-        Error(at, cat(op, " on a grow-only array names the array's variable, or a "
-                      "reference to it, not an element of another value (§5.1)"));
+    if (!vd || at_type->kind != TY_ARRAY) GrowShrinkReceiverError(at, op);
     // Through a reference variable or parameter: the array it points at.
     auto viaref = vd->type && vd->type->kind == TY_REF;
     auto roots = viaref ? RefRootsOf(vd) : RootsOf(vd);
     if (roots.Any([&](const RootAlt &a) { return !a.root || IsTemp(a.root); }))
         Error(at, cat(op, " through a reference whose array is not known (§5.1)"));
     ShrinkThrough(at, op, ExprStr(recv), roots, at_type);
+}
+
+inline void TypeCheck::GrowShrinkReceiverError(Node *at, const char *op) {
+    Error(at, cat(op, " on a grow-only array names the array's variable, a reference to it, "
+                  "or the tail field of a struct named so, not an element of another value "
+                  "(§5.1)"));
 }
 
 // Whether a reference to `of`, or a byte view, may point into what a shrink

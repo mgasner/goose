@@ -50,6 +50,7 @@ add_executable(goose
     src/runtime/runtime_threads.h
     src/runtime/runtime_ext.h
     src/runtime/runtime_os.h
+    src/runtime/runtime_net.h
     src/gfx.h
     src/audio.h
     src/physics.h

@@ -1,0 +1,79 @@
+-- requests
+27 GET / [] 1.1 h=1 body= keep=true
+58 GET /p [x=1&y] 1.0 h=2 body= keep=true
+46 GET / [] 1.1 h=1 body= keep=false
+44 POST /e [] 1.1 h=1 body=hello keep=true
+78 POST /e [] 1.1 h=1 body=abcde keep=true
+39 GET / [] 1.1 h=1 body= keep=true
+-- incomplete
+0 need 0
+0 need 0
+0 need 44
+0 need 0
+-- refused
+-400 need 0
+-400 need 0
+-505 need 0
+-400 need 0
+-400 need 0
+-400 need 0
+-400 need 0
+-501 need 0
+-413 need 0
+-400 need 0
+-400 need 0
+-431 need 0
+-431 need 0
+65 headers: -431
+-- query and decoding
+true a%20b+c true a b c
+true []
+false
+true h
+false
+-- responses
+40 200 [OK] h=1 body=hi keep=true
+65 200 [OK] h=1 body=hi! keep=true
+52 204 [No Content] h=0 body= keep=true
+0
+30 200 [OK] h=0 body=until close keep=false
+38 200 [OK] h=1 body= keep=true
+54 404 [] h=2 body= keep=false
+0
+-1
+-- urls
+http://example.com -> example.com 80 []
+http://example.com:8080/a/b?c=d#frag -> example.com 8080 [/a/b?c=d]
+http://[::1]:9/x -> ::1 9 [/x]
+https://example.com/ -> refused
+http://user@host/ -> refused
+http://host:0/ -> refused
+http:///x -> refused
+http://host/a b -> refused
+-- live
+true true
+true 200 Hello, World! keep=true
+true 200 posted body same connection=true
+application/octet-stream
+true 100000
+true 0 100000
+true 201 yes
+true 404 Not Found
+true bye keep=false open=false
+true Hello, World!
+true Hello, World!
+true {}
+true 300000 true
+false
+false not an http:// URL
+-- raw
+HTTP/1.1 200 OK|Server: goose|Content-Type: text/plain|Content-Length: 13||Hello, World!HTTP/1.1 404 Not Found|Server: goose|Content-Type: text/plain|Content-Length: 0||HTTP/1.1 200 OK|Server: goose|Content-Type: text/plain|Content-Length: 3|Connection: close||bye|
+HTTP/1.1 200 OK|Server: goose|Content-Type: application/octet-stream|Content-Length: 11|Connection: close||hello world|
+HTTP/1.1 100 Continue|||
+HTTP/1.1 200 OK|Server: goose|Content-Type: application/octet-stream|Content-Length: 4|Connection: close||body|
+HTTP/1.1 200 OK|Server: goose|Content-Type: text/plain|Content-Length: 13|Connection: close||Hello, World!|
+HTTP/1.1 400 Bad Request|Server: goose|Content-Type: text/plain|Content-Length: 0|Connection: close|||
+HTTP/1.1 200 OK|Server: goose|Content-Type: text/plain|Content-Length: 13|Connection: close|||
+-- idle
+HTTP/1.1 200 OK|Server: goose|Content-Type: application/octet-stream|Content-Length: 15|Connection: close||slowly uploaded|
+silent connection: recv 0, closed after 300 ms or more: true

@@ -235,7 +235,7 @@ void DumpTokens(const string &path) {
 // The runtime C sources embedded into the compiler (runtime_inline.h), in the
 // order a standalone program holds them (runtime.h has how they divide).
 static const char *runtimefiles[] = { "runtime.h", "runtime_impl.h", "runtime_threads.h",
-                                      "runtime_ext.h", "runtime_os.h" };
+                                      "runtime_ext.h", "runtime_os.h", "runtime_net.h" };
 
 static string RuntimeSections(std::initializer_list<const char *> names) {
     string s;
@@ -269,7 +269,7 @@ static string RuntimeObjectSource() {
                "#define GS_SEPARATE_RUNTIME 1\n#define GS_RUNTIME_OBJECT 1\n"
                "#define GS_NEED_THREADS 1\n#define GS_RUNTIME_VERSION ", RuntimeVersion(),
                "\n\n", RuntimeSections({ "runtime.h", "runtime_impl.h", "runtime_threads.h",
-                                          "runtime_ext.h", "runtime_os.h" }));
+                                          "runtime_ext.h", "runtime_os.h", "runtime_net.h" }));
 }
 
 // Locates the src/runtime/ directory (only needed by --gen-runtime-header):
@@ -605,7 +605,8 @@ int Main(int argc, char **argv) {
                        RuntimeSections({ "runtime_ext.h" }), cg.result);
             else
                 Append(out, RuntimeSections({ "runtime.h", "runtime_impl.h", "runtime_threads.h" }),
-                       cg.head, RuntimeSections({ "runtime_ext.h", "runtime_os.h" }), cg.result);
+                       cg.head, RuntimeSections({ "runtime_ext.h", "runtime_os.h", "runtime_net.h" }),
+                       cg.result);
             return out;
         };
         if (!outfile.empty()) {

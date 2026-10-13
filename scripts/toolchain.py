@@ -10,6 +10,7 @@ memory, so both are wrapped here and the runners are written in terms of
 intent.
 """
 
+import concurrent.futures
 import ctypes
 import hashlib
 import os
@@ -236,6 +237,11 @@ def msvc_root():
     return root
 
 
+# How many C compiles compile_programs runs at once, across all its callers:
+# one per core, however many batches build side by side.
+_unit_slots = threading.BoundedSemaphore(os.cpu_count() or 1)
+
+
 @dataclass
 class CC:
     """One C/C++ toolchain, addressed by intent rather than by flag spelling.
@@ -315,15 +321,20 @@ class CC:
             write_text(log, output)
         return r.returncode == 0, output
 
-    def compile_programs(self, cfiles, out, **kwargs):
+    def compile_programs(self, cfiles, out, *, opt=None, defines=(), extra=(), libs=(),
+                         runtime=None, log=None):
         """Compile and link the C of several programs that `goose -o` wrote
         into the one executable `out`, whose first argument, k, runs the
         k-th program as its own executable would, with the arguments past
         k and this executable's name: a unit of its own per program holds it with its main renamed, beside
         a dispatching main. A program's C holds nothing else that is not
         static, and each run is still a process of its own, so the
-        programs share only their runtime object's code. The keyword
-        arguments are compile's. Returns (ok, combined output)."""
+        programs share only their runtime object's code. The units compile
+        side by side into objects of their own (compile_object), since a
+        driver given several sources compiles them one after another. Fewer
+        executables also mean fewer first launches, which macOS assesses
+        one executable at a time. The keyword arguments are compile's.
+        Returns (ok, combined output)."""
         out = Path(out)
         units = []
         for k, cfile in enumerate(cfiles):
@@ -346,7 +357,22 @@ class CC:
                    "    argv[1] = argv[0];\n"
                    "    return gs_multi_mains[k](argc - 1, argv + 1);\n"
                    "}\n")
-        return self.compile(units + [dispatch], out, **kwargs)
+        objsuffix = ".obj" if self.style == "msvc" else ".o"
+        objs = [unit.with_suffix(objsuffix) for unit in units]
+
+        def unit_object(unit, obj):
+            with _unit_slots:
+                return self.compile_object(unit, obj, opt=opt, defines=defines, extra=extra)
+        with concurrent.futures.ThreadPoolExecutor(len(units)) as pool:
+            results = list(pool.map(unit_object, units, objs))
+        failed = "".join(f"{unit}:\n{output}" for unit, (ok, output) in zip(units, results)
+                         if not ok)
+        if failed:
+            if log:
+                write_text(log, failed)
+            return False, failed
+        return self.compile(objs + [dispatch], out, opt=opt, defines=defines, extra=extra,
+                            strict_decls=True, libs=libs, runtime=runtime, log=log)
 
     def compile_object(self, source, out, *, opt=None, defines=(), extra=()):
         """Compile the C file `source` into the object file `out`, without

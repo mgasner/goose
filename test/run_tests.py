@@ -696,18 +696,20 @@ class Runner:
 
     def builds_together(self, res, key):
         """Whether the C a fixture() result wrote for `key` is there to build
-        with others': not where it links a native layer, or was not written
-        (where a JIT run of it followed, the run has the exit code)."""
+        with others': not where a native layer it links is not built in, or
+        it was not written (where a JIT run of it followed, the run has the
+        exit code)."""
         cfile = res.c.get(key)
-        if cfile is None or res.modules:
+        if cfile is None or any(not self.native[m] for m in res.modules):
             return False
         return cfile.is_file() if key in res.jitlevels else res.gen[key][0] == 0
 
-    def build_programs(self, key, generated):
+    def build_programs(self, key, generated, modules):
         """Builds the programs that the fixture() futures in `generated`
-        (fixture: future) wrote the C of for `key` (build_options) into one
-        executable (CC.compile_programs), where there are two or more and
-        they build; {fixture: the argv that runs its program} for those."""
+        (fixture: future), which all use the native `modules`, wrote the C
+        of for `key` (build_options) into one executable
+        (CC.compile_programs), where there are two or more and they build;
+        {fixture: the argv that runs its program} for those."""
         fixtures = [f for f, future in generated.items()
                     if self.builds_together(future.result(), key)]
         if len(fixtures) < 2:
@@ -717,8 +719,8 @@ class Runner:
         opt, defines = self.build_options(key)
         ok, _ = self.cc.compile_programs([generated[f].result().c[key] for f in fixtures], exe,
                                          opt=opt, defines=defines, extra=self.extra,
-                                         strict_decls=True, runtime=self.runtime,
-                                         log=exe.with_suffix(".cc.log"))
+                                         libs=[lib for m in modules for lib in self.native[m]],
+                                         runtime=self.runtime, log=exe.with_suffix(".cc.log"))
         return {f: [exe, str(k)] for k, f in enumerate(fixtures)} if ok else {}
 
     def programs(self, f, res, built):
@@ -1106,8 +1108,8 @@ def main():
     ap.add_argument("--batch", type=int, default=0,
                     help="how many files one `goose --multi-test` run checks, and how "
                          "many programs one executable holds (default: by the number of "
-                         "files and jobs); 1 gives each a process and an executable of "
-                         "its own")
+                         "files and jobs, and up to 128 programs); 1 gives each a process "
+                         "and an executable of its own")
     args = ap.parse_args()
 
     if args.nocgen and (args.cc or args.require_clang or args.profile != "baseline"):
@@ -1320,19 +1322,26 @@ def main():
     # physics or ui programs, start first.
     order = sorted(tests, key=lambda f: not native_modules(f, native))
     generated = {f: r.submit(r.fixture, f) for f in order}
-    # The C of the other fixtures builds in batches, each kind of build
-    # (build_options) by itself, and the rest of each fixture follows once
-    # its batches are built.
+    # The fixtures' C builds in batches, each kind of build (build_options)
+    # and each set of native modules linked by itself, and the rest of each
+    # fixture follows once its batches are built.
     builds = {}
-    plain = [f for f in order if not native_modules(f, native)]
-    kinds = {ol: [f for f in plain if "parse-only" not in first_line(f)] for ol in r.levels}
-    kinds["dump"] = [f for f in plain if "dump-runtime" in first_line(f)]
-    kinds["debug"] = [f for f in plain if debug_fixture(f, first_line(f))]
-    for key, together in kinds.items() if cc and r.batch != 1 else ():
-        size = r.batch or max(2, min(32, len(together) // (2 * args.jobs)))
+    kinds = {}
+    for f in order:
+        line, modules = first_line(f), tuple(native_modules(f, native))
+        keys = [ol for ol in r.levels if "parse-only" not in line]
+        keys += ["dump"] if "dump-runtime" in line else []
+        keys += ["debug"] if debug_fixture(f, line) else []
+        for key in keys:
+            kinds.setdefault((key, modules), []).append(f)
+    # A batch's units compile side by side, so batches can be large: each
+    # executable fewer is a first launch fewer, which macOS assesses one
+    # executable at a time. Up to 128 programs to one, in even batches.
+    for (key, modules), together in kinds.items() if cc and r.batch != 1 else ():
+        size = r.batch or -(-len(together) // -(-len(together) // 128))
         for i in range(0, len(together), size):
             chunk = {f: generated[f] for f in together[i:i + size]}
-            future = r.submit(r.build_programs, key, chunk)
+            future = r.submit(r.build_programs, key, chunk, modules)
             for f in chunk:
                 builds.setdefault(f, {})[key] = future
     fixtures = {f: r.submit(r.fixture_runs, f, generated[f], builds.get(f, {})) for f in order}

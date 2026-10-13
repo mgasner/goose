@@ -491,13 +491,20 @@ inline void CodeGen::EmitGlobalDecls() {
             } else {
                 string init;
                 // A `let` global of a const type with a compile-time
-                // initializer is never written (§9.5): static data every
-                // instance shares. A `var` one may be assigned as a whole.
+                // initializer is never written (§9.5): read-only static
+                // data every instance shares (§1.2), `const` in the C too,
+                // so the C compiler may fold a lookup at a constant index
+                // and place the table in a read-only section. A `var` one
+                // may be assigned as a whole.
                 if (perdef && !d->isvar && d->type->cq && !PrefVar(d) &&
                     StaticInitX(g->inits[di], d->type, init)) {
-                    Append(data, "static ", VarCT(d), " ", name, " = ", init, ";\n");
+                    Append(data, "static const ", VarCT(d), " ", name, " = ", init, ";\n");
                     gstatic.insert(d);
-                    gnames[d] = name;
+                    // Read through a plain lvalue, as every other value is
+                    // read, so a slice or reference of it takes no const
+                    // qualifier the runtime's types do not have. Nothing
+                    // writes it, and a load still reads the const object.
+                    gnames[d] = cat("(*(", VarCT(d), " *)&", name, ")");
                 } else {
                     member(cat(VarCT(d), " ", name));
                 }

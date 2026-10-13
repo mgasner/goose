@@ -1,6 +1,6 @@
 /* What the TLS layer changes of Mbed TLS's default configuration
-   (third_party/mbedtls/include/mbedtls/mbedtls_config.h), which
-   cmake/tls.cmake applies through MBEDTLS_USER_CONFIG_FILE. The defaults
+   (third_party/mbedtls/include/mbedtls/mbedtls_config.h), which the
+   package's CMakeLists.txt applies through MBEDTLS_USER_CONFIG_FILE. The defaults
    already give TLS 1.2 and 1.3, both client and server, X.509 and PEM, and
    the PSA crypto core that TLS 1.3 runs on. */
 

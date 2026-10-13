@@ -14,7 +14,7 @@ import json;
 // the error. false, with res.error set, when no reply came.
 fn send<P>(c: Client<P>&, p: Params, conv: Item..[>..]&, res: Response&) -> bool {
     res = Response { .. };
-    // https:// needs a program linked with TLS (`goose --tls-link`); without
+    // https:// needs the http package built with TLS (packages/http); without
     // it, the http module's own error comes back as the transport error.
     let https = starts_with(c.base_url[..], "https://");
     guard https || starts_with(c.base_url[..], "http://") else {

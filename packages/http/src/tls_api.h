@@ -1,15 +1,12 @@
-/* The TLS layer's C API: the functions src/tls/tls_layer.c defines over
-   Mbed TLS (third_party/mbedtls), listed once in GS_TLS_LAYER_API. That list
-   expands into the prototypes below, into the ones the runtime's TLS section
-   declares for a program built with the layer (src/runtime/runtime_tls.h),
-   and into the symbol table a JIT run registers (src/jit.h).
+/* The TLS layer's C API: the functions tls_layer.c defines over Mbed TLS,
+   listed once in GS_TLS_LAYER_API, which expands into the prototypes
+   below.
 
-   Goose never calls these directly. stdlib/http.goose calls the runtime's
-   gs_tls_* and gs_net_* functions, and the runtime reaches the layer through
-   a table of these (gs_net_tls_ops, runtime_ext.h), so the engine and the
-   client sockets in runtime_net.h are written once for plain TCP and TLS,
-   and a program built without the layer still builds: its https:// fails
-   with an error saying so.
+   Goose never calls these directly. http.goose calls the package's
+   gs_http_* functions (http_layer.c), which reach the layer through a table
+   of these (gs_net_tls_ops), so the engine and the client sockets are
+   written once for plain TCP and TLS, and a package built without Mbed TLS
+   still builds: its https:// fails with an error saying so.
 
    Only C types cross, and nothing of Mbed TLS: a session or a server
    configuration is an opaque pointer, a file name a C string, and an error

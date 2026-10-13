@@ -150,9 +150,8 @@ the slow steps (a line each, and on a terminal a live line below).
 | `--bce-lines` | print elided/kept counts per source line |
 | `--unsafe-no-rf-check` | omit the `return from` discriminant checks after calls: a measurement aid, unsound |
 | `-o out.c`, `--jit`, `--header`, `-D`, `--include`, `--stdlib`, `--` | output file, in-process run, a C API header for the exports (which builds the C without a `main`, for a C host), a define written into the generated C, a user header, the stdlib directory, program arguments |
-| `--<name>-link msvc\|cc` | print the response file of link inputs a program using the blessed package imported as `name` (`gfx`, `audio`, `ui`, `physics`, `sqlite`) needs, when the package is compiled into this compiler (`builtin.h`, `BuiltinLinkFile`) |
+| `--<name>-link msvc\|cc` | print the response file of link inputs a program using the blessed package imported as `name` (`gfx`, `audio`, `ui`, `physics`, `sqlite`, `http`) needs, when the package is compiled into this compiler (`builtin.h`, `BuiltinLinkFile`) |
 | `--sqlite-types` | print a row struct for every checked SQL statement the program declares, and stop (`sqlite_check.h`, `docs/design/sqlite_checked.md`) |
-| `--tls-link cc` | the same for TLS under the `http` module's `https://` (`tls.h`, `TlsLinkFile`); the file also defines `GS_TLS_LINKED`, which turns on the runtime's TLS section (`runtime_tls.h`), so compile and link in one command |
 | `--multi-test a.goose b.goose ...` | compile each file in turn with the other flags, as a process of its own on it would (an `Ast` and a compile thread each, which is all the state a compile has), each file's output on both streams ending in a line `==== goose --multi-test: exit <code> <file>`; an `-o` names each file's C with `%` for its name. It runs no programs and writes no dump files. The test runner's batches of compiler runs (`docs/testing.md`) |
 | `--compile-shader f [--shader-source msl\|hlsl]` | hidden: what a shader compiles to, without a program around it |
 

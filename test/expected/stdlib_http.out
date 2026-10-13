@@ -67,7 +67,7 @@ true Hello, World!
 true {}
 true 300000 true
 false
-false TLS: this program was built without TLS (build goose with Mbed TLS, python scripts/fetch_mbedtls.py, and link with `goose --tls-link cc`)
+false expected error=true
 -- raw
 HTTP/1.1 200 OK|Server: goose|Content-Type: text/plain|Content-Length: 13||Hello, World!HTTP/1.1 404 Not Found|Server: goose|Content-Type: text/plain|Content-Length: 0||HTTP/1.1 200 OK|Server: goose|Content-Type: text/plain|Content-Length: 3|Connection: close||bye|
 HTTP/1.1 200 OK|Server: goose|Content-Type: application/octet-stream|Content-Length: 11|Connection: close||hello world|

@@ -1,8 +1,8 @@
-/* The TLS layer over Mbed TLS: what src/tls/tls_api.h declares, for the
-   runtime's client sockets and engine (src/runtime/runtime_net.h) to run
-   HTTPS through. docs/design/http.md has the design.
+/* The TLS layer over Mbed TLS: what tls_api.h declares, for the http
+   package's client sockets and engine (http_layer.c) to run HTTPS through.
+   docs/design/http.md, in the Goose tree, has the design.
 
-   Client. A session is opened over a socket the runtime connected, which is
+   Client. A session is opened over a socket http_layer.c connected, which is
    blocking with SO_RCVTIMEO and SO_SNDTIMEO set; a send or receive that
    times out ends the session with an error rather than waiting again. It
    verifies the server's certificate against a bundle of trusted CAs and

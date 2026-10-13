@@ -23,7 +23,7 @@ Talk to model provider APIs from Goose, and run a tool-using agent on top:
 1. **TLS is the transport's.** Every hosted provider is HTTPS-only. The
    client takes a `base_url` and leaves how bytes reach the provider to
    `http`, which speaks `https://` over Mbed TLS when the program has it
-   (design/http.md; `goose --tls-link` for C built with `-o`). The client
+   (design/http.md: when the http package was built with it). The client
    adds nothing for TLS: certificate checks and their CAs are its
    `http::Client`'s (`c.http.ca_file`). Without TLS, an `https://` base
    URL fails with `http`'s error, which says how to build with TLS, and

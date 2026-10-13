@@ -160,18 +160,10 @@ def ui_link(exe, cc):
     return native_link(exe, cc, "ui")
 
 
-def have_tls(exe):
-    """Whether this compiler has the TLS layer behind the http module's
-    https:// (cmake/tls.cmake), which is its own rather than a blessed
-    package's: `goose build` links it and a JIT run is handed it."""
-    code, out, _ = run_capture([exe, "--tls-link", "cc"])
-    return code == 0 and bool(out.strip())
-
-
 # The blessed packages' modules with a native part, and the pattern of a
 # program's own import of one. The ui module draws through gfx, so a program
 # showing its ui imports both.
-NATIVE_MODULES = ("audio", "gfx", "physics", "sqlite", "ui")
+NATIVE_MODULES = ("audio", "gfx", "http", "physics", "sqlite", "ui")
 
 
 def native_imports(text):
@@ -189,6 +181,7 @@ PHYSICS_UNAVAILABLE = "built without the package physics"
 UI_UNAVAILABLE = "built without the package gfx"
 AUDIO_UNAVAILABLE = "built without the package gfx"
 SQLITE_UNAVAILABLE = "built without the package sqlite"
+HTTP_UNAVAILABLE = "built without the package http"
 
 
 def native_unavailable(module, err):
@@ -202,8 +195,10 @@ def native_unavailable(module, err):
         return UI_UNAVAILABLE in err
     if module == "sqlite":
         return SQLITE_UNAVAILABLE in err
+    if module == "http":
+        return HTTP_UNAVAILABLE in err
     if module == "tls":
-        return False   # a program without TLS still runs; its https:// fails
+        return HTTP_UNAVAILABLE in err
     return PHYSICS_UNAVAILABLE in err
 
 

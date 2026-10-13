@@ -107,9 +107,6 @@ struct CodeGen {
     string code;        // Function bodies, size/eq helpers, thunks, main.
     string exportprotos;
     bool usesthreads = false;
-    // Whether the program calls the runtime's TLS section (runtime_tls.h),
-    // which the driver then splices in.
-    bool usestls = false;
     bool library = false;
     // Whether any function is exported, which brings in the export guards.
     bool hasexports = false;
@@ -1379,7 +1376,6 @@ struct CodeGen {
             CT(ast.SliceOf(ast.inttypes[IS_U8], Line {}));
         }
         for (auto sp : usedexterns) {
-            if (sp->sf->cname.rfind("gs_tls_", 0) == 0) usestls = true;
             if (runtime_ext_text.find(cat(" ", sp->sf->cname, "(")) != string_view::npos) continue;
             externs += ExternProto(sp);
         }

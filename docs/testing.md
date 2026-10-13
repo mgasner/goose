@@ -176,12 +176,13 @@ is deterministic across platforms and worker counts, so they print physics
 results, rounded, and compare them exactly. Between them they call every
 function of the layer.
 
-The `tls/` tests exercise HTTPS in the http module (`docs/design/http.md`)
-in the same way. Its TLS layer is the compiler's own, not a package's: when
-the compiler has it from `third_party/mbedtls` (`scripts/fetch_mbedtls.py`),
-`goose build` links it (`goose --tls-link cc` names the response file, which
-also defines `GS_TLS_LINKED`). Otherwise they only generate C and are
-skipped. They run servers and clients on loopback, on threads, so they do
+The `tls/` tests exercise HTTPS in the http package (`packages/http`,
+`docs/design/http.md`) in the same way. They need the package built in with
+its TLS layer, which the runner takes to be the case where the package is
+compiled into the compiler and Mbed TLS is in `third_party/mbedtls`
+(`scripts/fetch_mbedtls.py`), the package's CMakeLists then building it in;
+`goose build` links them like any program using the package. Otherwise they
+only generate C and are skipped. They run servers and clients on loopback, on threads, so they do
 not run through TinyCC. Their certificates are test-only ones in
 `tls/certs/`.
 
@@ -207,6 +208,11 @@ generates, runs the package's own `test/api_check.py`, and compares `goose
 The checked-SQL tests (those declaring a `sqlite::schema`) need the
 compiler's own SQLite (`goose toolchain --json` says `"sql_check": true`)
 and are skipped, with a note, by a compiler built without it.
+
+The http package (`packages/http`) lives in this tree too, so
+`run_tests.py` runs its `test/api_check.py` beside sqlite's, checking
+`http.goose` against `src/http_api.h`; its fixtures are `stdlib_http` and,
+through `inference` and `agent`, `stdlib_inference` and `stdlib_agent`.
 
 Each package's own `test/api_check.py` compares the functions, structs, and
 constants in its modules with their C headers. This catches

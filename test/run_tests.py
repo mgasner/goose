@@ -27,8 +27,8 @@ the backend refuses outright is counted as a skip, not a failure.
 The audio/ tests use the SDL3 PCM mixer without a device, the gfx/ tests
 use the SDL3 graphics module, the physics/ tests the Box3D
 physics module, the sqlite/ tests the SQLite module, the ui/ tests the
-Nuklear ui module and the tls/ tests the http module's https:// over
-Mbed TLS (the compiler's own layer, not a package). They always parse,
+Nuklear ui module and the tls/ tests the http package's https:// over
+Mbed TLS (where the package has it). They always parse,
 typecheck and generate C; they build and run where the compiler has the
 native layers they use built in -- their category's, and any other they
 import, as a ui test drawing through gfx does -- built by `goose build`,
@@ -36,8 +36,8 @@ which links the packages the compiler was configured with, and a machine
 without a GPU device counts as a skip for gfx. A fixture there with
 `// error:` markers is a rejection test, as in errors_tc/. The packages
 check their modules against their C layers themselves (test/api_check.py in
-each of their repositories); the sqlite package, which lives in this tree
-(packages/sqlite), is checked here.
+each of their repositories); the sqlite and http packages, which live in this
+tree (packages/), are checked here.
 
 Profiles keep the CI coverage deliberate: baseline compares Goose/native C
 -O0 and -O2 plus the targeted debug-runtime runs; sanitize uses Goose -O2 and
@@ -802,11 +802,8 @@ class Runner:
         the compiler builds it itself, or it was not written (where a JIT run of it followed, the run has the
         exit code)."""
         cfile = res.c.get(key)
-        # A program with C of its own is built by `goose build`, as is one
-        # reaching TLS, whose response file also defines GS_TLS_LINKED for
-        # the program's own unit, which a batch compiles without its libs.
-        if cfile is None or res.sidecar or "tls" in res.modules or \
-                any(not self.native[m] for m in res.modules):
+        # A program with C of its own is built by `goose build`.
+        if cfile is None or res.sidecar or any(not self.native[m] for m in res.modules):
             return False
         return cfile.is_file() if key in res.jitlevels else res.gen[key][0] == 0
 
@@ -1393,11 +1390,13 @@ def main():
     # Which native modules (by a fixture's category directory and what it
     # imports) have their package compiled into the compiler: a fixture using
     # one that is not only generates C, so that the suite never has the
-    # compiler fetch and build a package. The tls/ fixtures' layer is the
-    # compiler's own (src/tls.h), not a package's.
+    # compiler fetch and build a package. The tls/ fixtures need the http
+    # package built with its TLS layer, which it is where Mbed TLS is in
+    # this tree (scripts/fetch_mbedtls.py; packages/http/CMakeLists.txt).
     builtin = tc.builtin_modules(exe)
     native = {m: m in builtin for m in tc.NATIVE_MODULES}
-    native["tls"] = tc.have_tls(exe)
+    native["tls"] = native["http"] and \
+        (tc.REPO_ROOT / "third_party" / "mbedtls" / "library" / "ssl_tls.c").is_file()
     print(f"profile: {args.profile}; C backend: {cc.desc if cc else 'none'}; "
           f"JIT backend: {'TinyCC' if jit else 'none'}; " +
           "; ".join(f"{m}: {'built in' if have else 'not built in'}" for m, have in native.items()))
@@ -1412,8 +1411,8 @@ def main():
     # package's response file (`goose --<name>-link`), in the order the
     # fixture names the modules, a ui one's before the gfx one it draws
     # through. A single program is built by `goose build` instead.
-    r.native_libs = {m: tc.native_link(exe, cc, m) if cc and have else []
-                     for m, have in native.items()}
+    r.native_libs = {m: tc.native_link(exe, cc, m) if cc and have and m in tc.NATIVE_MODULES
+                     else [] for m, have in native.items()}
     r.levels = ("0", "2") if args.profile == "baseline" else ("2",)
     r.gendir, r.dumpdir = gendir, dumpdir
     deepdir = gendir
@@ -1622,17 +1621,18 @@ def main():
             r.ok(what)
     r.show_task(sqlite_arity)
 
-    # The sqlite package lives in this tree, so its module is checked against
-    # its C layer here (packages/sqlite/test/api_check.py).
-    def sqlite_api():
-        code, out, err = tc.run_capture([sys.executable, tc.REPO_ROOT / "packages" / "sqlite" / "test" /
+    # The sqlite and http packages live in this tree, so their modules are
+    # checked against their C layers here (packages/<name>/test/api_check.py).
+    def package_api(name, header):
+        code, out, err = tc.run_capture([sys.executable, tc.REPO_ROOT / "packages" / name / "test" /
                                          "api_check.py"])
-        what = "api packages/sqlite: sqlite_api.h and sqlite.goose agree"
+        what = f"api packages/{name}: {header} and {name}.goose agree"
         if code != 0:
             r.fail(what, out + err)
         else:
             r.ok(what)
-    r.show_task(sqlite_api)
+    r.show_task(package_api, "sqlite", "sqlite_api.h")
+    r.show_task(package_api, "http", "http_api.h")
     has_sql_types = has_sql
 
     # What --sqlite-types prints for the checked SQL test's statements.

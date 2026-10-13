@@ -12,3 +12,4 @@ gfx            gfx      github.com/mgasner/goose_gfx        v2
 audio          gfx      github.com/mgasner/goose_gfx        v2
 ui             gfx      github.com/mgasner/goose_gfx        v2
 sqlite         sqlite   ./packages/sqlite                   -
+http           http     ./packages/http                     -

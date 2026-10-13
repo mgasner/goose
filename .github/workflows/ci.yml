@@ -63,7 +63,7 @@ jobs:
       - name: Fetch SQLite
         run: python scripts/fetch_sqlite.py
 
-      # Mbed TLS, which https:// in the http module is built on, is fetched
+      # Mbed TLS, which https:// in the http package is built on, is fetched
       # rather than committed (third_party/mbedtls/README.md). Windows skips
       # building it: the http module's sockets do not run there yet.
       - name: Fetch Mbed TLS

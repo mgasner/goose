@@ -643,8 +643,12 @@ diverge. Subprocesses are not in v1; networking is the `http` module's.
 
 ## http
 
-`import http;` is an HTTP/1.1 server and client (`stdlib/http.goose`), on
-the sockets in `src/runtime/runtime_net.h`, for macOS, Linux and the BSDs.
+`import http;` is an HTTP/1.1 server and client, for macOS, Linux and the
+BSDs. A package, in this tree under `packages/http`: `http.goose` over its
+sockets in C (`src/http_layer.c`). A compiler configured with the package
+(`-DGOOSE_BUILTIN_LIBS=all`, or naming `http`) has it built in; otherwise a
+program importing it has it built into GOOSE_HOME on first use. It is not
+main-thread-only: each worker runs its own server.
 [`http.md`](http.md) is the guide; [`design/http.md`](design/http.md) is the
 design; `bench/http/` measures it against nginx and libuv.
 
@@ -677,14 +681,16 @@ and `Expect: 100-continue` are handled, and malformed or oversized requests
 are refused.
 
 URLs may be `http://` or `https://`. HTTPS runs on Mbed TLS, an optional
-part of the build (`python scripts/fetch_mbedtls.py`, then configure). The
+part of the package, built in where Mbed TLS is there (`python
+scripts/fetch_mbedtls.py`, then build). The
 client verifies the server's certificate against the system's CAs, or the
 PEM bundle in `Client.ca_file`, and checks that it names the host, which it
 also sends as SNI. It speaks TLS 1.2 and 1.3. `Client.insecure_skip_verify`
 turns all of that off, for tests only. `serve_tls` serves HTTPS with a PEM
-certificate chain and key, loaded by each worker for itself. A JIT run has
-TLS when the compiler does; C built with `-o` links what `goose --tls-link
-cc` names, compiled in the same command. Without TLS a program still
+certificate chain and key, loaded by each worker for itself. Every program
+using the package has TLS when the package was built with it: `goose build`
+and `goose run` take the package as they take any other, and C built with
+`-o` links what `goose --http-link cc` names. Without TLS a program still
 builds and runs, and `https://` and `serve_tls` fail, with `c.error` or
 `tls_error` saying why. [`http.md`](http.md) §3 has the details.
 
@@ -952,8 +958,8 @@ regex::format_replaced(out, field, template) { caps =>
 and `json` (`stdlib/inference/`): the Anthropic Messages API, OpenAI-compatible
 Chat Completions, and providers a program declares itself.
 [`inference.md`](inference.md) is the guide; [`design/inference.md`](design/inference.md)
-is the design. Hosted APIs are `https://`, which needs a program with TLS
-(`goose --tls-link`, see `http` above); local servers take an `http://` base URL.
+is the design. Hosted APIs are `https://`, which needs the http package built
+with TLS (see `http` above); local servers take an `http://` base URL.
 
 ```goose
 fn anthropic(api_key: const u8[:], base_url: const u8[:] = "https://api.anthropic.com") -> Client<Anthropic>

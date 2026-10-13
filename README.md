@@ -428,12 +428,13 @@ Linux, SDL needs the X11 or Wayland development packages
 ([`third_party/SDL/docs/README-linux.md`](https://github.com/libsdl-org/SDL/blob/main/docs/README-linux.md));
 without them the build leaves the `gfx` module out and says what to install.
 
-HTTPS in the `http` module is built on Mbed TLS, which is fetched rather than
-being a submodule: `python scripts/fetch_mbedtls.py` downloads the pinned
-release and checks its hash, and the next configure builds it in
+HTTPS in the `http` package (`packages/http`) is built on Mbed TLS, which is
+fetched rather than being a submodule: `python scripts/fetch_mbedtls.py`
+downloads the pinned release and checks its hash, and the package builds it
+in the next time it is built
 ([`third_party/mbedtls/README.md`](third_party/mbedtls/README.md)). Without
-it, or with `-DGOOSE_TLS=OFF`, `https://` fails with an error saying TLS is
-not built in.
+it, or with the package's `-DGOOSE_HTTP_TLS=OFF`, `https://` fails with an
+error saying TLS is not built in.
 
 The runner scripts prefer `build/Release`, then `build/RelWithDebInfo`, then
 `build`, then `build/Debug`. Pass `--exe` to select a specific compiler; use an
@@ -503,14 +504,13 @@ once and linked with every program (`cc -O2 tour.c goose_runtime.o -o tour
 runtime with the compiler and flags the programs use; it takes no `-D` of its
 own, and a program from another version of the compiler fails to link
 against it. `--standalone` writes a C file that holds the whole runtime
-instead, and builds on its own. A program using `audio`, `gfx`, `physics` or
-`ui` also links that module's layer, which `goose --audio-link msvc|cc`,
-`--gfx-link`, `--physics-link` and `--ui-link` name in a response file (`cc
-cube.c goose_runtime.o -o cube @$(goose --gfx-link cc)`, a ui program's
-before the gfx one it draws through), and a program using `https://` links
-the TLS layer `goose --tls-link cc` names, which also turns TLS on in the
-program's C. `goose build --dry-run` prints all of this for the program at
-hand.
+instead, and builds on its own. A program using `audio`, `gfx`, `physics`,
+`ui`, `sqlite` or `http` also links that package's native part, which `goose
+--audio-link msvc|cc`, `--gfx-link`, `--physics-link`, `--ui-link`,
+`--sqlite-link` and `--http-link` name in a response file (`cc cube.c
+goose_runtime.o -o cube @$(goose --gfx-link cc)`, a ui program's before the
+gfx one it draws through). `goose build --dry-run` prints all of this for the
+program at hand.
 
 A program using `audio` plays procedural mono/stereo PCM through SDL3 without
 opening a graphics window. See the [audio reference](docs/stdlib.md#audio).

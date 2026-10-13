@@ -66,12 +66,9 @@ add_executable(goose
     src/runtime/runtime_threads.h
     src/runtime/runtime_ext.h
     src/runtime/runtime_os.h
-    src/runtime/runtime_net.h
-    src/runtime/runtime_tls.h
     src/gfx.h
     src/sqlite_check.h
     src/typecheck_sqlite.h
-    src/tls.h
 )
 
 # Keep argv, CRT file access, filesystem paths and Win32's narrow APIs in
@@ -163,28 +160,6 @@ endif()
 if(GOOSE_SQL_CHECK AND TARGET goose_sqlite3)
     target_link_libraries(goose PRIVATE goose_sqlite3)
     target_compile_definitions(goose PRIVATE GOOSE_HAVE_SQLITE=1)
-endif()
-
-# The optional TLS layer behind https:// in the http module: Mbed TLS,
-# vendored in third_party/mbedtls by scripts/fetch_mbedtls.py (not
-# committed), and the C layer over it (src/tls/), built in for JIT runs and
-# linked into programs built from the generated C (`goose build` adds it;
-# `goose --tls-link cc` names it). It is the compiler's own rather than a
-# blessed package's, since http is a stdlib module whose runtime reaches the
-# layer through a table the program passes (src/tls.h). Without Mbed TLS,
-# or with -DGOOSE_TLS=OFF, the compiler builds and behaves the same, except
-# that https:// fails with an error saying TLS is not built in.
-option(GOOSE_TLS "Build TLS for the http module from the vendored Mbed TLS" ON)
-if(GOOSE_TLS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/library/ssl_tls.c")
-    include(cmake/tls.cmake)
-elseif(GOOSE_TLS)
-    message(STATUS "tls: third_party/mbedtls is empty (python scripts/fetch_mbedtls.py "
-                   "fetches it); building without TLS")
-endif()
-if(GOOSE_HAVE_TLS)
-    target_link_libraries(goose PRIVATE goose_tls)
-    target_compile_definitions(goose PRIVATE
-        GOOSE_HAVE_TLS=1 GOOSE_TLS_LINK_PATH="${CMAKE_BINARY_DIR}/tls/$<CONFIG>")
 endif()
 
 if(MSVC)

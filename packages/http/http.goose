@@ -2,48 +2,51 @@
 // tests and tools. See docs/http.md for how to use it and
 // docs/design/http.md for the design.
 //
-// The runtime (src/runtime/runtime_net.h) moves bytes and nothing else: a
-// worker's engine reads a connection's input straight onto the worker's
-// buffer, and the parsing, the handler and the response are all Goose.
-// Every worker runs its own engine on its own listener, so a server is one
-// `serve` per worker and nothing is shared between them.
+// This is the http package (packages/http in the Goose tree, a blessed
+// package: `import http;`). Its C part (src/http_layer.c, listed in
+// src/http_api.h) moves bytes and nothing else: a worker's engine reads a
+// connection's input straight onto the worker's buffer, and the parsing,
+// the handler and the response are all Goose. Every worker runs its own
+// engine on its own listener, so a server is one `serve` per worker and
+// nothing is shared between them.
 //
-// TLS (https://, serve_tls) is the runtime's too, over Mbed TLS: a program
-// built without it still builds and runs, and its https:// fails saying so.
+// TLS (https://, serve_tls) is the C part's too, over Mbed TLS, built in
+// when the package finds Mbed TLS (CMakeLists.txt): built without it, a
+// program still builds and runs, and its https:// fails saying so.
 
 namespace http;
 
 import std;
 
-extern "gs_net_listen" fn net_listen(host: const u8[:], port: i64, backlog: i64) -> i64;
-extern "gs_net_port" fn net_port(fd: i64) -> i64;
-extern "gs_net_open" fn net_open(listener: i64, idle_ms: i64) -> i64;
-extern "gs_net_wait" fn net_wait(engine: i64, buf: u8[>..]&) -> i64;
-extern "gs_net_write" fn net_write(engine: i64, conn: i64, a: const u8[:], b: const u8[:]) -> bool;
-extern "gs_net_done" fn net_done(engine: i64, conn: i64, rest: const u8[:], need: i64, close: bool);
-extern "gs_net_live" fn net_live(engine: i64) -> i64;
-extern "gs_net_close" fn net_close(engine: i64);
-extern "gs_net_date" fn net_date(out: u8[:]) -> i64;
+extern "gs_http_listen" fn net_listen(host: const u8[:], port: i64, backlog: i64) -> i64;
+extern "gs_http_port" fn net_port(fd: i64) -> i64;
+extern "gs_http_open" fn net_open(listener: i64, idle_ms: i64) -> i64;
+extern "gs_http_wait" fn net_wait(engine: i64, buf: u8[>..]&) -> i64;
+extern "gs_http_write" fn net_write(engine: i64, conn: i64, a: const u8[:], b: const u8[:]) -> bool;
+extern "gs_http_done" fn net_done(engine: i64, conn: i64, rest: const u8[:], need: i64, close: bool);
+extern "gs_http_live" fn net_live(engine: i64) -> i64;
+extern "gs_http_close" fn net_close(engine: i64);
+extern "gs_http_date" fn net_date(out: u8[:]) -> i64;
 
 // Sockets for the client, blocking: connect gives a socket or -1, and a
 // send or receive waiting longer than timeout_ms (0: forever) fails.
-extern "gs_net_connect" fn connect(host: const u8[:], port: i64, timeout_ms: i64) -> i64;
-extern "gs_net_send" fn send(fd: i64, data: const u8[:]) -> bool;            // all of it
-extern "gs_net_recv" fn recv(fd: i64, out: u8[>..]&, max: i64) -> i64;      // appends one read; 0 at the end
-extern "gs_net_close_fd" fn close(fd: i64);
+extern "gs_http_connect" fn connect(host: const u8[:], port: i64, timeout_ms: i64) -> i64;
+extern "gs_http_send" fn send(fd: i64, data: const u8[:]) -> bool;            // all of it
+extern "gs_http_recv" fn recv(fd: i64, out: u8[>..]&, max: i64) -> i64;      // appends one read; 0 at the end
+extern "gs_http_close_fd" fn close(fd: i64);
 
-// TLS, for https:// and serve_tls (src/runtime/runtime_tls.h). A session is
+// TLS, for https:// and serve_tls (src/tls_layer.c). A session is
 // opened over a connected socket, its handshake done, and closed before the
 // socket; the reason anything failed is the thread's tls_error.
-extern "gs_tls_available" fn tls_available() -> bool;
-extern "gs_tls_client" fn tls_client(fd: i64, host: const u8[:], ca_file: const u8[:],
+extern "gs_http_tls_available" fn tls_available() -> bool;
+extern "gs_http_tls_client" fn tls_client(fd: i64, host: const u8[:], ca_file: const u8[:],
                                      insecure: bool) -> i64;
-extern "gs_tls_open_engine" fn net_open_tls(listener: i64, idle_ms: i64, cert_file: const u8[:],
+extern "gs_http_open_tls" fn net_open_tls(listener: i64, idle_ms: i64, cert_file: const u8[:],
                                             key_file: const u8[:]) -> i64;
-extern "gs_net_tls_send" fn tls_send(t: i64, data: const u8[:]) -> bool;        // all of it
-extern "gs_net_tls_recv" fn tls_recv(t: i64, out: u8[>..]&, max: i64) -> i64;  // appends; 0 at the end
-extern "gs_net_tls_close" fn tls_close(t: i64);
-extern "gs_net_tls_error" fn tls_error_text(out: u8[:]) -> i64;
+extern "gs_http_tls_send" fn tls_send(t: i64, data: const u8[:]) -> bool;        // all of it
+extern "gs_http_tls_recv" fn tls_recv(t: i64, out: u8[>..]&, max: i64) -> i64;  // appends; 0 at the end
+extern "gs_http_tls_close" fn tls_close(t: i64);
+extern "gs_http_tls_error" fn tls_error_text(out: u8[:]) -> i64;
 
 // Appends why the last TLS operation on this thread failed: an https://
 // connection, or serve_tls loading its certificate.

@@ -1,13 +1,13 @@
-/* Goose runtime: the sockets behind stdlib/http.goose (spec §7.10), as
-   runtime_ext.h declares them, which this follows; docs/design/http.md has
-   the design.
+/* The http package's native part: the sockets behind http.goose, as
+   http_api.h lists them; docs/design/http.md (in the Goose tree) has the
+   design.
 
    An engine is one worker's event loop: a kqueue (macOS, BSD) or an epoll
    instance (Linux), its listening socket, and the connections it accepted.
    Engines are not shared: each worker opens its own, and nothing here locks
    on the request path. The Goose side does all of HTTP. The engine moves
-   bytes: gs_net_wait reads a connection's input straight onto the top of
-   the caller's builder, the program parses what it can, and gs_net_done
+   bytes: gs_http_wait reads a connection's input straight onto the top of
+   the caller's builder, the program parses what it can, and gs_http_done
    hands back the unparsed rest, which the engine keeps until more arrives.
 
    A handle names a connection as its slot in the engine's table and that
@@ -15,13 +15,70 @@
    nothing rather than whatever reuses the slot. Engines are numbered in one
    process-wide table, so a stray number is refused, not dereferenced.
 
-   TLS goes through the table of the TLS layer's functions a program passes
-   (gs_net_tls_ops, runtime_ext.h): an engine opened with one runs a session
-   per connection, and a client socket can carry one. The runtime knows
-   nothing of Mbed TLS, and a program built without the layer passes no
-   table, so https:// fails with an error that says why.
+   TLS goes through a table of the TLS layer's functions (tls_layer.c, over
+   Mbed TLS): an engine opened with one runs a session per connection, and
+   a client socket can carry one. The package builds the layer when Mbed
+   TLS is there (GS_HTTP_TLS, CMakeLists.txt); without it there is no
+   table, and https:// fails with an error that says why.
+
+   This was the runtime's runtime_net.h while http was a stdlib module; it
+   uses nothing of the runtime: it appends to a Goose builder as the
+   runtime's own functions do, through the builder's header and stack.
 
    Windows has no implementation yet: every call fails (-1 or false). */
+
+#include "http_api.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if defined(_MSC_VER)
+#define GS_HTTP_THREAD_LOCAL __declspec(thread)
+#else
+#define GS_HTTP_THREAD_LOCAL _Thread_local
+#endif
+
+/* Appends n bytes to the u8[>..] a builder reference points at: the
+   resizable's elements top its stack, so the bytes go at the stack top and
+   the header's count grows. */
+static void gs_http_append(gs_http_builder b, const void *p, int64_t n) {
+    if (n <= 0) return;
+    memcpy(b.stk->top, p, (size_t)n);
+    b.stk->top += n;
+    b.hdr->len += n;
+}
+
+/* The TLS layer's functions (tls_api.h has what each does), as a table, so
+   that the engine and the client sockets are written once for plain TCP and
+   TLS. NULL when the package was built without Mbed TLS. */
+typedef struct gs_net_tls_ops {
+    void *(*client)(int fd, const char *host, const char *ca_file, int insecure, char *err,
+                    size_t errcap);
+    void *(*server)(const char *cert_file, const char *key_file, char *err, size_t errcap);
+    void (*server_free)(void *conf);
+    void *(*accept)(void *conf, int fd);
+    int (*handshake)(void *t);
+    int64_t (*read)(void *t, uint8_t *dst, int64_t max);
+    int64_t (*write)(void *t, const uint8_t *src, int64_t n);
+    int64_t (*pending)(void *t);
+    void (*free)(void *t);
+} gs_net_tls_ops;
+
+#ifdef GS_HTTP_TLS
+#include "tls_api.h"
+static const gs_net_tls_ops gs_net_tls_table = {
+    gs_tls_layer_client, gs_tls_layer_server, gs_tls_layer_server_free,
+    gs_tls_layer_accept, gs_tls_layer_handshake, gs_tls_layer_read,
+    gs_tls_layer_write, gs_tls_layer_pending, gs_tls_layer_free,
+};
+#define GS_HTTP_TLS_OPS (&gs_net_tls_table)
+#else
+#define GS_HTTP_TLS_OPS ((const gs_net_tls_ops *)0)
+#endif
+
+/* Whether this package was built with TLS. */
+uint8_t gs_http_tls_available(void) { return GS_HTTP_TLS_OPS != 0; }
 
 #ifndef _WIN32
 #include <errno.h>
@@ -114,7 +171,7 @@ static void gs_net_nonblock(int fd) {
 
 /* A host name or address as a C string; -1 if it does not fit or holds a
    NUL. */
-static int gs_net_cstr(sl_u8 s, char *buf, int cap) {
+static int gs_net_cstr(gs_http_bytes s, char *buf, int cap) {
     if (s.len < 0 || s.len >= cap || memchr(s.data, 0, (size_t)s.len)) return -1;
     memcpy(buf, s.data, (size_t)s.len);
     buf[s.len] = 0;
@@ -163,7 +220,7 @@ static int gs_net_open_listener(const char *host, int64_t port, int64_t backlog)
     return fd;
 }
 
-GS_API int64_t gs_net_listen(sl_u8 host, int64_t port, int64_t backlog) {
+int64_t gs_http_listen(gs_http_bytes host, int64_t port, int64_t backlog) {
     char h[256];
     if (gs_net_cstr(host, h, sizeof(h)) < 0 || port < 0 || port > 65535) return -1;
 #if GS_NET_EPOLL
@@ -190,7 +247,7 @@ GS_API int64_t gs_net_listen(sl_u8 host, int64_t port, int64_t backlog) {
 
 /* The port a socket is bound to (a listener opened on port 0 has one the
    system chose), or -1. */
-GS_API int64_t gs_net_port(int64_t fd) {
+int64_t gs_http_port(int64_t fd) {
     struct sockaddr_storage ss;
     socklen_t n = sizeof(ss);
     if (fd < 0 || getsockname((int)fd, (struct sockaddr *)&ss, &n) != 0) return -1;
@@ -248,28 +305,30 @@ static gs_net_engine *gs_net_engine_of(int64_t id) {
     return gs_net_engines[id];
 }
 
-/* The calling thread's last TLS error, for gs_net_tls_error. */
-static GS_TLS char gs_net_tls_err[256];
+/* The calling thread's last TLS error, for gs_http_tls_error. */
+static GS_HTTP_THREAD_LOCAL char gs_net_tls_err[256];
 
 static const char gs_net_no_tls[] =
-    "TLS: this program was built without TLS (build goose with Mbed TLS, "
-    "python scripts/fetch_mbedtls.py, and link with `goose --tls-link cc`)";
+    "TLS: this program was built without TLS (the http package was built "
+    "without Mbed TLS: run python scripts/fetch_mbedtls.py in the Goose tree, "
+    "or put Mbed TLS in the package's third_party/mbedtls, and rebuild)";
 
 static int64_t gs_net_open_engine(int64_t lfd, int64_t idle_ms, const gs_net_tls_ops *ops,
                                   void *tlsconf);
 
 /* An engine waiting on listener lfd; its number, or -1. idle_ms closes a
    connection that has been silent that long (0: never). */
-GS_API int64_t gs_net_open(int64_t lfd, int64_t idle_ms) {
+int64_t gs_http_open(int64_t lfd, int64_t idle_ms) {
     return gs_net_open_engine(lfd, idle_ms, NULL, NULL);
 }
 
-/* An engine as gs_net_open makes, whose connections speak TLS with the
+/* An engine as gs_http_open makes, whose connections speak TLS with the
    certificate chain and key in the PEM files named; -1, with the reason in
-   gs_net_tls_error, if they cannot be loaded or ops is NULL. The
+   gs_http_tls_error, if they cannot be loaded or ops is NULL. The
    configuration is this engine's alone. */
-GS_API int64_t gs_net_open_tls(const gs_net_tls_ops *ops, int64_t lfd, int64_t idle_ms,
-                               sl_u8 cert_file, sl_u8 key_file) {
+int64_t gs_http_open_tls(int64_t lfd, int64_t idle_ms, gs_http_bytes cert_file,
+                         gs_http_bytes key_file) {
+    const gs_net_tls_ops *ops = GS_HTTP_TLS_OPS;
     char cert[1024], key[1024];
     if (!ops) {
         snprintf(gs_net_tls_err, sizeof(gs_net_tls_err), "%s", gs_net_no_tls);
@@ -500,7 +559,7 @@ static void gs_net_sweep(gs_net_engine *e, int64_t now) {
    writes pending output, and reads its input onto buf. The handle when the
    input is ready for the program, or -1. */
 static int64_t gs_net_service(gs_net_engine *e, gs_net_conn *c, uint64_t tag, int readable,
-                              int writable, gs_rref buf) {
+                              int writable, gs_http_builder buf) {
     if (c->hs) {
         int r = e->ops->handshake(c->tls);
         c->last_ms = gs_net_now_ms();
@@ -530,7 +589,7 @@ static int64_t gs_net_service(gs_net_engine *e, gs_net_conn *c, uint64_t tag, in
        until the program's need is met. */
     int64_t base = buf.hdr->len;
     uint8_t *top0 = buf.stk->top;
-    gs_bld_append(buf, c->in, c->inlen);
+    gs_http_append(buf, c->in, c->inlen);
     int64_t have = c->inlen, got = 0;
     int eof = 0;
     for (;;) {
@@ -606,7 +665,7 @@ static int64_t gs_net_service(gs_net_engine *e, gs_net_conn *c, uint64_t tag, in
 /* Blocks until a connection has input, and appends all of it to buf: what
    the program handed back last time, then what the socket has. Its handle,
    or -1 if the engine is unknown or its poller failed. */
-GS_API int64_t gs_net_wait(int64_t id, gs_rref buf) {
+int64_t gs_http_wait(int64_t id, gs_http_builder buf) {
     gs_net_engine *e = gs_net_engine_of(id);
     if (!e) return -1;
     for (;;) {
@@ -661,7 +720,7 @@ GS_API int64_t gs_net_wait(int64_t id, gs_rref buf) {
 /* Sends a then b (either may be empty) on a connection, in one writev
    when the socket takes it all, keeping what it does not take; false if
    the connection is gone. */
-GS_API uint8_t gs_net_write(int64_t id, int64_t h, sl_u8 a, sl_u8 b) {
+uint8_t gs_http_write(int64_t id, int64_t h, gs_http_bytes a, gs_http_bytes b) {
     gs_net_engine *e = gs_net_engine_of(id);
     gs_net_conn *c = e ? gs_net_conn_of(e, h) : NULL;
     if (!c) return 0;
@@ -717,7 +776,7 @@ GS_API uint8_t gs_net_write(int64_t id, int64_t h, sl_u8 a, sl_u8 b) {
 /* Ends a delivery: rest is the input the program did not consume, kept for
    the next one, which waits until need bytes are buffered in all (0: any
    new input). close ends the connection once its output is written. */
-GS_API void gs_net_done(int64_t id, int64_t h, sl_u8 rest, int64_t need, uint8_t close_) {
+void gs_http_done(int64_t id, int64_t h, gs_http_bytes rest, int64_t need, uint8_t close_) {
     gs_net_engine *e = gs_net_engine_of(id);
     gs_net_conn *c = e ? gs_net_conn_of(e, h) : NULL;
     if (!c) return;
@@ -735,12 +794,12 @@ GS_API void gs_net_done(int64_t id, int64_t h, sl_u8 rest, int64_t need, uint8_t
 }
 
 /* The connections an engine has open. */
-GS_API int64_t gs_net_live(int64_t id) {
+int64_t gs_http_live(int64_t id) {
     gs_net_engine *e = gs_net_engine_of(id);
     return e ? e->live : -1;
 }
 
-GS_API void gs_net_close(int64_t id) {
+void gs_http_close(int64_t id) {
     gs_net_engine *e = gs_net_engine_of(id);
     if (!e) return;
     for (int32_t i = 0; i < e->nconns; i++) gs_net_close_conn(e, &e->conns[i]);
@@ -758,7 +817,7 @@ GS_API void gs_net_close(int64_t id) {
 
 /* A connected socket, or -1. A send or receive that waits timeout_ms
    (0: forever) fails. */
-GS_API int64_t gs_net_connect(sl_u8 host, int64_t port, int64_t timeout_ms) {
+int64_t gs_http_connect(gs_http_bytes host, int64_t port, int64_t timeout_ms) {
     char h[256], portstr[16];
     struct addrinfo hints, *res = NULL, *ai;
     int fd = -1, one = 1;
@@ -796,7 +855,7 @@ GS_API int64_t gs_net_connect(sl_u8 host, int64_t port, int64_t timeout_ms) {
     return fd;
 }
 
-GS_API uint8_t gs_net_send(int64_t fd, sl_u8 data) {
+uint8_t gs_http_send(int64_t fd, gs_http_bytes data) {
     int64_t at = 0;
     while (at < data.len) {
         ssize_t n = send((int)fd, data.data + at, (size_t)(data.len - at),
@@ -815,7 +874,7 @@ GS_API uint8_t gs_net_send(int64_t fd, sl_u8 data) {
 
 /* Appends what one read gets, at most max bytes: their count, 0 at the end
    of the stream, -1 on an error. */
-GS_API int64_t gs_net_recv(int64_t fd, gs_rref out, int64_t max) {
+int64_t gs_http_recv(int64_t fd, gs_http_builder out, int64_t max) {
     if (max <= 0) return 0;
     for (;;) {
         ssize_t n = recv((int)fd, out.stk->top, (size_t)max, 0);
@@ -828,7 +887,7 @@ GS_API int64_t gs_net_recv(int64_t fd, gs_rref out, int64_t max) {
     }
 }
 
-GS_API void gs_net_close_fd(int64_t fd) {
+void gs_http_close_fd(int64_t fd) {
     if (fd >= 0) close((int)fd);
 }
 
@@ -859,10 +918,11 @@ static gs_net_tls_session *gs_net_tls_of(int64_t h) {
 /* A TLS session over connected socket fd, its handshake done: verifying
    the server's certificate against the PEM bundle ca_file ("" for the
    system's) and that it names host, which also goes out as SNI, unless
-   insecure. Its handle, or -1 with the reason in gs_net_tls_error. The
+   insecure. Its handle, or -1 with the reason in gs_http_tls_error. The
    socket stays the caller's to close. */
-GS_API int64_t gs_net_tls_client(const gs_net_tls_ops *ops, int64_t fd, sl_u8 host, sl_u8 ca_file,
-                                 uint8_t insecure) {
+int64_t gs_http_tls_client(int64_t fd, gs_http_bytes host, gs_http_bytes ca_file,
+                           uint8_t insecure) {
+    const gs_net_tls_ops *ops = GS_HTTP_TLS_OPS;
     char h[256], ca[1024];
     if (!ops) {
         snprintf(gs_net_tls_err, sizeof(gs_net_tls_err), "%s", gs_net_no_tls);
@@ -899,7 +959,7 @@ GS_API int64_t gs_net_tls_client(const gs_net_tls_ops *ops, int64_t fd, sl_u8 ho
     return id;
 }
 
-GS_API uint8_t gs_net_tls_send(int64_t h, sl_u8 data) {
+uint8_t gs_http_tls_send(int64_t h, gs_http_bytes data) {
     gs_net_tls_session *s = gs_net_tls_of(h);
     if (!s) return 0;
     int64_t at = 0;
@@ -914,7 +974,7 @@ GS_API uint8_t gs_net_tls_send(int64_t h, sl_u8 data) {
 /* Appends what the session has, at most max bytes: blocks for the first
    record, then takes what follows without waiting. Their count, 0 at the
    end of the stream, -1 on an error or a timeout. */
-GS_API int64_t gs_net_tls_recv(int64_t h, gs_rref out, int64_t max) {
+int64_t gs_http_tls_recv(int64_t h, gs_http_builder out, int64_t max) {
     gs_net_tls_session *s = gs_net_tls_of(h);
     if (!s) return -1;
     int64_t got = 0;
@@ -936,7 +996,7 @@ GS_API int64_t gs_net_tls_recv(int64_t h, gs_rref out, int64_t max) {
 
 /* Ends the session, with a close_notify if the socket takes it; the socket
    stays open. */
-GS_API void gs_net_tls_close(int64_t h) {
+void gs_http_tls_close(int64_t h) {
     gs_net_tls_session *s = gs_net_tls_of(h);
     if (!s) return;
     pthread_mutex_lock(&gs_net_mutex);
@@ -947,7 +1007,7 @@ GS_API void gs_net_tls_close(int64_t h) {
 }
 
 /* The calling thread's last TLS error, copied into out: its length. */
-GS_API int64_t gs_net_tls_error(sl_u8 out) {
+int64_t gs_http_tls_error(gs_http_bytes out) {
     int64_t n = (int64_t)strlen(gs_net_tls_err);
     if (n > out.len) n = out.len;
     memcpy(out.data, gs_net_tls_err, (size_t)n);
@@ -956,43 +1016,43 @@ GS_API int64_t gs_net_tls_error(sl_u8 out) {
 
 #else  /* _WIN32: not yet */
 
-GS_API int64_t gs_net_listen(sl_u8 host, int64_t port, int64_t backlog) { return -1; }
-GS_API int64_t gs_net_port(int64_t fd) { return -1; }
-GS_API int64_t gs_net_open(int64_t lfd, int64_t idle_ms) { return -1; }
-GS_API int64_t gs_net_wait(int64_t id, gs_rref buf) { return -1; }
-GS_API uint8_t gs_net_write(int64_t id, int64_t h, sl_u8 a, sl_u8 b) { return 0; }
-GS_API void gs_net_done(int64_t id, int64_t h, sl_u8 rest, int64_t need, uint8_t close_) {}
-GS_API int64_t gs_net_live(int64_t id) { return -1; }
-GS_API void gs_net_close(int64_t id) {}
+int64_t gs_http_listen(gs_http_bytes host, int64_t port, int64_t backlog) { return -1; }
+int64_t gs_http_port(int64_t fd) { return -1; }
+int64_t gs_http_open(int64_t lfd, int64_t idle_ms) { return -1; }
+int64_t gs_http_wait(int64_t id, gs_http_builder buf) { return -1; }
+uint8_t gs_http_write(int64_t id, int64_t h, gs_http_bytes a, gs_http_bytes b) { return 0; }
+void gs_http_done(int64_t id, int64_t h, gs_http_bytes rest, int64_t need, uint8_t close_) {}
+int64_t gs_http_live(int64_t id) { return -1; }
+void gs_http_close(int64_t id) {}
 /* A connected socket, or -1. A send or receive that waits timeout_ms
    (0: forever) fails. */
-GS_API int64_t gs_net_connect(sl_u8 host, int64_t port, int64_t timeout_ms) { return -1; }
-GS_API uint8_t gs_net_send(int64_t fd, sl_u8 data) { return 0; }
-GS_API int64_t gs_net_recv(int64_t fd, gs_rref out, int64_t max) { return -1; }
-GS_API void gs_net_close_fd(int64_t fd) {}
-GS_API int64_t gs_net_tls_client(const gs_net_tls_ops *ops, int64_t fd, sl_u8 host, sl_u8 ca_file,
-                                 uint8_t insecure) { return -1; }
-GS_API uint8_t gs_net_tls_send(int64_t h, sl_u8 data) { return 0; }
-GS_API int64_t gs_net_tls_recv(int64_t h, gs_rref out, int64_t max) { return -1; }
-GS_API void gs_net_tls_close(int64_t h) {}
-GS_API int64_t gs_net_tls_error(sl_u8 out) {
+int64_t gs_http_connect(gs_http_bytes host, int64_t port, int64_t timeout_ms) { return -1; }
+uint8_t gs_http_send(int64_t fd, gs_http_bytes data) { return 0; }
+int64_t gs_http_recv(int64_t fd, gs_http_builder out, int64_t max) { return -1; }
+void gs_http_close_fd(int64_t fd) {}
+int64_t gs_http_tls_client(int64_t fd, gs_http_bytes host, gs_http_bytes ca_file,
+                           uint8_t insecure) { return -1; }
+uint8_t gs_http_tls_send(int64_t h, gs_http_bytes data) { return 0; }
+int64_t gs_http_tls_recv(int64_t h, gs_http_builder out, int64_t max) { return -1; }
+void gs_http_tls_close(int64_t h) {}
+int64_t gs_http_tls_error(gs_http_bytes out) {
     static const char msg[] = "TLS: the http module does not run on Windows yet";
     int64_t n = (int64_t)sizeof(msg) - 1;
     if (n > out.len) n = out.len;
     memcpy(out.data, msg, (size_t)n);
     return n;
 }
-GS_API int64_t gs_net_open_tls(const gs_net_tls_ops *ops, int64_t lfd, int64_t idle_ms,
-                               sl_u8 cert_file, sl_u8 key_file) { return -1; }
+int64_t gs_http_open_tls(int64_t lfd, int64_t idle_ms, gs_http_bytes cert_file,
+                         gs_http_bytes key_file) { return -1; }
 
 #endif
 
 /* The current time as an HTTP date (IMF-fixdate, 29 bytes) in out, which
    must hold 29; the count written, or 0. Formatted once a second per
    thread. */
-GS_API int64_t gs_net_date(sl_u8 out) {
-    static GS_TLS time_t last;
-    static GS_TLS char text[32];
+int64_t gs_http_date(gs_http_bytes out) {
+    static GS_HTTP_THREAD_LOCAL time_t last;
+    static GS_HTTP_THREAD_LOCAL char text[32];
     static const char days[] = "SunMonTueWedThuFriSat";
     static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
     if (out.len < 29) return 0;

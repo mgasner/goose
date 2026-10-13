@@ -1,0 +1,5 @@
+// The http package's native part: the sockets and engine, and TLS over
+// Mbed TLS where it is there, a CMake project (CMakeLists.txt beside this
+// file). Not main_thread_only: an engine belongs to the worker thread that
+// opened it, and every worker runs its own.
+cmake_target = "goose_http";

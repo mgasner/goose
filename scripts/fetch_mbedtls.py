@@ -1,10 +1,10 @@
-"""Vendors Mbed TLS for HTTPS in the http module: downloads the pinned
+"""Vendors Mbed TLS for HTTPS in the http package: downloads the pinned
 release from the Mbed-TLS GitHub project, checks it against the SHA-256
 recorded here, and writes its library/ and include/ trees (and its LICENSE)
-into third_party/mbedtls/, where cmake/tls.cmake looks for them. They are not
-committed (third_party/mbedtls/README.md says why). Without them the compiler
-builds as before, and an https:// URL fails with an error saying TLS was not
-built in.
+into third_party/mbedtls/, where packages/http/CMakeLists.txt looks for
+them. They are not committed (third_party/mbedtls/README.md says why).
+Without them the package builds without TLS, and an https:// URL fails with
+an error saying TLS was not built in.
 
     python scripts/fetch_mbedtls.py            # fetch, unless already there
     python scripts/fetch_mbedtls.py --force    # fetch again

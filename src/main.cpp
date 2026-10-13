@@ -9,6 +9,7 @@
 #include "parser.h"
 #include "sqlite_check.h"
 #include "resolve.h"
+#include "deferred.h"
 #include "builtins.h"
 #include "gfx.h"
 #include "audio.h"
@@ -527,6 +528,7 @@ int Main(int argc, char **argv) {
             fprintf(msgs, "roundtrip ok: %d bytes of dump\n", (int)dumped.size());
         }
         if (parseonly) return 0;
+        CollectDeferredMembers(ast);
         TypeCheckProgram(ast, library, nocgen);
         Optimizer opt(ast, optlevel);
         if (specs) {

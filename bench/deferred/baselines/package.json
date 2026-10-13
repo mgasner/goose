@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "description": "The graphql-js + DataLoader baseline of bench/deferred; deferred_bench.py installs it into bench/gen/deferred/node.",
+  "type": "module",
+  "dependencies": {
+    "dataloader": "2.2.3",
+    "graphql": "16.11.0"
+  }
+}

@@ -698,6 +698,8 @@ struct BCE {
         if (auto b = Is<Binary>(n); b && (b->op == T_MOD || b->op == T_BITAND))
             return Derived(n, [&] { return RangedOpTerm(b); });
         if (auto ac = Is<AsCast>(n)) return Derived(n, [&] { return CastTerm(ac); });
+        if (auto d = Is<Dot>(n); Is<Index>(n) || (d && d->IsField()))
+            return Derived(n, [&] { return LoadTerm(n); });
         // A spliced-in call body (or a bare block) is its value expression.
         if (auto ib = Is<InlineBlock>(n)) return BlockValueTerm(ib->body, ib->sf);
         if (auto bl = Is<Block>(n)) return BlockValueTerm(bl, nullptr);
@@ -759,6 +761,19 @@ struct BCE {
             AddFactB(m, rt.b, rt.off);
         }
         return Term { true, m, 0 };
+    }
+
+    // An element or field loaded from memory holds a value of its type, so
+    // one narrower than 64 bits lies in the type's range (§3.1) as a
+    // variable of that type does (the storage-range axiom): `T[s[i]]`
+    // against a `T[256]` needs no guard for a `u8` s. A wider one says
+    // nothing (TODO 0f).
+    Term LoadTerm(Node *n) {
+        if (mode == M_KILLS) return {};
+        auto t = n->exprtype;
+        if (!t || t->kind != TY_INT || IntBits(t->intstorage) >= 64) return {};
+        auto [lo, hi] = IntRange(t->intstorage);
+        return IvalTerm(t, lo, hi);
     }
 
     // A numeric cast whose value is inside the target's range is the

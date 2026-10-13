@@ -3442,12 +3442,12 @@ the end, each with where its resolution lives.
     cannot represent, so post-loop bounds rest on the inferred invariants
     instead; LLVM meets the same wall and works around it by duplicating
     blocks so the conditions never merge, which is available here too. A
-    value loaded from an array has no known range, so indirect indexing
+    64-bit value loaded from an array has no known range (a narrower one
+    has its type's, as a variable does), so indirect indexing
     (`dist[out[k]]`, `bench/goose/graph_csr.goose`) keeps its check — see
     0e. Release-mode wrapping (§6.2) is deliberate and stays, so the
     analysis proves absence of wrap explicitly where it needs to.
-    `docs/design/compiler_weak_spots.md` has more, with reproductions: a
-    `u8` loaded as an inner index (`T[s[i]]`) gets no range from its type;
+    `docs/design/compiler_weak_spots.md` has more, with reproductions:
     `i == n` does not combine with `i <= n`.
 0c. **Pointee writes through optionals** — a narrowed optional writes
     through fine, but there is no way to write through an optional without

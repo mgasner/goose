@@ -9,3 +9,7 @@ __pycache__
 # The SQLite amalgamation, fetched by scripts/fetch_sqlite.py (third_party/sqlite/README.md).
 third_party/sqlite/sqlite3.c
 third_party/sqlite/sqlite3.h
+
+# Mbed TLS, fetched by scripts/fetch_mbedtls.py (third_party/mbedtls/README.md).
+third_party/mbedtls/*
+!third_party/mbedtls/README.md

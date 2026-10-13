@@ -1,0 +1,66 @@
+-- calls, one reply, answered in one message
+  reply 1: tool_use
+  hook: allow t1 add {"a":2,"b":3}
+  t1 -> 5
+  t2 -> error: invalid input: missing required property "b"
+  t3 -> error: unknown tool: nope
+  hook: deny t4
+  t4 -> error: denied: this call was not allowed
+  hook: allow t5 broken {}
+  t5 -> error: the disk is full
+  t6 -> error: invalid input: not a JSON object
+  reply 2: end_turn
+  run: stop=done turns=2 calls=6 tokens=200/20
+  > {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"5"},{"type":"tool_result","tool_use_id":"t2","content":"invalid input: missing required property \"b\"","is_error":true},{"type":"tool_result","tool_use_id":"t3","content":"unknown tool: nope","is_error":true},{"type":"tool_result","tool_use_id":"t4","content":"denied: this call was not allowed","is_error":true},{"type":"tool_result","tool_use_id":"t5","content":"the disk is full","is_error":true},{"type":"tool_result","tool_use_id":"t6","content":"invalid input: not a JSON object","is_error":true}]}
+  last text: Done: 5.
+-- max_turns, then resumed
+  reply 1: tool_use
+  hook: allow a1 add {"a":1,"b":1}
+  a1 -> 2
+  reply 2: tool_use
+  hook: allow a2 add {"a":2,"b":2}
+  a2 -> 4
+  run: stop=turns turns=2 calls=2 tokens=200/20
+  run: stop=done turns=1 calls=0 tokens=100/10
+  > {"role":"assistant","content":[{"type":"tool_use","id":"a2","name":"add","input":{"a":2,"b":2}}]}
+  > {"role":"user","content":[{"type":"tool_result","tool_use_id":"a2","content":"4"}]}
+-- output budget
+  reply 1: tool_use
+  hook: allow b1 add {"a":1,"b":2}
+  b1 -> 3
+  reply 2: tool_use
+  hook: allow b2 add {"a":3,"b":4}
+  b2 -> 7
+  run: stop=budget turns=2 calls=2 tokens=200/120
+-- truncated: no tool runs
+  reply 1: max_tokens
+  run: stop=truncated turns=1 calls=0 tokens=100/10
+-- refusal
+  reply 1: refusal
+  run: stop=refusal turns=1 calls=0 tokens=100/10
+-- pause_turn resumes with nothing added
+  reply 1: pause_turn
+  reply 2: end_turn
+  run: stop=done turns=2 calls=0 tokens=200/20
+  > {"role":"user","content":[{"type":"text","text":"Search."}]}
+  > {"role":"assistant","content":[{"type":"server_tool_use","id":"srv1","name":"web_search","input":{"query":"q"}}]}
+-- error
+  run: stop=error turns=1 calls=0 tokens=0/0 error=bad
+-- a hook stops the run
+  reply 1: tool_use
+  hook: allow h1 add {"a":5,"b":5}
+  h1 -> 10
+  hook: stop before request 2
+  run: stop=hook turns=1 calls=1 tokens=100/10
+-- over an OpenAI-compatible provider
+[agent] request 1
+[agent] reply 1: tool_calls, 50 in, 9 out
+[agent] call add {"a":20,"b":22}
+[agent] result add: 42
+[agent] error add: invalid input: not a JSON object
+[agent] request 2
+[agent] reply 2: stop, 70 in, 2 out
+  run: stop=done turns=2 calls=2 tokens=120/11
+  > {"role":"assistant","content":"Calling.","tool_calls":[{"id":"call_1","type":"function","function":{"name":"add","arguments":"{\"a\":20,\"b\":22}"}},{"id":"call_2","type":"function","function":{"name":"add","arguments":"{bad"}}]}
+  > {"role":"tool","tool_call_id":"call_1","content":"42"}
+  > {"role":"tool","tool_call_id":"call_2","content":"invalid input: not a JSON object"}

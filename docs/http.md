@@ -8,9 +8,9 @@ and a libuv server in C, is in
 [`../bench/http/results.md`](../bench/http/results.md).
 
 The server and client run on macOS, Linux and the BSDs. On Windows every
-call fails, as it does when a port cannot be opened. There is no TLS, so
-put a TLS-terminating proxy in front of a server that faces the internet,
-and don't use the client for `https://`.
+call fails, as it does when a port cannot be opened. Both speak HTTPS when
+Goose is built with Mbed TLS (§3): the client takes `https://` URLs, and
+`serve_tls` serves with a certificate and key.
 
 Threads need a C compiler: build with `goose -o prog.c --standalone
 prog.goose` and compile the result. The JIT cannot run threads.
@@ -160,6 +160,8 @@ if http::get("http://127.0.0.1:8080/hello", buf, rep) {
 http::post("http://127.0.0.1:8080/echo", "{}", "application/json", buf, rep);
 ```
 
+`get` and `post` take `https://` URLs as well (§3).
+
 ```goose
 struct Reply {
     status: i64,
@@ -189,6 +191,14 @@ http::close(c);
 ```
 
 ```goose
+struct Client {
+    timeout_ms: i64 = 30000,
+    max_body: i64 = 1 << 26,
+    ca_file: u8[..1024] = [],              // https://: trusted CAs, PEM; "" for the system's
+    insecure_skip_verify: bool = false,    // https:// without verifying: tests only
+    error: u8[..256] = [],                 // why the last fetch failed
+    ..                                     // the open connection: fd, tls, host, port, secure
+}
 fn fetch(c: Client&, method: const u8[:], url: const u8[:], buf: u8[>..]&, rep: Reply&,
          body: const u8[:] = "", headers: const u8[:] = "") -> bool
 ```
@@ -208,12 +218,119 @@ it.
   fails, and so does a body larger than `max_body` (64 MB by default).
   `c.error` says why.
 
-URLs are `http://host[:port][/path][?query]`. A fragment is dropped. IPv6
-addresses go in brackets. `https://` URLs and `user@` URLs are refused.
+URLs are `http://host[:port][/path][?query]` or the same with `https://`,
+whose port is 443 unless given. A fragment is dropped. IPv6 addresses go in
+brackets. `user@` URLs are refused. A kept connection is used again only
+for the same scheme, host and port.
 
 ---
 
-## 3. Parsing alone
+## 3. HTTPS
+
+### Building with TLS
+
+TLS is Mbed TLS 3.6, an optional part of the build, fetched rather than
+committed ([`../third_party/mbedtls/README.md`](../third_party/mbedtls/README.md)):
+
+```
+python scripts/fetch_mbedtls.py      # downloads 3.6.7 and checks its SHA-256
+cmake -B build && cmake --build build
+```
+
+How a program gets TLS depends on how it is run:
+
+- **In-process (JIT) runs** have it when the compiler was built with it.
+- **C written with `-o`** links what `goose --tls-link cc` names. The file
+  also defines `GS_TLS_LINKED`, which turns TLS on in the program's C, so
+  compile and link in one command:
+
+  ```
+  goose -o prog.c prog.goose && goose --emit-runtime rt.c
+  cc prog.c rt.c @$(goose --tls-link cc) -o prog
+  ```
+
+Without TLS a program still builds and runs. `https://` and `serve_tls`
+fail before connecting or listening, and the error says how to build with
+TLS. `http::tls_available()` tells a program which it is. TLS is not built
+on Windows, where the module's sockets do not run yet.
+
+### The client
+
+```goose
+var c = http::Client { timeout_ms: 10000, .. };
+var buf: u8[>..] = [];
+var rep = http::Reply { .. };
+if !http::fetch(c, "GET", "https://example.com/", buf, rep) {
+    print("failed: ", c.error);
+}
+```
+
+- **Verification.** The client verifies the server's certificate chain and
+  checks that the certificate names the host in the URL, by DNS name or IP
+  address. It also sends the host as SNI. If verification fails, the fetch
+  fails and `c.error` says why, for example "TLS: the server's certificate
+  is not signed by a trusted CA" or "TLS: the server's certificate does not
+  name this host".
+- **Trusted CAs.** By default these are the system's: the PEM bundle that
+  `SSL_CERT_FILE` names, else the first of `/etc/ssl/cert.pem` (macOS, the
+  BSDs), `/etc/ssl/certs/ca-certificates.crt` (Debian, Ubuntu),
+  `/etc/pki/tls/certs/ca-bundle.crt` (Fedora, RHEL) and a few more.
+  `c.ca_file` names a bundle of your own instead, such as a private CA's.
+- **Versions.** TLS 1.2 is the least it accepts, and 1.3 the most.
+- **No verification.** `insecure_skip_verify: true` accepts any
+  certificate for any name. Anyone on the path can then read and change
+  the traffic, so use it only in tests.
+- **Keep-alive** works as for `http://`. A connection the server closed
+  while idle is opened again once, with a new handshake.
+
+### The server
+
+```goose
+fn handle(req: http::Request&, res: http::Response&) { res.body.append("hello"); }
+
+thread_fn worker(port: i64) {
+    if !http::serve_tls(port, "cert.pem", "key.pem", "0.0.0.0", http::Limits { .. }, handle) {
+        var why: u8[>..] = [];
+        http::tls_error(why);
+        print("cannot serve: ", why);
+    }
+}
+```
+
+```goose
+fn serve_tls<F>(port: i64, cert_file: const u8[:], key_file: const u8[:],
+                host: const u8[:] = "0.0.0.0", limits: Limits = Limits { .. }) -> bool
+fn serve_tls_on<F>(listener: i64, cert_file: const u8[:], key_file: const u8[:],
+                   limits: Limits = Limits { .. }) -> bool
+fn tls_error(out: u8[>..]&)    // appends why this thread's last TLS operation failed
+```
+
+- **Files.** `cert_file` is the certificate chain, PEM, leaf first.
+  `key_file` is its private key, PEM and unencrypted. The two must match.
+- **Per worker.** Each worker loads them for its own engine, so nothing is
+  shared, and they are read once per worker.
+- **Versions.** The server speaks TLS 1.2 and 1.3. It does not ask for
+  client certificates, offer session tickets or allow renegotiation.
+- **Everything else** is as `serve` does it: keep-alive, pipelining and
+  the idle timeout. The handshake counts as activity for the idle timeout.
+
+### Threads
+
+Every TLS session, and the configuration under it, belongs to one thread.
+
+- **Client.** Each thread that opens an `https://` connection parses the CA
+  bundle once and keeps it until the thread exits. That takes about 2 ms
+  for macOS's 128 CAs.
+- **Server.** Each `serve_tls` worker has its own certificate, key and
+  random generator.
+
+A `Client` with an open connection must stay on the thread that opened it,
+as with `http://`. [`design/http.md`](design/http.md#tls) has why nothing is
+shared.
+
+---
+
+## 4. Parsing alone
 
 The parser is a function of bytes, and can be used without a socket:
 

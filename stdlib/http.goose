@@ -7,6 +7,9 @@
 // buffer, and the parsing, the handler and the response are all Goose.
 // Every worker runs its own engine on its own listener, so a server is one
 // `serve` per worker and nothing is shared between them.
+//
+// TLS (https://, serve_tls) is the runtime's too, over Mbed TLS: a program
+// built without it still builds and runs, and its https:// fails saying so.
 
 namespace http;
 
@@ -28,6 +31,27 @@ extern "gs_net_connect" fn connect(host: const u8[:], port: i64, timeout_ms: i64
 extern "gs_net_send" fn send(fd: i64, data: const u8[:]) -> bool;            // all of it
 extern "gs_net_recv" fn recv(fd: i64, out: u8[>..]&, max: i64) -> i64;      // appends one read; 0 at the end
 extern "gs_net_close_fd" fn close(fd: i64);
+
+// TLS, for https:// and serve_tls (src/runtime/runtime_tls.h). A session is
+// opened over a connected socket, its handshake done, and closed before the
+// socket; the reason anything failed is the thread's tls_error.
+extern "gs_tls_available" fn tls_available() -> bool;
+extern "gs_tls_client" fn tls_client(fd: i64, host: const u8[:], ca_file: const u8[:],
+                                     insecure: bool) -> i64;
+extern "gs_tls_open_engine" fn net_open_tls(listener: i64, idle_ms: i64, cert_file: const u8[:],
+                                            key_file: const u8[:]) -> i64;
+extern "gs_net_tls_send" fn tls_send(t: i64, data: const u8[:]) -> bool;        // all of it
+extern "gs_net_tls_recv" fn tls_recv(t: i64, out: u8[>..]&, max: i64) -> i64;  // appends; 0 at the end
+extern "gs_net_tls_close" fn tls_close(t: i64);
+extern "gs_net_tls_error" fn tls_error_text(out: u8[:]) -> i64;
+
+// Appends why the last TLS operation on this thread failed: an https://
+// connection, or serve_tls loading its certificate.
+fn tls_error(out: u8[>..]&) {
+    var text: u8[256] = [0; 256];
+    let n = tls_error_text(text);
+    out.append(text[..n]);
+}
 
 // --- requests ----------------------------------------------------------------
 
@@ -553,6 +577,34 @@ fn serve<F>(port: i64, host: const u8[:] = "0.0.0.0", limits: Limits = Limits { 
 fn serve_on<F>(listener: i64, limits: Limits = Limits { .. }) -> bool {
     let engine = net_open(listener, limits.idle_ms);
     guard engine >= 0 else { return false; }
+    return run(engine, limits, F);
+}
+
+// serve over TLS (HTTPS): cert_file is the server's certificate chain, PEM,
+// leaf first, and key_file its private key, PEM. Every call loads them for
+// its own engine, so every worker has its own copy. false if it cannot
+// listen or load them; tls_error says why.
+//
+//     thread_fn worker(port: i64) {
+//         http::serve_tls(port, "cert.pem", "key.pem", "0.0.0.0", http::Limits { .. }, handle);
+//     }
+fn serve_tls<F>(port: i64, cert_file: const u8[:], key_file: const u8[:],
+                host: const u8[:] = "0.0.0.0", limits: Limits = Limits { .. }) -> bool {
+    let l = net_listen(host, port, 4096);
+    guard l >= 0 else { return false; }
+    return serve_tls_on(l, cert_file, key_file, limits, F);
+}
+
+// serve_tls on a listener net_listen opened.
+fn serve_tls_on<F>(listener: i64, cert_file: const u8[:], key_file: const u8[:],
+                   limits: Limits = Limits { .. }) -> bool {
+    let engine = net_open_tls(listener, limits.idle_ms, cert_file, key_file);
+    guard engine >= 0 else { return false; }
+    return run(engine, limits, F);
+}
+
+// An engine's loop, until it fails.
+fn run<F>(engine: i64, limits: Limits) -> bool {
     var buf: u8[>..] = [];
     var out: u8[>..] = [];
     var res = Response { .. };
@@ -640,33 +692,55 @@ fn header(rep: Reply&, name: const u8[:]) -> const u8[:], bool {
 // allows it, and opened again (once) if it closed one that was idle.
 struct Client {
     fd: i64 = -1,
+    tls: i64 = -1,                // the TLS session on fd, for https://
     host: u8[..256] = [],
     port: i64 = 0,
+    secure: bool = false,         // the connection open is https://
     timeout_ms: i64 = 30000,
     max_body: i64 = 1 << 26,
-    error: u8[..200] = [],        // why the last fetch failed
+    // https:// verifies the server's certificate against these CAs, a PEM
+    // bundle; empty for the system's (SSL_CERT_FILE, else /etc/ssl/cert.pem
+    // or the like).
+    ca_file: u8[..1024] = [],
+    // https:// without checking the server's certificate or its name: an
+    // eavesdropper can read and change everything. For tests only.
+    insecure_skip_verify: bool = false,
+    error: u8[..256] = [],        // why the last fetch failed
 }
 
 fn close(c: Client&) {
+    if c.tls >= 0 {
+        tls_close(c.tls);
+        c.tls = -1;
+    }
     if c.fd >= 0 {
         close(c.fd);
         c.fd = -1;
     }
 }
 
-// The parts of an http:// URL; the slices view it.
+// The parts of an http:// or https:// URL; the slices view it.
 struct Url {
     host: const u8[:],
     port: i64,
     target: const u8[:],          // the path and query; "" for "/"
     bracket: bool,                // an IPv6 address, written [host]
+    https: bool = false,
 }
 
-// http://host[:port][/path][?query][#fragment]; false for anything else,
-// https:// and user:password@ included.
+// http[s]://host[:port][/path][?query][#fragment]; false for anything
+// else, user:password@ included.
 fn parse_url(url: const u8[:], u: Url&) -> bool {
-    guard url.len > 7 && same_ci(url[..7], "http://") else { return false; }
-    let rest = url[7..];
+    var rest = url[url.len..];
+    if url.len > 7 && same_ci(url[..7], "http://") {
+        rest = url[7..];
+        u.https = false;
+    } else if url.len > 8 && same_ci(url[..8], "https://") {
+        rest = url[8..];
+        u.https = true;
+    } else {
+        return false;
+    }
     var end = 0;
     while end < rest.len {
         let c = rest[end];
@@ -694,7 +768,7 @@ fn parse_url(url: const u8[:], u: Url&) -> bool {
             host = host[..colon];
         }
     }
-    u.port = 80;
+    u.port = if u.https { 443 } else { 80 };
     if after.len > 0 {
         if after[0] != ':' { return false; }
         let p, ok = parse_int(after[1..]);
@@ -791,9 +865,20 @@ fn parse_reply(s: u8[:], rep: Reply&, head_only: bool, eof: bool, max_body: i64)
     }
 }
 
+// Over the connection's TLS session, if it has one.
+fn conn_send(c: Client&, data: const u8[:]) -> bool {
+    if c.tls >= 0 { return tls_send(c.tls, data); }
+    return send(c.fd, data);
+}
+
+fn conn_recv(c: Client&, buf: u8[>..]&, want: i64) -> i64 {
+    if c.tls >= 0 { return tls_recv(c.tls, buf, want); }
+    return recv(c.fd, buf, want);
+}
+
 fn fail(c: Client&, why: const u8[:]) -> bool {
     close(c);
-    c.error = why[..min(why.len, 200)];
+    c.error = why[..min(why.len, 256)];
     return false;
 }
 
@@ -805,9 +890,16 @@ fn fail(c: Client&, why: const u8[:]) -> bool {
 fn fetch(c: Client&, method: const u8[:], url: const u8[:], buf: u8[>..]&, rep: Reply&,
          body: const u8[:] = "", headers: const u8[:] = "") -> bool {
     var u = Url { host: "", port: 0, target: "", bracket: false };
-    guard parse_url(url, u) else { return fail(c, "not an http:// URL"); }
+    guard parse_url(url, u) else { return fail(c, "not an http:// or https:// URL"); }
     guard position(headers, 0) < 0 else { return fail(c, "a NUL in the headers"); }
-    if c.fd >= 0 && (c.host != u.host || c.port != u.port) { close(c); }
+    if u.https && !tls_available() {
+        // Without connecting: the attempt only sets the error that says so.
+        var why: u8[>..] = [];
+        tls_client(-1, u.host, "", false);
+        tls_error(why);
+        return fail(c, why);
+    }
+    if c.fd >= 0 && (c.host != u.host || c.port != u.port || c.secure != u.https) { close(c); }
 
     let start = buf.len;
     buf.append(method);
@@ -818,7 +910,7 @@ fn fetch(c: Client&, method: const u8[:], url: const u8[:], buf: u8[>..]&, rep: 
     if u.bracket { buf.push('['); }
     buf.append(u.host);
     if u.bracket { buf.push(']'); }
-    if u.port != 80 { format(buf, ":", u.port); }
+    if u.port != (if u.https { 443 } else { 80 }) { format(buf, ":", u.port); }
     buf.append("\r\nUser-Agent: goose\r\n");
     if body.len > 0 || method == "POST" || method == "PUT" || method == "PATCH" {
         format(buf, "Content-Length: ", body.len, "\r\n");
@@ -836,8 +928,17 @@ fn fetch(c: Client&, method: const u8[:], url: const u8[:], buf: u8[>..]&, rep: 
             if c.fd < 0 { return fail(c, "cannot connect"); }
             c.host = u.host;
             c.port = u.port;
+            c.secure = u.https;
+            if u.https {
+                c.tls = tls_client(c.fd, u.host, c.ca_file, c.insecure_skip_verify);
+                if c.tls < 0 {
+                    var why: u8[>..] = [];
+                    tls_error(why);
+                    return fail(c, why);
+                }
+            }
         }
-        if !send(c.fd, buf[start..sent]) {
+        if !conn_send(c, buf[start..sent]) {
             close(c);
             if reused { continue; }
             return fail(c, "cannot send the request");
@@ -848,7 +949,7 @@ fn fetch(c: Client&, method: const u8[:], url: const u8[:], buf: u8[>..]&, rep: 
         var eof = false;
         loop {
             let want = max(65536, buf.len - start);
-            let n = recv(c.fd, buf, want);
+            let n = conn_recv(c, buf, want);
             if n < 0 { return fail(c, "the connection failed, or timed out"); }
             if n == 0 { eof = true; }
             if eof && buf.len == sent { break; }

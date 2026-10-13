@@ -144,6 +144,14 @@ is deterministic across platforms and worker counts, so they print physics
 results, rounded, and compare them exactly. Between them they call every
 function of the layer.
 
+The `tls/` tests exercise HTTPS in the http module (`docs/design/http.md`)
+in the same way. When the compiler has the TLS layer from
+`third_party/mbedtls` (`scripts/fetch_mbedtls.py`), they link using `goose
+--tls-link`, whose response file also defines `GS_TLS_LINKED`. Otherwise they
+only generate C and are skipped. They run servers and clients on loopback,
+on threads, so they do not run through TinyCC. Their certificates are
+test-only ones in `tls/certs/`.
+
 The `ui/` tests exercise the Nuklear ui module (`docs/design/ui.md`) in the
 same way, linking `goose --ui-link` and, for the one that renders through
 gfx, `goose --gfx-link` too: a test needs the layers of its own category and

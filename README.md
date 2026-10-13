@@ -422,6 +422,13 @@ Linux, SDL needs the X11 or Wayland development packages
 ([`third_party/SDL/docs/README-linux.md`](https://github.com/libsdl-org/SDL/blob/main/docs/README-linux.md));
 without them the build leaves the `gfx` module out and says what to install.
 
+HTTPS in the `http` module is built on Mbed TLS, which is fetched rather than
+being a submodule: `python scripts/fetch_mbedtls.py` downloads the pinned
+release and checks its hash, and the next configure builds it in
+([`third_party/mbedtls/README.md`](third_party/mbedtls/README.md)). Without
+it, or with `-DGOOSE_TLS=OFF`, `https://` fails with an error saying TLS is
+not built in.
+
 The compiler is `build/goose` (`build/Release/goose.exe` with the Visual Studio
 generator), and it finds the standard library in the source tree it was built
 from. Run a program straight from source, in-process:

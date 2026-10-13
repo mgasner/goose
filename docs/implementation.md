@@ -102,6 +102,7 @@ process started with (`ulimit -s`), which nothing in the executable sets.
 | `--ui-link msvc\|cc` | the same for `ui` (`ui.h`, `UiLinkFile`) |
 | `--sqlite-link msvc\|cc` | the same for `sqlite` (`sqlite.h`, `SqliteLinkFile`) |
 | `--sqlite-types` | print a row struct for every checked SQL statement the program declares, and stop (`sqlite_check.h`, `docs/design/sqlite_checked.md`) |
+| `--tls-link cc` | the same for TLS under the `http` module's `https://` (`tls.h`, `TlsLinkFile`); the file also defines `GS_TLS_LINKED`, which turns on the runtime's TLS section (`runtime_tls.h`), so compile and link in one command |
 | `--multi-test a.goose b.goose ...` | compile each file in turn with the other flags, as a process of its own on it would (an `Ast` and a compile thread each, which is all the state a compile has), each file's output on both streams ending in a line `==== goose --multi-test: exit <code> <file>`; an `-o` names each file's C with `%` for its name. It runs no programs and writes no dump files. The test runner's batches of compiler runs (`docs/testing.md`) |
 | `--compile-shader f [--shader-source msl\|hlsl]` | hidden: what a shader compiles to, without a program around it |
 

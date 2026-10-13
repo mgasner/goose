@@ -2,7 +2,7 @@
   "name": "goose-language",
   "displayName": "Goose Language",
   "description": "Syntax highlighting, compiler diagnostics, navigation and tasks for Goose, without a language server.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "aardappel",
   "license": "Apache-2.0",
   "repository": { "type": "git", "url": "https://github.com/aardappel/goose.git", "directory": "vscode" },
@@ -70,7 +70,7 @@
       "title": "Goose",
       "properties": {
         "goose.compilerPath": { "type": "string", "default": "", "scope": "resource", "description": "Compiler executable or command on PATH. Empty searches goose and build/{Release,Debug}/goose in the workspace, then PATH. Relative paths use the workspace folder. Supports ${workspaceFolder}." },
-        "goose.entryFile": { "type": "string", "default": "", "scope": "resource", "description": "Program entry file, relative to the workspace folder. Empty checks/runs the current file. Set this when editing imported modules. Supports ${workspaceFolder}." },
+        "goose.entryFile": { "type": "string", "default": "", "scope": "resource", "description": "Program entry file, relative to the workspace folder. Empty checks/runs the current file; a check of a module's part file checks the module's root file that imports it. Set this when editing imported modules. Supports ${workspaceFolder}." },
         "goose.stdlibPath": { "type": "string", "default": "", "scope": "resource", "description": "Standard-library directory passed as --stdlib. Empty uses the compiler's default lookup (including GOOSE_STDLIB). Supports ${workspaceFolder}." },
         "goose.checkOnSave": { "type": "boolean", "default": true, "scope": "resource", "description": "Check saved Goose files on open and save. Checks wait until open Goose files in the same workspace folder are saved." },
         "goose.useRunKeybindings": { "type": "boolean", "default": true, "description": "Run with JIT on Ctrl+Shift+B (Cmd+Shift+B on macOS), F5, and Ctrl+F5 while editing Goose. Disable to use VS Code's usual task/debug keybindings." },

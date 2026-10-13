@@ -34,6 +34,26 @@ function parseDiagnostics(output, cwd) {
     return diagnostics;
 }
 
+// What a check reports on its own progress, never an error's text.
+const progress = /^(?:parsed ok|typechecked ok|roundtrip ok|bce|bce-line|bce-test):/;
+
+// A check's diagnostics. A failed check with no located error (a file that
+// cannot be opened, a missing compiler, a timeout, or any error the compiler
+// prints without a file:line: prefix) becomes an error on the checked file,
+// at its first line, so that it is never silent; no position is invented in
+// an import.
+function checkDiagnostics({ config, error, output = '' }) {
+    const parsed = parseDiagnostics(output, config.cwd);
+    if (!error || parsed.some(item => item.severity === 'error')) return parsed;
+    const text = output.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/)
+        .filter(line => line.trim() && !progress.test(line)).join('\n').trim();
+    const message = error.code === 'ENOENT'
+        ? `Goose compiler not found: ${config.compiler}. Set goose.compilerPath to the executable.`
+        : error.killed ? `Goose check exceeded ${config.timeout} ms or was terminated.`
+        : text || error.message;
+    return [...parsed, { file: config.file, line: 0, severity: 'error', message, related: [] }];
+}
+
 function runCompiler(config) {
     let child;
     const promise = new Promise(resolve => {
@@ -105,4 +125,4 @@ class CheckQueue {
     }
 }
 
-module.exports = { parseDiagnostics, runCompiler, CheckQueue };
+module.exports = { parseDiagnostics, checkDiagnostics, runCompiler, CheckQueue };

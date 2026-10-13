@@ -3185,6 +3185,10 @@ the caller's own facts about `src` intact.
   thus double as an importable library: give it `fn main_x() { ... }` plus a
   `fn main() { main_x(); }` wrapper, and importers call `main_x` directly. A
   namespaced file does the same with `fn ::main() { ns::main_x(); }`.
+  A program built without a `main` is an error (except with `--header`,
+  §7.11). `goose --check` builds nothing and accepts a root file without
+  one, such as a library's root file that imports its parts: its
+  non-generic functions are then checked as ones no call reaches are.
 
 ### 11.2 Concurrency
 

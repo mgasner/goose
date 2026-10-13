@@ -440,7 +440,8 @@ goose_runtime.obj`. Build the runtime with the compiler and flags the programs
 use; it takes no `-D` of its own, and a program from another version of the
 compiler fails to link against it. `--standalone` writes a C file that holds
 the whole runtime instead, and builds on its own (`cc tour.c -o tour -lm
--pthread`). Useful flags: `--check` typechecks without emitting C,
+-pthread`). Useful flags: `--check` typechecks without emitting C (and without
+needing a `fn main()`, so a library's root file checks on its own),
 `-O0`/`-O1`/`-O2` set the inlining level, `--bce-lines` reports the bounds
 checks kept per line, and `-DGS_DEBUG=1` turns on the overflow, range and tag
 checks in the generated C, each abort naming its source line (and an overflow

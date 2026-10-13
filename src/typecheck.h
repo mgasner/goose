@@ -123,6 +123,7 @@ inline bool IsBranchConstruct(const Node *n) {
 struct TypeCheck {
     Ast &ast;
     bool library = false;   // Built for a C host (--header): fn main() is optional.
+    bool checkonly = false; // --check: nothing is built, so fn main() is optional.
 
     // (Val, the checked value of an expression, lives in ast.h: node Check
     // overrides return it.)
@@ -2372,7 +2373,8 @@ struct TypeCheck {
     // ------------------------------------------------------------------
     // The driver: globals in order, then main, then thread entry points.
 
-    TypeCheck(Ast &_ast, bool _library = false) : ast(_ast), library(_library) {
+    TypeCheck(Ast &_ast, bool _library = false, bool _checkonly = false)
+        : ast(_ast), library(_library), checkonly(_checkonly) {
         temproot = ast.NewVarDef();
         temproot->name = "<temporary>";
         temproot->istemp = true;
@@ -2427,7 +2429,10 @@ struct TypeCheck {
         for (auto t : ast.alltypes)
             if (t->kind == TY_REF && t->ref->pool && !HasGenerics(t->ref->sub)) ValidatePool(t);
         auto mainsf = ast.MainFunction();
-        if (!mainsf && !library)
+        // A check builds nothing, so a library's root file (a module that
+        // imports its parts) checks on its own: its functions go through
+        // CheckUnreached below as any no call reaches do.
+        if (!mainsf && !library && !checkonly)
             throw CompileError { "program needs exactly one global fn main()" };
         if (mainsf) {
             if (!mainsf->params.empty() || mainsf->has_rets || !mainsf->generics.empty() ||
@@ -2537,6 +2542,11 @@ struct TypeCheck {
         auto foreign = false;
         if (sf->body) ScanForeignFrom(sf->body, names, foreign);
         if (foreign) return;
+        // Nor one that calls into a `return ... from` it does not enclose
+        // (a writer helper that returns from the `guarded` its caller runs it
+        // under): checked from here, that is an error only the call path
+        // standing in for the real ones would make.
+        if (ReachesForeignFrom(sf)) return;
         auto spec = ast.NewFnSpec();
         spec->sf = sf;
         vector<Val> args(sf->params.size());
@@ -2623,6 +2633,67 @@ struct TypeCheck {
         rec(entry);
     }
 
+    // Per top-level function, the `return ... from` targets that some call
+    // path from it reaches with no function of that name on the path. Calls
+    // are followed by name alone, before any resolution, to every function
+    // of that leaf name in any namespace, and a function named anywhere in a
+    // body (called or passed as a value) counts as called: more paths than
+    // the real ones, so more functions left unchecked, never fewer.
+    map<SFunction *, set<string_view>> foreignfrom;
+    bool foreignfromdone = false;
+
+    static string_view LeafName(string_view name) {
+        auto at = name.rfind("::");
+        return at == string_view::npos ? name : name.substr(at + 2);
+    }
+
+    bool ReachesForeignFrom(SFunction *sf) {
+        if (!foreignfromdone) {
+            foreignfromdone = true;
+            unordered_map<string_view, vector<SFunction *>> byname;
+            for (auto f : ast.functions)
+                if (!f->isnested) byname[f->name].push_back(f);
+            struct Uses { set<string_view> own; vector<SFunction *> callees; };
+            map<SFunction *, Uses> uses;
+            for (auto f : ast.functions) {
+                if (f->isnested || !f->body) continue;
+                auto &u = uses[f];
+                auto &targets = foreignfrom[f];
+                u.own.insert(f->name);
+                set<string_view> called;
+                function<void(Node *)> walk = [&](Node *n) {
+                    if (!n) return;
+                    if (auto r = Is<Return>(n)) {
+                        if (!r->from.empty()) targets.insert(LeafName(r->from));
+                    } else if (auto id = Is<Ident>(n)) {
+                        called.insert(LeafName(id->name));
+                    } else if (auto d = Is<Dot>(n)) {
+                        called.insert(LeafName(d->name));
+                    } else if (auto fd = Is<FnDecl>(n)) {
+                        u.own.insert(fd->sf->name);
+                        walk(fd->sf->body);
+                        return;
+                    }
+                    n->Children(walk);
+                };
+                walk(f->body);
+                for (auto t : u.own) targets.erase(t);
+                for (auto c : called)
+                    if (auto it = byname.find(c); it != byname.end())
+                        for (auto g : it->second) u.callees.push_back(g);
+            }
+            for (auto changed = true; changed;) {
+                changed = false;
+                for (auto &[f, u] : uses)
+                    for (auto g : u.callees)
+                        for (auto t : foreignfrom[g])
+                            if (!u.own.count(t) && foreignfrom[f].insert(t).second) changed = true;
+            }
+        }
+        auto it = foreignfrom.find(sf);
+        return it != foreignfrom.end() && !it->second.empty();
+    }
+
     // Does the body contain `return ... from f` for an f not declared within?
     void ScanForeignFrom(Node *n, set<string_view> &names, bool &foreign) {
         if (!n || foreign) return;
@@ -2640,6 +2711,8 @@ struct TypeCheck {
 };
 
 // Runs the whole pass; errors throw CompileError.
-inline void TypeCheckProgram(Ast &ast, bool library = false) { TypeCheck tc(ast, library); }
+inline void TypeCheckProgram(Ast &ast, bool library = false, bool checkonly = false) {
+    TypeCheck tc(ast, library, checkonly);
+}
 
 }  // namespace goose

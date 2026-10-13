@@ -98,6 +98,16 @@ open Goose files in the same folder first. The compiler currently stops at the
 first error and typechecks instantiated functions; the extension preserves
 those limitations. Configuring the entry file is particularly useful for libraries.
 
+Without a configured entry file, a file that is one part of a module split
+across several, `<dir>/<name>/<part>.goose`, is checked through the module's
+root file `<dir>/<name>.goose` when that root imports it (`import
+.<name>.<part>;` or `import <name>.<part>;`, directly or through another
+part), and nested module directories resolve up to the outermost such root.
+The part's own errors still show in the part, and every part of a module
+shares one check. A check needs no `fn main()`, so a library's root checks on
+its own. A compiler error without a file location shows on the checked file.
+Run and Generate C keep to the open file.
+
 **Run with JIT** uses `--jit` and needs a Goose build with TinyCC enabled.
 **Generate C** writes a `.c` file alongside the entry file, replacing an existing
 file of that name. Compiler execution is disabled in untrusted workspaces;

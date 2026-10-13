@@ -80,6 +80,7 @@ struct NativeLayers {
     bool physics = false;
     bool sqlite = false;
     bool ui = false;
+    bool tls = false;   // the TLS layer under the http module's https://
 };
 
 // The response file of link inputs a program built from the generated C

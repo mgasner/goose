@@ -1,0 +1,18 @@
+tls available: true
+-- send
+  sent=true status=200 attempts=1 stop=end_turn id=msg_1 tokens=12/5 error=[] 
+  POST /v1/messages key=sk-test {"model":"claude-test","max_tokens":100,"cache_control":{"type":"ephemeral"},"messages":[{"role":"user","content":[{"type":"text","text":"Say hello."}]}]}
+  last text: Hello over TLS. tls=true
+-- agent run
+[agent] request 1
+[agent] reply 1: tool_use, 12 in, 5 out
+[agent] call add {"a":2,"b":3}
+[agent] result add: 5
+[agent] request 2
+[agent] reply 2: end_turn, 12 in, 5 out
+  run: stop=done turns=2 calls=1 tokens=24/10 error=
+  POST /v1/messages key=sk-test {"model":"claude-test","max_tokens":100,"tools":[{"name":"add","description":"Adds two integers.","input_schema":{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"]}}],"cache_control":{"type":"ephemeral"},"messages":[{"role":"user","content":[{"type":"text","text":"Add 2 and 3."}]},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"add","input":{"a":2,"b":3}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"5"}]}]}
+  last text: 5.
+-- the system's CAs
+  sent=false status=0 attempts=1 stop= id= tokens=0/0 error=[transport] TLS: the server's certificate is not signed by a trusted CA
+  added nothing: true

@@ -1,0 +1,86 @@
+-- encode
+anthropic {"model":"claude-opus-5-5","max_tokens":1024,"system":"You add.","tools":[{"name":"add","description":"Adds two integers.","input_schema":{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"]}},{"name":"now","input_schema":{"type":"object"}}],"output_config":{"effort":"low"},"cache_control":{"type":"ephemeral"},"metadata":{"user_id":"u1"},"messages":[{"role":"user","content":[{"type":"text","text":"What is 2+3? \"quoted\"\n"},{"type":"text","text":"And be brief."}]},{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"sig=="},{"type":"text","text":"Adding."},{"type":"tool_use","id":"toolu_1","name":"add","input":{"a":2,"b":3}},{"type":"tool_use","id":"toolu_2","name":"add","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"5"},{"type":"tool_result","tool_use_id":"toolu_2","content":"missing a and b","is_error":true},{"type":"text","text":"Thanks"}]}]}
+  valid JSON: true
+openai {"model":"claude-opus-5-5","max_tokens":1024,"tools":[{"type":"function","function":{"name":"add","description":"Adds two integers.","parameters":{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"]}}},{"type":"function","function":{"name":"now","parameters":{"type":"object"}}}],"reasoning_effort":"low","metadata":{"user_id":"u1"},"messages":[{"role":"system","content":"You add."},{"role":"user","content":"What is 2+3? \"quoted\"\nAnd be brief."},{"role":"assistant","content":"Adding.","tool_calls":[{"id":"toolu_1","type":"function","function":{"name":"add","arguments":"{\"a\":2,\"b\":3}"}},{"id":"toolu_2","type":"function","function":{"name":"add","arguments":"{}"}}]},{"role":"tool","tool_call_id":"toolu_1","content":"5"},{"role":"tool","tool_call_id":"toolu_2","content":"missing a and b"},{"role":"user","content":"Thanks"}]}
+  valid JSON: true
+anthropic, no tools or cache: true
+last text: 0 (no assistant text after the last user turn)
+-- anthropic
+  sent=true status=200 attempts=1 stop=1 (end_turn) id=msg_01 model=claude-opus-5-5 tokens=12/4 cache=0/10 error=[] 
+  POST /v1/messages  content-type: application/json; x-api-key: sk-test; anthropic-version: 2023-06-01; anthropic-beta: beta-a,beta-b; 
+  {"model":"claude-opus-5-5","max_tokens":16000,"cache_control":{"type":"ephemeral"},"messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}]}
+  last text: Hello! é
+  sent=true status=200 attempts=1 stop=2 (tool_use) id=msg_02 model=claude-opus-5-5 tokens=30/50 cache=0/0 error=[] 
+  POST /v1/messages  content-type: application/json; x-api-key: sk-test; anthropic-version: 2023-06-01; anthropic-beta: beta-a,beta-b; 
+  {"model":"claude-opus-5-5","max_tokens":16000,"cache_control":{"type":"ephemeral"},"messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]},{"role":"assistant","content":[{"type":"text","text":"Hello! é"}]},{"role":"user","content":[{"type":"text","text":"Add 2 and 3, and 4 and 5."}]}]}
+  call toolu_A add {"a":2,"b":3}
+  call toolu_B add {"a":4,"b":5,"note":"café \"x\""}
+  sent=true status=200 attempts=1 stop=1 (end_turn) id=msg_03 model=claude-opus-5-5 tokens=60/5 cache=40/0 error=[] 
+  POST /v1/messages  content-type: application/json; x-api-key: sk-test; anthropic-version: 2023-06-01; anthropic-beta: beta-a,beta-b; 
+  {"model":"claude-opus-5-5","max_tokens":16000,"cache_control":{"type":"ephemeral"},"messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]},{"role":"assistant","content":[{"type":"text","text":"Hello! é"}]},{"role":"user","content":[{"type":"text","text":"Add 2 and 3, and 4 and 5."}]},{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"EqQBCkYIBxgCKkB+/sig=="},{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"sums"}},{"type":"text","text":"Sure.","citations":[{"type":"char_location","cited_text":"x","document_index":0,"start_char_index":0,"end_char_index":1}]},{"type":"tool_use","id":"toolu_A","name":"add","input":{"a":2,"b":3}},{"type":"tool_use","id":"toolu_B","name":"add","input":{"a":4,"b":5,"note":"café \"x\""}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_A","content":"5"},{"type":"tool_result","tool_use_id":"toolu_B","content":"9"}]}]}
+  user
+    text "Hi" raw=false
+  assistant
+    text "Hello! é" raw=true
+  user
+    text "Add 2 and 3, and 4 and 5." raw=false
+  assistant
+    thinking {"type":"thinking","thinking":"","signature":"EqQBCkYIBxgCKkB+/sig=="}
+    server_tool_use {"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"sums"}}
+    text "Sure." raw=true
+    call toolu_A add {"a":2,"b":3}
+    call toolu_B add {"a":4,"b":5,"note":"café \"x\""}
+  user
+    result toolu_A "5" error=false
+    result toolu_B "9" error=false
+  assistant
+    text "5 and 9." raw=true
+-- retries and errors
+  sent=true status=200 attempts=2 stop=1 (end_turn) id=msg_04 model=m tokens=0/0 cache=0/0 error=[] 
+  POST /v1/messages again, 1076 bytes
+  POST /v1/messages again, 1076 bytes
+  sent=false status=400 attempts=1 stop=0 () id= model= tokens=0/0 cache=0/0 error=[invalid_request_error] messages: roles must alternate
+  POST /v1/messages again, 1076 bytes
+  sent=false status=429 attempts=2 stop=0 () id= model= tokens=0/0 cache=0/0 error=[rate_limit_error] slow down
+  POST /v1/messages again, 1076 bytes
+  POST /v1/messages again, 1076 bytes
+  sent=false status=502 attempts=1 stop=0 () id= model= tokens=0/0 cache=0/0 error=[http] HTTP 502 Bad Gateway
+  POST /v1/messages again, 1076 bytes
+  sent=false status=200 attempts=1 stop=0 () id= model= tokens=0/0 cache=0/0 error=[malformed] the reply is not a JSON object
+  POST /v1/messages again, 1076 bytes
+  sent=false status=200 attempts=1 stop=0 () id= model= tokens=0/0 cache=0/0 error=[malformed] the reply is not a message
+  POST /v1/messages again, 1076 bytes
+  failed sends added nothing: true
+  sent=false status=0 attempts=1 stop=0 () id= model= tokens=0/0 cache=0/0 error=[transport] cannot connect
+  https: sent=false [transport] expected error=true expected attempts=true
+  sent=false status=0 attempts=0 stop=0 () id= model= tokens=0/0 cache=0/0 error=[transport] base_url is not an http:// or https:// URL
+-- openai
+  sent=true status=200 attempts=1 stop=2 (tool_calls) id=chatcmpl-1 model=gpt-test tokens=20/7 cache=16/0 error=[] 
+  POST /v1/chat/completions  content-type: application/json; authorization: Bearer sk-oai; 
+  {"model":"gpt-test","max_completion_tokens":16000,"tools":[{"type":"function","function":{"name":"add","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"Add 2 and 3."}]}
+  sent=true status=200 attempts=1 stop=1 (stop) id=chatcmpl-2 model=gpt-test tokens=30/4 cache=0/0 error=[] 
+  POST /v1/chat/completions  content-type: application/json; authorization: Bearer sk-oai; 
+  {"model":"gpt-test","max_completion_tokens":16000,"tools":[{"type":"function","function":{"name":"add","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"Add 2 and 3."},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"add","arguments":"{\"a\":2,\"b\":3}"}}]},{"role":"tool","tool_call_id":"call_1","content":"5"}]}
+  last text: It is 5.
+  sent=true status=200 attempts=1 stop=3 (length) id=chatcmpl-3 model=gpt-test tokens=0/0 cache=0/0 error=[] 
+  POST /v1/chat/completions again, 430 bytes
+  sent=false status=401 attempts=1 stop=0 () id= model= tokens=0/0 cache=0/0 error=[invalid_request_error] Incorrect API key provided
+  POST /v1/chat/completions again, 435 bytes
+  user
+    text "Add 2 and 3." raw=false
+  assistant
+    call call_1 add {"a":2,"b":3}
+  user
+    result call_1 "5" error=false
+  assistant
+    text "It is 5." raw=false
+  assistant
+    text "It is" raw=false
+-- a provider of the program's own
+  sent=true status=200 attempts=1 stop=1 () id= model= tokens=0/0 cache=0/0 error=[] 
+  POST /complete  content-type: application/json; x-echo-key: e-key; 
+  {"prompt":"ping"}
+  last text: pong
+  sent=false status=503 attempts=1 stop=0 () id= model= tokens=0/0 cache=0/0 error=[unavailable] try later
+  POST /complete  content-type: application/json; x-echo-key: e-key; 
+  {"prompt":"pong"}

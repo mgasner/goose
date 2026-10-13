@@ -1,7 +1,7 @@
 # The Goose standard library
 
-The standard library has fourteen modules under `stdlib/`: `std`, `dictionary`,
-`vec`, `math`, `os`, `http`, `binary`, `json`, `graphql`, `audio`, `gfx`, `physics`, `ui`, and `sqlite`. Import each module by name,
+The standard library has sixteen modules under `stdlib/`: `std`, `dictionary`,
+`vec`, `math`, `os`, `http`, `binary`, `json`, `inference`, `agent`, `graphql`, `audio`, `gfx`, `physics`, `ui`, and `sqlite`. Import each module by name,
 for example `import std;`. The compiler locates the library in its source
 tree; use `--stdlib <dir>` or `GOOSE_STDLIB` to select another location.
 Everything is written in Goose except the C behind `os`
@@ -45,7 +45,7 @@ The library uses these conventions:
 * A function taking an element *by value* (`push_n`, `insert_at`, `fill`,
   `heap_push`) cannot take one that contains self-relative references, because
   those values cannot be copied (spec §3.9). Construct them in place.
-* The `std`, `dictionary`, `vec`, `math`, and `os` names are global; `http`, `binary`, `json`, `graphql`, `audio`,
+* The `std`, `dictionary`, `vec`, `math`, and `os` names are global; `http`, `binary`, `json`, `inference`, `agent`, `graphql`, `audio`,
   `gfx`, `physics`, `ui`, and `sqlite` use their own namespaces. A local named `fill` or `count`
   shadows the corresponding global function, causing an error at a call.
 
@@ -551,6 +551,50 @@ A `Value` (of a document) and a `Lazy` (of a cursor) read the same way:
 `try_` forms that also say whether the value was one. A lookup that finds
 nothing gives a missing value, which reads as defaults, so chains need no
 checks along the way.
+
+## inference
+
+`import inference;` sends conversations to model provider APIs over `http`
+and `json` (`stdlib/inference/`): the Anthropic Messages API, OpenAI-compatible
+Chat Completions, and providers a program declares itself.
+[`inference.md`](inference.md) is the guide; [`design/inference.md`](design/inference.md)
+is the design. Hosted APIs are `https://`, which needs a program with TLS
+(`goose --tls-link`, see `http` above); local servers take an `http://` base URL.
+
+```goose
+fn anthropic(api_key: const u8[:], base_url: const u8[:] = "https://api.anthropic.com") -> Client<Anthropic>
+fn openai(api_key: const u8[:], base_url: const u8[:] = "https://api.openai.com") -> Client<OpenAI>
+fn send<P>(c: Client<P>&, p: Params, conv: Item..[>..]&, res: Response&) -> bool   // appends the reply
+fn user(conv: Item..[>..]&, text: const u8[:])
+fn last_text(conv: Item..[>..]&) -> u8[>..]
+fn each_call<F>(conv: Item..[>..]&)                  // F(id, name, input) for the last reply's tool calls
+```
+
+A conversation is an `Item..[>..]` of role markers and blocks (`Text`,
+`ToolCall`, `ToolResult`, `Opaque`); blocks from the provider keep their exact
+JSON and are sent back unchanged. `send` retries 408, 409, 429, 5xx and
+connection failures. A provider is a type with global overloads of
+`inference_path`, `inference_headers`, `inference_encode` and
+`inference_decode` (and optionally `inference_error`).
+
+## agent
+
+`import agent;` is a tool-using loop over `inference` (`stdlib/agent.goose`),
+described in [`inference.md`](inference.md) §5.
+
+```goose
+fn run<P, H, T>(c: inference::Client<P>&, p: inference::Params, conv: inference::Item..[>..]&,
+                limits: Limits) -> Run        // called run(c, p, conv, limits, hook, tools)
+// tools(call: Call, out: u8[>..]&) -> bool    hook(e: Event) -> bool
+fn no_hook(e: Event) -> bool    fn print_hook(e: Event) -> bool    fn stop_name(stop: i64) -> const u8[:]
+```
+
+Calls to tools not in `p.tools`, and inputs that are not objects or lack a
+required property, get error results without reaching `tools`. A hook can
+stop the run before a request or after a reply, and deny a call. A run stops
+when the model is done, at `max_turns` or `max_output_tokens`, on a reply cut
+off at `max_tokens` (without running its calls), a refusal, an error, or a
+hook; the conversation can always be continued by another run.
 
 ## graphql
 

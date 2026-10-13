@@ -1,0 +1,32 @@
+tls available: true
+-- get and post
+true 200 Hello over TLS keep=true 
+true 200 posted over TLS
+keep-alive: same connection=true tls=true
+true 1000000 opqrstuvwxyzabcdefghijklmn
+true 6000000 true same connection=true
+true 404
+false
+true Hello over TLS
+-- chunked
+true 40012 hello, TLS, zz keep=true 
+true 40012 hello, TLS, zz keep=true 
+-- idle close, then retry
+true Hello over TLS
+true Hello over TLS  reopened=true
+-- verification
+false TLS: the server's certificate is not signed by a trusted CA open=false
+false
+false TLS: the server's certificate does not name this host
+false true
+true Hello over TLS
+false true
+-- server keys
+false
+TLS: cannot read the certificate test/tls/certs/none.pem: PK - Read/write of file failed
+false
+true
+-- threads
+20 true
+20 true
+20 true

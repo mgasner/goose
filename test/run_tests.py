@@ -24,7 +24,8 @@ the backend refuses outright is counted as a skip, not a failure.
 
 The audio/ tests use the SDL3 PCM mixer without a device, the gfx/ tests
 use the SDL3 graphics module, the physics/ tests the Box3D
-physics module and the ui/ tests the Nuklear ui module. They always parse,
+physics module, the ui/ tests the Nuklear ui module and the tls/ tests the
+http module's https:// over Mbed TLS (`--tls-link`). They always parse,
 typecheck and generate C; they build and run where the compiler has the
 native layers they use built in -- their category's, and any other they
 import, as a ui test drawing through gfx does -- linking what `goose
@@ -1151,7 +1152,8 @@ def main():
     native = {"audio": tc.audio_link(exe, cc) if cc else [],
               "gfx": tc.gfx_link(exe, cc) if cc else [],
               "physics": tc.physics_link(exe, cc) if cc else [],
-              "ui": tc.ui_link(exe, cc) if cc else []}
+              "ui": tc.ui_link(exe, cc) if cc else [],
+              "tls": tc.tls_link(exe, cc) if cc else []}
     print(f"profile: {args.profile}; C backend: {cc.desc if cc else 'none'}; "
           f"JIT backend: {'TinyCC' if jit else 'none'}; " +
           "; ".join(f"{m}: {'linked' if libs else 'not built in'}" for m, libs in native.items()))
@@ -1340,7 +1342,8 @@ def main():
         r.show_task(shader_error_line, name)
 
     # Both sides of each native module's C boundary describe it: they must
-    # agree.
+    # agree. TLS has no Goose-facing layer of its own: http.goose calls the
+    # runtime, which reaches the layer through gs_net_tls_ops.
     def api(module):
         problems = api_check.check(module)
         what = f"{module}-api stdlib/{module}.goose against its C layer's header"
@@ -1349,7 +1352,8 @@ def main():
         else:
             r.ok(what)
     for module in native:
-        r.show_task(api, module)
+        if module in api_check.MODULES:
+            r.show_task(api, module)
 
     for f in tests:
         r.show(lambda f=f: fixtures[f].result().front)
@@ -1478,7 +1482,7 @@ def main():
     def native_skips():
         skipped = [name for f in tests for name in fixtures[f].result().nativeskips]
         if skipped:
-            r.say(f"skip running {len(set(skipped))} audio, gfx, physics or ui test(s) (no "
+            r.say(f"skip running {len(set(skipped))} audio, gfx, physics, ui or tls test(s) (no "
                   f"layer for them, or no GPU device): " + ", ".join(sorted(set(skipped))))
     r.show_later(native_skips)
 

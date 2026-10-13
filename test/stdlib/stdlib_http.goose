@@ -103,11 +103,11 @@ fn reply_tests() {
 
     print("-- urls");
     for url in ["http://example.com", "http://example.com:8080/a/b?c=d#frag", "http://[::1]:9/x",
-                "https://example.com/", "http://user@host/", "http://host:0/", "http:///x",
-                "http://host/a b"] {
+                "https://example.com/", "HTTPS://example.com:8443/x", "ftp://example.com/",
+                "http://user@host/", "http://host:0/", "http:///x", "http://host/a b"] {
         var u = http::Url { host: "", port: 0, target: "", bracket: false };
         if http::parse_url(url, u) {
-            print(url, " -> ", u.host, " ", u.port, " [", u.target, "]");
+            print(url, " -> ", u.host, " ", u.port, " [", u.target, "] https=", u.https);
         } else {
             print(url, " -> refused");
         }
@@ -232,8 +232,10 @@ fn live_tests() {
     print(http::post(str(base, "/echo"), big, "text/plain", buf, rep), " ", rep.body.len,
           " ", rep.body == big);
     print(http::get("http://127.0.0.1:1/", buf, rep));
+    // Built without the TLS layer linked (test/tls/ has the tests with it),
+    // https:// fails before connecting, saying why.
     var bad = http::Client { .. };
-    print(http::fetch(bad, "GET", "https://example.com/", buf, rep), " ", bad.error);
+    print(http::fetch(bad, "GET", "https://127.0.0.1:1/", buf, rep), " ", bad.error);
 
     print("-- raw");
     raw(port, "GET /hello HTTP/1.1\r\nHost: x\r\n\r\nGET /nope HTTP/1.1\r\nHost: x\r\n\r\nGET /close HTTP/1.1\r\n\r\n");

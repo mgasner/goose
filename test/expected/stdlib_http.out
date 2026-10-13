@@ -42,10 +42,12 @@ false
 0
 -1
 -- urls
-http://example.com -> example.com 80 []
-http://example.com:8080/a/b?c=d#frag -> example.com 8080 [/a/b?c=d]
-http://[::1]:9/x -> ::1 9 [/x]
-https://example.com/ -> refused
+http://example.com -> example.com 80 [] https=false
+http://example.com:8080/a/b?c=d#frag -> example.com 8080 [/a/b?c=d] https=false
+http://[::1]:9/x -> ::1 9 [/x] https=false
+https://example.com/ -> example.com 443 [/] https=true
+HTTPS://example.com:8443/x -> example.com 8443 [/x] https=true
+ftp://example.com/ -> refused
 http://user@host/ -> refused
 http://host:0/ -> refused
 http:///x -> refused
@@ -65,7 +67,7 @@ true Hello, World!
 true {}
 true 300000 true
 false
-false not an http:// URL
+false TLS: this program was built without TLS (build goose with Mbed TLS, python scripts/fetch_mbedtls.py, and link with `goose --tls-link cc`)
 -- raw
 HTTP/1.1 200 OK|Server: goose|Content-Type: text/plain|Content-Length: 13||Hello, World!HTTP/1.1 404 Not Found|Server: goose|Content-Type: text/plain|Content-Length: 0||HTTP/1.1 200 OK|Server: goose|Content-Type: text/plain|Content-Length: 3|Connection: close||bye|
 HTTP/1.1 200 OK|Server: goose|Content-Type: application/octet-stream|Content-Length: 11|Connection: close||hello world|

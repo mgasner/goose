@@ -101,6 +101,15 @@ R"GSRT(/* Goose runtime — the part every compiler-generated C file starts with
 #define GS_TLS
 #endif
 
+/* Thread-local whether or not the program has workers: a library's C host
+   may call it from threads of its own, which the export guards (§7.11)
+   tell apart from the one that ran goose_init. */
+#ifdef _MSC_VER
+#define GS_THREAD_LOCAL __declspec(thread)
+#else
+#define GS_THREAD_LOCAL __thread
+#endif
+
 /* The linkage of everything the runtime defines outside this file. */
 #ifdef GS_SEPARATE_RUNTIME
 #define GS_API extern
@@ -189,9 +198,9 @@ static void gs_memcpy(void *dst, const void *src, size_t n) {
     if (n) memcpy(dst, src, n);
 }
 
+static int gs_memcmp(const void *a, const void *b, size_t n) {
 )GSRT"
-R"GSRT(static int gs_memcmp(const void *a, const void *b, size_t n) {
-    return n ? memcmp(a, b, n) : 0;
+R"GSRT(    return n ? memcmp(a, b, n) : 0;
 }
 
 /* ---------------------------------------------------------------------------
@@ -362,9 +371,9 @@ static uint64_t gs_shr_u64(uint64_t a, int64_t n) { return a >> (n & 63); }
 
 #define gs_add_u32(a, b) ((uint32_t)((a) + (b)))
 #define gs_sub_u32(a, b) ((uint32_t)((a) - (b)))
+#define gs_mul_u32(a, b) ((uint32_t)((uint64_t)(a) * (uint64_t)(b)))
 )GSRT"
-R"GSRT(#define gs_mul_u32(a, b) ((uint32_t)((uint64_t)(a) * (uint64_t)(b)))
-#define gs_shl_u32(a, n) ((uint32_t)((uint64_t)(a) << ((n) & 31)))
+R"GSRT(#define gs_shl_u32(a, n) ((uint32_t)((uint64_t)(a) << ((n) & 31)))
 #define gs_shr_u32(a, n) ((uint32_t)((uint64_t)(a) >> ((n) & 31)))
 
 #define gs_add_i64(a, b, f, l) ((int64_t)((uint64_t)(a) + (uint64_t)(b)))

@@ -1583,9 +1583,10 @@ runtime and the globals and then runs your Goose `fn main()`, so `main` is the
 place for a library's own start-up code. A library with nothing to start up
 may leave `main` out. A `const u8[:]` result comes back as a pointer plus an
 extra `int64_t *` parameter that receives its length; scalars and flat
-fixed-size values are returned by value. The generated functions are not
-thread-safe: call them from the thread that called `goose_init`. The
-signatures that may cross are the ones from §16, with a few more limits; see
+fixed-size values are returned by value. Call the generated functions from
+the thread that called `goose_init`, and not from C that Goose itself called
+(an `extern fn` calling back into an export): either aborts with a message
+saying which. The signatures that may cross are the ones from §16, with a few more limits; see
 [spec §7.11](goose_spec.md).
 
 ---

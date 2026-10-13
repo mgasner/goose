@@ -41,6 +41,9 @@ layers' own lists of functions, structs and constants.
 Profiles keep the CI coverage deliberate: baseline compares Goose/native C
 -O0 and -O2 plus the targeted debug-runtime runs; sanitize uses Goose -O2 and
 Clang -O1 with ASan/UBSan on Linux, including the samples and C runtime tests.
+The embed/ cases are C hosts: each case's lib.goose is built with --standalone
+--header, linked with its host.c, and run at -O0 and -O2, the host's output
+compared as that of a fixture named embed_<case>.
 The goose_in_goose/ compiler is one multi-file bootstrap fixture: build three
 native generations, require identical stage-2/stage-3 C, and run a self-check
 of the stage-2 compiler, which stands for both, beside stage 3's build.
@@ -1475,6 +1478,35 @@ def main():
                 if out is not None and r.check_stdout(name, name, out):
                     r.ok(f"runtime {name}")
         r.show_task(runtime_lifecycle)
+
+        # A C host linked against a --header library (§7.11), at each level:
+        # embed/<case>/lib.goose built with --standalone --header, beside the
+        # case's host.c, its expected output that of the host, as embed_<case>.
+        # The library's own fn main() runs inside goose_init.
+        def embed(case, ol):
+            name, label = f"embed_{case.name}", f"embed -O{ol} {case.name}"
+            outdir = gendir / "embed" / f"{case.name}-O{ol}"
+            outdir.mkdir(parents=True, exist_ok=True)
+            cfile, hfile = outdir / "lib.c", outdir / "lib.h"
+            efile = outdir / f"host{tc.EXE_SUFFIX}"
+            code, out, err = r.goose(f"-O{ol}", "--standalone", "--header", hfile, "-o", cfile,
+                                     case / "lib.goose")
+            if code != 0:
+                r.fail(f"cgen {label}", out + err)
+                return
+            ok, log = cc.compile([cfile, case / "host.c"], efile,
+                                 opt=int(ol) if args.profile == "baseline" else 1,
+                                 extra=[*extra, f"-I{outdir}", f"-I{HERE / 'embed'}"],
+                                 strict_decls=True, log=outdir / "cc.log")
+            if not ok:
+                r.fail(f"cc {label}", "\n".join(log.splitlines()[:8]))
+                return
+            out = r.run_expected([efile], name, label)
+            if out is not None and r.check_stdout(name, label, out):
+                r.ok(label)
+        for case in sorted(p for p in (HERE / "embed").iterdir() if p.is_dir()):
+            for ol in r.levels:
+                r.show_task(embed, case, ol)
 
         # The same coverage test through clang, release and debug. A compiler
         # that accepts more C than the standard does is not what checks the

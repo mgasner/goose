@@ -407,7 +407,7 @@ builds alone, and a program importing one of them has it built into
 git clone https://github.com/aardappel/goose
 cd goose
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DGOOSE_BUILTIN_LIBS=all
-cmake --build build --config Release
+cmake --build build --config Release --parallel
 ```
 
 `GOOSE_BUILTIN_LIBS` can also name some of the packages (`physics`, or

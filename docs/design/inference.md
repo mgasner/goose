@@ -4,7 +4,7 @@ Status: implemented. The libraries are `stdlib/inference.goose` (with
 `stdlib/inference/`) and `stdlib/agent.goose`, on `http` and `json`. The
 guide is [`../inference.md`](../inference.md). The `stdlib_inference` and
 `stdlib_agent` fixtures test them offline against a mock server built with
-`http`.
+`http`, and `tls/tls_inference` over `https://` against one served with TLS.
 
 ## Goal
 
@@ -20,16 +20,15 @@ Talk to model provider APIs from Goose, and run a tool-using agent on top:
 
 ## Constraints that shape it
 
-1. **No TLS.** `http` speaks plain HTTP/1.1 and refuses `https://`
-   (design/http.md: TLS "belongs in a reverse proxy"). Every hosted
-   provider is HTTPS-only. The client therefore takes a `base_url` and is
-   indifferent to how bytes reach the provider; it never pretends to do
-   TLS. Today a real call goes through a local TLS-terminating proxy
-   (`http://127.0.0.1:PORT` forwarding to `https://api.anthropic.com`), or
-   to a local OpenAI-compatible server (vLLM, llama.cpp, Ollama) that
-   speaks plain HTTP. An `https://` base URL fails at once with a message
-   that says this. When `http` gains TLS (the plan is vendored mbedTLS in
-   `runtime_net.h`), `https://` URLs work with no change here.
+1. **TLS is the transport's.** Every hosted provider is HTTPS-only. The
+   client takes a `base_url` and leaves how bytes reach the provider to
+   `http`, which speaks `https://` over Mbed TLS when the program has it
+   (design/http.md; `goose --tls-link` for C built with `-o`). The client
+   adds nothing for TLS: certificate checks and their CAs are its
+   `http::Client`'s (`c.http.ca_file`). Without TLS, an `https://` base
+   URL fails with `http`'s error, which says how to build with TLS, and
+   that failure is not retried. Local OpenAI-compatible servers (vLLM,
+   llama.cpp, Ollama) speak plain HTTP and take an `http://` base URL.
 2. **No streaming.** `http::fetch` returns whole responses, so requests are
    non-streaming. Long generations must fit in the client's timeout, which
    defaults to 10 minutes; `max_tokens` defaults to 16000 accordingly.
@@ -181,9 +180,14 @@ what it made of each reply: retries, error bodies, unknown blocks,
 thinking signatures replayed byte for byte, tool calls, denied and invalid
 calls, every stop condition, and the OpenAI shapes.
 
+`tls/tls_inference` runs a send and an agent run over `https://`, against
+a mock served by `http::serve_tls` with the test-only certificates in
+`test/tls/certs/`; the client trusts their CA through `c.http.ca_file`. A
+client on the system's CAs is refused the test certificate. It runs where
+TLS is built in, as the other `tls/` tests do.
+
 ## Left open
 
-* **TLS**, in `http` (see constraint 1).
 * **Streaming** (SSE): needs an incremental read in `http::fetch`. The
   event parser itself would be small; the transport is the missing piece.
 * Images and documents in user turns: a program can write them as `Opaque`

@@ -52,8 +52,8 @@ last text: 0 (no assistant text after the last user turn)
   POST /v1/messages again, 1076 bytes
   failed sends added nothing: true
   sent=false status=0 attempts=1 stop=0 () id= model= tokens=0/0 cache=0/0 error=[transport] cannot connect
-  sent=false status=0 attempts=0 stop=0 () id= model= tokens=0/0 cache=0/0 error=[transport] https:// needs TLS, which the http module does not have yet: set base_url to an http:// TLS-terminating proxy
-  sent=false status=0 attempts=0 stop=0 () id= model= tokens=0/0 cache=0/0 error=[transport] base_url is not an http:// URL
+  https: sent=false [transport] expected error=true expected attempts=true
+  sent=false status=0 attempts=0 stop=0 () id= model= tokens=0/0 cache=0/0 error=[transport] base_url is not an http:// or https:// URL
 -- openai
   sent=true status=200 attempts=1 stop=2 (tool_calls) id=chatcmpl-1 model=gpt-test tokens=20/7 cache=16/0 error=[] 
   POST /v1/chat/completions  content-type: application/json; authorization: Bearer sk-oai; 

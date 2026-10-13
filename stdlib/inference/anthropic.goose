@@ -10,8 +10,8 @@ struct Anthropic {
     beta: u8[..256] = [],                 // anthropic-beta, comma-separated; "" for none
 }
 
-// A client for the Anthropic API. The http module has no TLS yet, so the
-// default base URL fails until it does; pass an http:// proxy's.
+// A client for the Anthropic API. The default https:// base URL needs a
+// program linked with TLS (`goose --tls-link`).
 fn anthropic(api_key: const u8[:], base_url: const u8[:] = "https://api.anthropic.com") -> Client<Anthropic> {
     Client<Anthropic> { provider: Anthropic { .. }, base_url: base_url, api_key: api_key, .. }
 }

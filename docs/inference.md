@@ -10,25 +10,17 @@ Both are written in Goose, over [`http`](http.md) and [`json`](json.md).
 The design and its reasons are in
 [`design/inference.md`](design/inference.md).
 
-**TLS.** The `http` client has no TLS yet, and every hosted provider is
-HTTPS-only. Until `http` gains it, point `base_url` at something that
-speaks plain HTTP: a local OpenAI-compatible server, or a TLS-terminating
-reverse proxy on the same machine. For nginx, that is:
-
-```nginx
-server {
-    listen 127.0.0.1:8080;
-    location / {
-        proxy_pass https://api.anthropic.com;
-        proxy_set_header Host api.anthropic.com;
-        proxy_ssl_server_name on;
-        proxy_read_timeout 600s;
-    }
-}
-```
-
-An `https://` base URL fails at once and says why. Requests are not
-streamed, since `http::fetch` reads whole responses.
+**HTTPS.** Every hosted provider is HTTPS-only, and the default base URLs
+are `https://`. They work when the program has TLS: the compiler was built
+with Mbed TLS and the program is run in-process, or its C was linked with
+what `goose --tls-link cc` names ([`http.md`](http.md) §3 has the build).
+The client verifies the provider's certificate against the system's CAs,
+or against the PEM bundle in `c.http.ca_file`. Without TLS, an `https://`
+request fails at once with `http`'s own error, which says how to build
+with it, and is not retried. Local servers that speak plain HTTP (vLLM,
+llama.cpp, Ollama) take an `http://` base URL, as does a TLS-terminating
+proxy where TLS is not built (Windows). Requests are not streamed, since
+`http::fetch` reads whole responses.
 
 ---
 
@@ -42,7 +34,7 @@ import inference;
 fn main() {
     var key: u8[>..] = [];
     env("ANTHROPIC_API_KEY", key);
-    var c = inference::anthropic(key, "http://127.0.0.1:8080");
+    var c = inference::anthropic(key);   // https://api.anthropic.com
 
     var conv: inference::Item..[>..] = [];
     inference::user(conv, "Name three rivers in France.");
@@ -193,6 +185,7 @@ authorization header, for local servers.
 
 ```goose
 import std;
+import os;
 import inference;
 import agent;
 
@@ -211,7 +204,9 @@ fn tools(call: agent::Call, out: u8[>..]&) -> bool {
 }
 
 fn main() {
-    var c = inference::anthropic("", "http://127.0.0.1:8080");
+    var key: u8[>..] = [];
+    env("ANTHROPIC_API_KEY", key);
+    var c = inference::anthropic(key);
     var conv: inference::Item..[>..] = [];
     inference::user(conv, "What is 1234 + 4321?");
     let r = agent::run(c, inference::Params { tools: TOOLS, .. }, conv, agent::Limits { .. },
@@ -327,4 +322,7 @@ reply from a queue and hands every request back on another queue. The
 `stdlib_inference` and `stdlib_agent` fixtures use it to check requests
 byte for byte and replies of every kind, offline. Threads need the C
 backend: build with `goose -o prog.c --standalone prog.goose` and compile
-the result.
+the result. `test/tls/tls_inference.goose` does the same over `https://`:
+a mock served with `http::serve_tls` and the test-only certificates in
+`test/tls/certs/`, the client trusting their CA through `c.http.ca_file`.
+It runs where TLS is built in.

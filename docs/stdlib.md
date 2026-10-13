@@ -557,8 +557,8 @@ checks along the way.
 and `json` (`stdlib/inference/`): the Anthropic Messages API, OpenAI-compatible
 Chat Completions, and providers a program declares itself.
 [`inference.md`](inference.md) is the guide; [`design/inference.md`](design/inference.md)
-is the design. `http` has no TLS yet, so `base_url` is an `http://` proxy or
-local server.
+is the design. Hosted APIs are `https://`, which needs a program with TLS
+(`goose --tls-link`, see `http` above); local servers take an `http://` base URL.
 
 ```goose
 fn anthropic(api_key: const u8[:], base_url: const u8[:] = "https://api.anthropic.com") -> Client<Anthropic>

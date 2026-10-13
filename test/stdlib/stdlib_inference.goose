@@ -195,8 +195,16 @@ fn anthropic_tests(base: const u8[:]) {
     var dead = inference::anthropic("k", "http://127.0.0.1:1");
     dead.max_retries = 0;
     show(inference::send(dead, inference::Params { .. }, conv, res), res);
-    var tls = inference::anthropic("k");
-    show(inference::send(tls, inference::Params { .. }, conv, res), res);
+    // https:// goes to the http module, which says why it failed: without
+    // TLS in the program, that it has none, after one attempt (another
+    // would not help); with it, that nothing listens there.
+    var tls = inference::anthropic("k", "https://127.0.0.1:1");
+    tls.retry_ms = 1;
+    let tls_sent = inference::send(tls, inference::Params { .. }, conv, res);
+    let has = http::tls_available();
+    print("  https: sent=", tls_sent, " [", res.error_type, "] expected error=",
+          starts_with(res.error, if has { "cannot connect" } else { "TLS: this program was built without TLS" }),
+          " expected attempts=", res.attempts == (if has { 3 } else { 1 }));
     var odd = inference::anthropic("k", "ftp://x");
     show(inference::send(odd, inference::Params { .. }, conv, res), res);
 }

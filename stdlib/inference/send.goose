@@ -14,11 +14,11 @@ import json;
 // the error. false, with res.error set, when no reply came.
 fn send<P>(c: Client<P>&, p: Params, conv: Item..[>..]&, res: Response&) -> bool {
     res = Response { .. };
-    guard starts_with(c.base_url[..], "http://") else {
-        if starts_with(c.base_url[..], "https://") {
-            return fail(res, "transport", "https:// needs TLS, which the http module does not have yet: set base_url to an http:// TLS-terminating proxy");
-        }
-        return fail(res, "transport", "base_url is not an http:// URL");
+    // https:// needs a program linked with TLS (`goose --tls-link`); without
+    // it, the http module's own error comes back as the transport error.
+    let https = starts_with(c.base_url[..], "https://");
+    guard https || starts_with(c.base_url[..], "http://") else {
+        return fail(res, "transport", "base_url is not an http:// or https:// URL");
     }
     var body: u8[>..] = [];
     inference_encode(c.provider, p, conv, body);
@@ -57,6 +57,7 @@ fn send<P>(c: Client<P>&, p: Params, conv: Item..[>..]&, res: Response&) -> bool
             } else {
                 res.status = 0;
                 fail(res, "transport", c.http.error);
+                retry = !https || http::tls_available();   // no TLS will not change
             }
         }
         if !retry || attempt == c.max_retries { break; }

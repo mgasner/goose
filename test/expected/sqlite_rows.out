@@ -1,0 +1,26 @@
+true
+1 apple [fruit,red] 1.25
+2 bread [bakery] 2.5
+3 cheese [dairy,aged] 7.0
+4 dates [] 3.75
+app 10
+bre 20
+dat 40
+none: 0 true
+bad: 0 false no such table: nowhere
+Text { "apple" }
+Real { 2.5 }
+Value.Null
+Int { 4 }
+one: cheese
+true true
+false true
+14.5 bread
+0 false
+first expensive: 2
+again: 2
+pairs 16
+cached 2 -> 3
+cached after 10 more: 4
+between: bread
+between: dates

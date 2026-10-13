@@ -170,6 +170,18 @@ struct Parser {
                 CheckFreshTypeName(al->ns, al->name);
                 Expect(T_ASSIGN, "type alias");
                 al->type = ParseType();
+                // `type X = sqlite::row_type(q);`: a row type made from a
+                // checked statement (sqlite_check.h), not an alias of one.
+                if (lex.tok == T_LPAREN && al->type->kind == TY_UNRESOLVED &&
+                    al->type->named->name == "sqlite::row_type") {
+                    lex.Next();
+                    al->rowstmt = ParseQualifiedName("sqlite::row_type");
+                    Expect(T_RPAREN, "sqlite::row_type");
+                    Expect(T_SEMI, "type alias");
+                    al->type->kind = TY_VOID;   // Nothing to resolve: it names no type.
+                    ast.topdecls.push_back(New<AliasDecl>(line, al));
+                    return;
+                }
                 Expect(T_SEMI, "type alias");
                 ast.NS(al->ns).aliasmap[al->name] = al;
                 ast.topdecls.push_back(New<AliasDecl>(line, al));

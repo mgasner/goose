@@ -46,6 +46,8 @@ inline Val TypeCheck::CheckCall(Call *c, TypeExpr *expected) {
 }
 
 inline Val TypeCheck::CheckNamedCall(Call *c, Ident *id, TypeExpr *expected) {
+    // A call through a checked SQL statement becomes the call it stands for.
+    if (LowerSqliteCall(c, id)) return CheckNamedCall(c, (Ident *)c->callee, expected);
     if (LookupVar(id->name, id->ns))
         Error(c, cat(id->name, " is a variable, not a function"));
     const FnValBind *fb;

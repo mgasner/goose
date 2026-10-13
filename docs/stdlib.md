@@ -1,17 +1,18 @@
 # The Goose standard library
 
-The standard library has eleven modules under `stdlib/`: `std`, `dictionary`,
-`vec`, `math`, `os`, `binary`, `graphql`, `audio`, `gfx`, `physics`, and `ui`. Import each module by name,
+The standard library has twelve modules under `stdlib/`: `std`, `dictionary`,
+`vec`, `math`, `os`, `binary`, `graphql`, `audio`, `gfx`, `physics`, `ui`, and `sqlite`. Import each module by name,
 for example `import std;`. The compiler locates the library in its source
 tree; use `--stdlib <dir>` or `GOOSE_STDLIB` to select another location.
 Everything is written in Goose except the C behind `os`
 (`src/runtime/runtime_os.h`), libm behind `math`, the graphics layer behind
 `gfx` (`src/gfx/`), the physics layer behind `physics` (`src/physics/`) and
-the ui layer behind `ui` (`src/ui/`), and the PCM mixer behind `audio`
-(`src/audio/`), all reached through `extern fn` (spec
-§7.10). The design and its rationale are in `design/stdlib_design.md` (and
-`design/gfx.md` for `gfx`, `design/physics.md` for `physics`, `design/ui.md`
-for `ui`, and `design/audio.md` for `audio`); this is the reference.
+the ui layer behind `ui` (`src/ui/`), the PCM mixer behind `audio`
+(`src/audio/`), and SQLite behind `sqlite` (`src/sqlite/`), all reached
+through `extern fn` (spec §7.10). The design and its rationale are in
+`design/stdlib_design.md` (and `design/gfx.md` for `gfx`, `design/physics.md`
+for `physics`, `design/ui.md` for `ui`, `design/audio.md` for `audio`, and
+`design/sqlite.md` for `sqlite`); this is the reference.
 
 For **text rendering, fonts and game HUDs**, start with
 [`ui`](#text-rendering-and-game-huds), which renders over `gfx`. For external
@@ -45,7 +46,7 @@ The library uses these conventions:
   `heap_push`) cannot take one that contains self-relative references, because
   those values cannot be copied (spec §3.9). Construct them in place.
 * The `std`, `dictionary`, `vec`, `math`, and `os` names are global; `binary`, `graphql`, `audio`,
-  `gfx`, `physics`, and `ui` use their own namespaces. A local named `fill` or `count`
+  `gfx`, `physics`, `ui`, and `sqlite` use their own namespaces. A local named `fill` or `count`
   shadows the corresponding global function, causing an error at a call.
 
 ## std
@@ -1727,3 +1728,274 @@ frame's duration, and the clipboard both ways, pasting the system
 clipboard's text and putting there what a field copied. Both work in the
 screen's pixels, so on a high-density display the ui is as many pixels as
 elsewhere, and smaller, until the program sets a scale.
+
+## sqlite
+
+SQLite databases: open one, run SQL with bound parameters, read rows straight
+into Goose values, transactions, backups and in-memory images. Optional:
+SQLite 3.54 is vendored into `third_party/sqlite` by
+`python scripts/fetch_sqlite.py` before configuring
+(`third_party/sqlite/README.md`), and built into the compiler; without it,
+or with `-DGOOSE_SQLITE=OFF`, programs using `sqlite` still typecheck and
+generate C, and only running one in-process fails. A program using it links what `goose --sqlite-link msvc|cc` prints
+(`cc app.c -o app @<it>`). Everything is in namespace `sqlite`;
+`samples/33_sqlite_inventory.goose` is a complete program,
+`design/sqlite.md` how it works.
+
+```goose
+let db, ok = sqlite::open("app.db");
+sqlite::exec(db, "insert into users(name, score) values (?, ?)", "alice", 9.25);
+let users, ran = sqlite::query(db, "select id, name from users where score > ?", 5.0) { r =>
+    User { id: sqlite::int(r, 0), name: sqlite::text(r, 1) }
+};
+```
+
+The program never prepares or finalizes a statement: each connection caches
+statements by their SQL text, resets one when it is used again, and finalizes
+them all when it closes. SQLite's memory is its own; every column read is
+copied into the program's storage, and every parameter bound is copied by
+SQLite, so no Goose value points into SQLite.
+
+A `thread_fn` may use sqlite. A connection belongs to the thread that opened
+it: each thread opens its own, and with WAL (the default for a file) any
+number of them read while one at a time writes, `busy_timeout_ms` making
+writers wait their turn.
+
+### Errors
+
+What fails for reasons outside the program -- a constraint, a busy database,
+a full disk, SQL built at run time that does not parse -- returns `false`
+(the last of several results), and the connection describes the failure
+until the next one. A call the program should not have made -- a closed
+connection, a column out of range, the wrong number of parameters, a
+connection used from another thread, a transaction handle used after its
+block -- aborts the program at once, saying why.
+
+```goose
+fn code(db: Db) -> i32            // OK, CONSTRAINT, BUSY, ...: SQLite's primary codes
+fn extended_code(db: Db) -> i32   // SQLITE_CONSTRAINT_UNIQUE and the like
+fn error(db: Db) -> u8[>..]       // SQLite's message
+fn error_offset(db: Db) -> i64    // where in the SQL a syntax error is, -1 for none
+fn check()                        fn misuse_count() -> i64
+fn available() -> bool            fn version() -> u8[>..]     fn version_number() -> i64
+fn memory_used() -> i64           fn set_soft_heap_limit(bytes: i64) -> i64
+```
+
+### Connections
+
+```goose
+struct Db { h: u64, token: i64 = 0 }
+struct OpenDef {
+    read_only: bool = false, create: bool = true,
+    wal: bool = true,               // journal_mode=WAL for a file that may be written
+    busy_timeout_ms: i32 = 5000, foreign_keys: bool = true, statement_cache: i32 = 128,
+}
+fn open(path: const u8[:], def: OpenDef = OpenDef {}) -> Db, bool
+    // a file, ":memory:", "" for a private temporary file, or a "file:" URI;
+    // false with error(db) saying why; close() the connection either way
+fn close(db: Db)                  // finalizes its statements, rolls back
+fn changes(db: Db) -> i64         fn total_changes(db: Db) -> i64
+fn last_rowid(db: Db) -> i64      fn in_transaction(db: Db) -> bool
+fn interrupt(db: Db)              // the running statement stops with INTERRUPT
+fn exec_script(db: Db, sql: const u8[:]) -> bool   // several statements, no rows
+fn backup(db: Db, path: const u8[:]) -> bool       // the whole database to a file
+fn serialize(db: Db, out: u8[>..]&) -> bool        // the database as one image
+fn deserialize(db: Db, image: const u8[:]) -> bool // empties the statement cache
+fn forget(db: Db, sql: const u8[:])                // drop a cached statement
+fn cached_count(db: Db) -> i64
+fn settle(db: Db)                 // reset statements an each() block left mid-step
+```
+
+### Running statements
+
+Parameters are arguments, 0 to 16 of them, after the SQL. Each binds through
+the `bind` overload set: `i64` and every narrower integer, `f64`, `bool` (0
+or 1), `const u8[:]` (TEXT), `Blob { bytes }` (BLOB), `Null {}` and `Param`.
+A program adds its own types to the set:
+
+```goose
+fn sqlite::bind(s: sqlite::Stmt, i: i64, c: Color) -> bool {
+    return sqlite::bind(s, i, match c { Red => "red", Green => "green" });
+}
+```
+
+```goose
+fn exec(db, sql, args...) -> bool                 // ignoring any rows
+fn query(db, sql, args...) { r => T } -> T[>..], bool   // every row, built by the block
+fn each(db, sql, args...) { r => ... } -> bool    // each row to the block
+fn one(db, sql, args...) { r => ... } -> bool, bool     // the first row: found, ran
+fn scalar_int(db, sql, args...) -> i64, bool      // the first column of the first row;
+fn scalar_real(db, sql, args...) -> f64, bool     // false for no row or a failure
+fn scalar_text(db, sql, args...) -> u8[>..], bool
+```
+
+The block of `query` builds each row's value straight into the result:
+`User { name: sqlite::text(r, 1) }` copies the name once, out of SQLite into
+its place in the array. `each` streams; a `return` from its block leaves the
+statement mid-step until it is next used, or `settle(db)`.
+
+When the number of parameters is known only at run time -- an `IN (...)`
+list, a query builder -- they go in an array of `Param`, whose `Text` and
+`Blob` borrow their bytes:
+
+```goose
+enum Param { Null, Int { v: i64 }, Real { v: f64 }, Text { s: const u8[:] }, Blob { b: const u8[:] } }
+fn exec_params(db: Db, sql: const u8[:], ps: const Param[:]) -> bool
+fn query_params(db, sql, ps) { r => T } -> T[>..], bool
+fn each_params(db, sql, ps) { r => ... } -> bool
+fn one_params(db, sql, ps) { r => ... } -> bool, bool
+```
+
+An array literal takes its type from its first element, so a `Param` array
+is declared as one: `let ps: sqlite::Param[] = [sqlite::Param.Int { v: 1 },
+sqlite::Param.Text { s: name }];`. Binding more or fewer parameters than the
+SQL has is a misuse, not NULLs for the rest.
+
+For a hot loop or named parameters, a statement by hand:
+
+```goose
+struct Stmt { h: u64 }
+fn prepare(db: Db, sql: const u8[:]) -> Stmt, bool  // cached, reset and unbound
+fn bind(s: Stmt, i: i64, v) -> bool                 // numbered from 1
+fn param_count(s: Stmt) -> i64     fn param_index(s: Stmt, name: const u8[:]) -> i64
+fn param_name(s: Stmt, i: i64) -> u8[>..]
+fn step(s: Stmt) -> i32            // ROW, DONE, or a failure's code
+fn row(s: Stmt) -> Row             fn reset(s: Stmt)
+fn readonly(s: Stmt) -> bool       fn sql(s: Stmt) -> u8[>..]
+fn column_count(s: Stmt) -> i64    fn column_name(s: Stmt, i: i64) -> u8[>..]
+fn column_decltype(s: Stmt, i: i64) -> u8[>..]   // "INTEGER", empty for an expression
+```
+
+### Rows
+
+Columns are numbered from 0, and read with SQLite's conversions: an integer
+read with `real()` is a float, NULL reads as 0 or empty.
+
+```goose
+struct Row { h: u64 }              // valid inside the block it is given to
+fn int(r: Row, i: i64) -> i64      fn int_or(r: Row, i: i64, d: i64) -> i64     // d for NULL
+fn real(r: Row, i: i64) -> f64     fn real_or(r: Row, i: i64, d: f64) -> f64
+fn bool_of(r: Row, i: i64) -> bool
+fn text(r: Row, i: i64) -> u8[]    // fits u8[], u8[varint] and u8[..k] fields
+fn blob(r: Row, i: i64) -> u8[]
+fn text_into(r: Row, i: i64, out: u8[>..]&)    fn blob_into(r: Row, i: i64, out: u8[>..]&)
+fn is_null(r: Row, i: i64) -> bool
+fn column_type(r: Row, i: i64) -> i32          // INTEGER, FLOAT, TEXT, BLOB or NULL
+fn byte_count(r: Row, i: i64) -> i64
+fn column_count(r: Row) -> i64     fn column_name(r: Row, i: i64) -> u8[>..]
+fn column_index(r: Row, name: const u8[:]) -> i64     // -1 for none
+fn value(r: Row, i: i64) -> Value..
+enum Value { Null, Int { v: i64 }, Real { v: f64 }, Text { s: u8[] }, Blob { b: u8[] } }
+```
+
+A BLOB holds a whole Goose array: `Blob { bytes: to_bytes(items) }` stores
+it, and `from_bytes<Item[>..]>(sqlite::blob(r, 0))` verifies it on the way
+back.
+
+### Transactions
+
+```goose
+fn transaction(db: Db) { db => ...; true } -> bool       // BEGIN IMMEDIATE
+fn read_transaction(db: Db) { db => ...; true } -> bool  // BEGIN DEFERRED, for reads
+```
+
+The block gets the connection to use inside it and yields whether to commit;
+the call returns whether it committed. Nested, a transaction is a savepoint,
+rolled back alone. Leaving the block early -- a `return` from the function
+around it -- skips both; the transaction is rolled back at the connection's
+next use, from outside the block, or at `close`. Inside the block use the
+block's handle: the outer one looks the same as having left, rolls the
+transaction back, and the block's next use of its own handle aborts. Naming
+the block's parameter `db`, as above, makes that impossible.
+
+### Checked SQL
+
+SQL written in the program can be checked when the program is compiled.
+The compiler applies the schema to a database of its own (the same SQLite),
+prepares each statement there, and checks every call that uses it: the
+parameters, and the fields the rows are read into. `design/sqlite_checked.md`
+is the design.
+
+```goose
+let SCHEMA = sqlite::schema("""
+    create table users(id integer primary key, name text not null, email text) strict;
+    """, """
+    alter table users add column score real not null default 0;
+    """);
+let by_score = sqlite::statement(SCHEMA, "select id, name, email from users where score > ?");
+let add_user = sqlite::statement(SCHEMA, "insert into users(name, email) values (:name, :email)");
+
+struct User { id: i64, name: u8[], email: sqlite::Nullable<u8[]> }
+struct NewUser { name: u8[], email: sqlite::Nullable<u8[]> }
+
+let db, ok = sqlite::open("app.db", SCHEMA);    // migrates, then checks the file (below)
+sqlite::exec(db, add_user, NewUser { name: "alice", email: sqlite::some("a@x") });
+let users, ran = sqlite::rows<User>(db, by_score, 5.0);
+```
+
+```goose
+sqlite::schema(migration, ...)            // a global's initializer: the migrations, in order
+sqlite::schema_file(path, ...)            // the same, read from files beside the source
+sqlite::statement(SCHEMA, sql)            // a global's initializer: one statement
+fn rows<T>(db, q, args...) -> T[>..], bool     // every row as a T
+fn one<T>(db, q, args...) -> T, bool           // the first row; T's default and false if none
+fn each<T>(db, q, args...) { row => ... } -> bool
+fn open(path, SCHEMA, def = OpenDef {}) -> Db, bool
+fn migrate(db: Db, SCHEMA) -> bool
+fn user_version(db: Db) -> i64
+type X = sqlite::row_type(q);             // a struct with a field per column of q
+```
+
+The unchecked forms take a checked statement in place of SQL text too
+(`exec(db, q, args...)`, `query`, `each`, `one`, `scalar_*`), with their
+arguments counted against its parameters. A statement with named parameters
+(`:name`, `@name`, `$name`) takes one struct instead, whose fields bind them
+by name.
+
+**Rows.** `rows<T>`, `one<T>` and `each<T>` read each row into `T`. A struct's
+fields match the columns by name (case aside), in any order. Every column
+needs a field, and every field a column unless it has a default. A
+non-struct `T` reads a statement of one column. A field's type must be one
+its column's declared type reads as:
+
+| Column declared | Fields |
+|---|---|
+| INTEGER | `i64` and every other integer, `bool` (0 or 1), `f64` |
+| REAL | `f64`, `f32` |
+| TEXT | `u8[]`, `u8[varint]`, `u8[..k]` |
+| BLOB | `u8[]`, `u8[varint]`, `u8[..k]` |
+| NUMERIC, or an expression | any of these |
+| any | a type with `fn sqlite::read(r: sqlite::Row, i: i64, out: T&) -> bool` |
+
+A value its field cannot hold (an integer out of an `i8`'s range, text longer
+than a `u8[..k]`, a `read` returning false) stops the rows there, and the
+call returns false, with the column in `error(db)` and the code `MISMATCH`.
+The rows read so far are kept, the failing one last, the field left zero or
+empty.
+
+**NULL.** A column that can be NULL needs a `Nullable` field:
+
+```goose
+struct Nullable<T> { has: bool = false, v: T }
+fn none<T>() -> Nullable<T>        fn some<T>(v: T) -> Nullable<T>
+fn some(v: const u8[:]) -> Nullable<u8[]>
+```
+
+A column can be NULL unless it is a table column declared `NOT NULL` (or an
+`INTEGER PRIMARY KEY`) in a statement without an outer join. Everything else
+can be, as far as the compiler can tell: an expression, and every column of
+a statement with a `LEFT JOIN`. The column's alias says otherwise:
+`count(*) as "n!"` is never NULL, and `x as "x?"` may be. A generated row
+type also needs an expression's type, in the alias too: `as "n: integer!"`.
+
+**The database file.** `open(path, SCHEMA)` applies the migrations the file
+has not had, each in a transaction, numbering them in `PRAGMA user_version`.
+It then prepares every statement of the schema and compares each with what
+the compiler saw: its parameters and its columns' declared types. A file
+that differs, or whose version is newer than the program's migrations,
+fails to open, `code(db)` being `SCHEMA` and `error(db)` saying what
+differs.
+
+`goose --sqlite-types app.goose` prints a struct for every statement, named
+after its global (`by_score` gives `struct ByScoreRow`), to copy into the
+program.

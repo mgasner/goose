@@ -1,0 +1,38 @@
+> add widget 10 2.50
+  ok: added widget #1
+> add gadget 3 12.00
+  ok: added gadget #2
+> add gizmo 25 0.75
+  ok: added gizmo #3
+> add widget 1 1.00
+  refused: UNIQUE constraint failed: items.name
+> sell widget 4
+  ok: sold 4 widget
+> sell gadget 5
+  refused: only 3 gadget in stock
+> sell sprocket 1
+  refused: no item sprocket
+> restock gadget 5
+  ok: restocked gadget
+> sell gadget 5
+  ok: sold 5 gadget
+> sell gizmo 20
+  ok: sold 20 gizmo
+> report
+  item        stock    price   sold
+  gadget          3    12.00      5
+  gizmo           5     0.75     20
+  widget          6     2.50      4
+  revenue 85.00 from 3 sales
+> restock sprocket 3
+  refused: no item sprocket
+> sell widget 6
+  ok: sold 6 widget
+> sell widget 1
+  refused: only 0 widget in stock
+> report
+  item        stock    price   sold
+  gadget          3    12.00      5
+  gizmo           5     0.75     20
+  widget          0     2.50     10
+  revenue 100.00 from 4 sales

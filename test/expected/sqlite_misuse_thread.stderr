@@ -1,0 +1,1 @@
+sqlite: sqlite::prepare: a connection used from a thread other than the one that opened it

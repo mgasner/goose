@@ -1,0 +1,1 @@
+sqlite: sqlite::prepare: the connection handle of a transaction() block that has ended. If this is inside the block, the transaction was rolled back because the outer handle was used inside it: use the block's own

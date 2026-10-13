@@ -24,14 +24,16 @@ the backend refuses outright is counted as a skip, not a failure.
 
 The audio/ tests use the SDL3 PCM mixer without a device, the gfx/ tests
 use the SDL3 graphics module, the physics/ tests the Box3D
-physics module and the ui/ tests the Nuklear ui module. They always parse,
+physics module, the sqlite/ tests the SQLite module and the ui/ tests the
+Nuklear ui module. They always parse,
 typecheck and generate C; they build and run where the compiler has the
 native layers they use built in -- their category's, and any other they
 import, as a ui test drawing through gfx does -- linking what `goose
---audio-link`, `--gfx-link`, `--physics-link` or `--ui-link` names, and a machine without a
+--audio-link`, `--gfx-link`, `--physics-link`, `--sqlite-link` or `--ui-link` names, and a machine without a
 GPU device counts as a skip for gfx. A fixture there with `// error:`
 markers is a rejection test, as in errors_tc/. test/api_check.py checks
-stdlib/audio.goose, stdlib/gfx.goose, stdlib/physics.goose and stdlib/ui.goose against their C
+stdlib/audio.goose, stdlib/gfx.goose, stdlib/physics.goose, stdlib/sqlite.goose and
+stdlib/ui.goose against their C
 layers' own lists of functions, structs and constants.
 
 Profiles keep the CI coverage deliberate: baseline compares Goose/native C
@@ -1151,6 +1153,7 @@ def main():
     native = {"audio": tc.audio_link(exe, cc) if cc else [],
               "gfx": tc.gfx_link(exe, cc) if cc else [],
               "physics": tc.physics_link(exe, cc) if cc else [],
+              "sqlite": tc.sqlite_link(exe, cc) if cc else [],
               "ui": tc.ui_link(exe, cc) if cc else []}
     print(f"profile: {args.profile}; C backend: {cc.desc if cc else 'none'}; "
           f"JIT backend: {'TinyCC' if jit else 'none'}; " +
@@ -1176,6 +1179,16 @@ def main():
     # kept beside what it rejects (for gfx, shaders).
     native_errors = [f for f in tests if f.parent.name in native and error_markers(f)]
     tests = [f for f in tests if f not in native_errors]
+    # Checked SQL is checked by the compiler's own SQLite: a compiler built
+    # without it rejects those programs, so they are skipped there.
+    has_sql = tc.run_capture([exe, "--sqlite-link", "cc"])[0] == 0
+    if not has_sql:
+        checked = [f for f in tests + native_errors
+                   if f.parent.name == "sqlite" and re.search(r"sqlite::schema", f.read_text(encoding="utf-8"))]
+        tests = [f for f in tests if f not in checked]
+        native_errors = [f for f in native_errors if f not in checked]
+        if checked:
+            print(f"skip {len(checked)} checked-SQL test(s) (compiler built without SQLite)")
 
     # The generated programs below take long to check; they start before the
     # fixtures. Their files are written here, before any job reads them.
@@ -1350,6 +1363,31 @@ def main():
             r.ok(what)
     for module in native:
         r.show_task(api, module)
+
+    # stdlib/sqlite.goose's argument-count overloads are generated.
+    def sqlite_arity():
+        code, out, err = tc.run_capture([sys.executable, tc.REPO_ROOT / "scripts" / "sqlite_arity.py",
+                                         "--check"])
+        what = "sqlite-arity stdlib/sqlite.goose's generated overloads are up to date"
+        if code != 0:
+            r.fail(what, out + err)
+        else:
+            r.ok(what)
+    r.show_task(sqlite_arity)
+    has_sql_types = tc.run_capture([exe, "--sqlite-link", "cc"])[0] == 0
+
+    # What --sqlite-types prints for the checked SQL test's statements.
+    def sqlite_types():
+        f = HERE / "sqlite" / "sqlite_checked.goose"
+        code, out, err = r.goose("--sqlite-types", f)
+        want = (HERE / "expected" / "sqlite_types.out").read_text(encoding="utf-8")
+        what = f"sqlite-types {f.name}"
+        if code != 0 or joined(out) != joined(want):
+            r.fail(what, f"exit {code}\n{out}{err}")
+        else:
+            r.ok(what)
+    if has_sql_types:
+        r.show_task(sqlite_types)
 
     for f in tests:
         r.show(lambda f=f: fixtures[f].result().front)

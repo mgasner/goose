@@ -7,18 +7,21 @@
 #include "dump.h"
 #include "clone.h"
 #include "parser.h"
+#include "sqlite_check.h"
 #include "resolve.h"
 #include "builtins.h"
 #include "gfx.h"
 #include "audio.h"
 #include "physics.h"
 #include "ui.h"
+#include "sqlite.h"
 #include "typecheck.h"
 #include "typecheck_types.h"
 #include "typecheck_exprs.h"
 #include "typecheck_flow.h"
 #include "typecheck_calls.h"
 #include "typecheck_builtins.h"
+#include "typecheck_sqlite.h"
 #include "typecheck_nodes.h"
 #include "optimize.h"
 #include "optimize_basecase.h"
@@ -337,6 +340,7 @@ constexpr const char *MULTIMARK = "==== goose --multi-test: exit";
 int Main(int argc, char **argv) {
     string outname, headername, stdlibdir, shaderfile, shadersource, dumpfile;
     auto dump = false, tokens = false, parseonly = false, specs = false, nocgen = false;
+    auto sqltypes = false;
     auto roundtrip = false, multitest = false;
     auto nobce = false, bcetest = false, bcelines = false, norfcheck = false;
     auto forcejit = false, standalone = false;
@@ -382,13 +386,14 @@ int Main(int argc, char **argv) {
         else if (arg == "--compile-shader" && i + 1 < argc) shaderfile = argv[++i];
         else if (arg == "--shader-source" && i + 1 < argc) shadersource = argv[++i];
         else if ((arg == "--audio-link" || arg == "--gfx-link" ||
-                  arg == "--physics-link" || arg == "--ui-link") &&
+                  arg == "--physics-link" || arg == "--ui-link" || arg == "--sqlite-link") &&
                  i + 1 < argc) {
             try {
                 auto style = argv[++i];
                 auto path = arg == "--audio-link"     ? AudioLinkFile(DirOf(argv[0]), style)
                             : arg == "--gfx-link"     ? GfxLinkFile(DirOf(argv[0]), style)
                             : arg == "--physics-link" ? PhysicsLinkFile(DirOf(argv[0]), style)
+                            : arg == "--sqlite-link"  ? SqliteLinkFile(DirOf(argv[0]), style)
                                                       : UiLinkFile(DirOf(argv[0]), style);
                 printf("%s\n", path.c_str());
             } catch (CompileError &e) {
@@ -402,6 +407,7 @@ int Main(int argc, char **argv) {
         else if (arg == "-O2") optlevel = 2;
         else if (arg == "-o" && i + 1 < argc) outname = argv[++i];
         else if (arg == "--header" && i + 1 < argc) headername = argv[++i];
+        else if (arg == "--sqlite-types") sqltypes = true;
         else if (arg == "--include" && i + 1 < argc) includenames.push_back(argv[++i]);
         else if (arg == "--stdlib" && i + 1 < argc) stdlibdir = argv[++i];
         // A -D lands in the generated C itself rather than on some backend's
@@ -432,12 +438,12 @@ int Main(int argc, char **argv) {
                         "[--dump-file out.goose] [--specs] [--check] "
                         "[--no-bce] [--bce-test] [--bce-lines] [--unsafe-no-rf-check] [-O0|-O1|-O2] "
                         "[-o out.c [--standalone]] [--jit] [-DNAME=VALUE]... [--include header.h]... "
-                        "[--header out.h] "
+                        "[--header out.h] [--sqlite-types] "
                         "[--stdlib dir] file.goose [-- program args...] | "
                         "--multi-test [options] file.goose... | --emit-runtime runtime.c | "
                         "--gen-runtime-header | "
                         "--audio-link msvc|cc | --gfx-link msvc|cc | "
-                        "--physics-link msvc|cc | --ui-link msvc|cc\n");
+                        "--physics-link msvc|cc | --ui-link msvc|cc | --sqlite-link msvc|cc\n");
         fprintf(stderr, "without -o the program is compiled and run in this process%s.\n",
                 have_jit ? " by TinyCC" : " -- unavailable in this build, so the .c is written");
         fprintf(stderr, "the .c that -o writes links with the runtime that --emit-runtime "
@@ -485,6 +491,11 @@ int Main(int argc, char **argv) {
         Ast ast;
         auto stdlibdirs = StdlibDirs(stdlibdir, argv[0]);
         ParseProgram(ast, filename, stdlibdirs);
+        if (sqltypes) {
+            // A row struct for every checked SQL statement (sqlite_check.h).
+            fputs(SqlTypesListing(ast).c_str(), stdout);
+            return 0;
+        }
         if (dump) {
             // Dump is parse-level output: no name resolution or typecheck,
             // so parse-only test files can roundtrip, and every name shows
@@ -625,6 +636,7 @@ int Main(int argc, char **argv) {
             if (cg.layers.gfx && !have_gfx) throw CompileError { no_gfx_error };
             if (cg.layers.physics && !have_physics) throw CompileError { no_physics_error };
             if (cg.layers.ui && !have_ui) throw CompileError { no_ui_error };
+            if (cg.layers.sqlite && !have_sqlite) throw CompileError { no_sqlite_error };
             program = assemble(false);
             layers = cg.layers;
         }

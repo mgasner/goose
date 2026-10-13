@@ -53,6 +53,9 @@ add_executable(goose
     src/gfx.h
     src/audio.h
     src/physics.h
+    src/sqlite.h
+    src/sqlite_check.h
+    src/typecheck_sqlite.h
     src/ui.h
 )
 
@@ -169,6 +172,26 @@ if(GOOSE_HAVE_UI)
     target_link_libraries(goose PRIVATE goose_ui)
     target_compile_definitions(goose PRIVATE
         GOOSE_HAVE_UI=1 GOOSE_UI_LINK_PATH="${CMAKE_BINARY_DIR}/ui/$<CONFIG>")
+endif()
+
+# The optional sqlite module (stdlib/sqlite.goose): the SQLite amalgamation
+# vendored in third_party/sqlite by scripts/fetch_sqlite.py (not committed) and
+# the C layer over it, built in and linked
+# the way physics is. The compiler also uses it to check SQL at compile time
+# (docs/design/sqlite_checked.md). Without the amalgamation, or with
+# -DGOOSE_SQLITE=OFF, the compiler builds and behaves the same, except that
+# it cannot run an sqlite program itself or check SQL.
+option(GOOSE_SQLITE "Build the sqlite module from the vendored amalgamation" ON)
+if(GOOSE_SQLITE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite/sqlite3.c")
+    include(cmake/sqlite.cmake)
+elseif(GOOSE_SQLITE)
+    message(STATUS "sqlite: third_party/sqlite has no amalgamation (python scripts/fetch_sqlite.py "
+                   "fetches it); building without the sqlite module")
+endif()
+if(GOOSE_HAVE_SQLITE)
+    target_link_libraries(goose PRIVATE goose_sqlite)
+    target_compile_definitions(goose PRIVATE
+        GOOSE_HAVE_SQLITE=1 GOOSE_SQLITE_LINK_PATH="${CMAKE_BINARY_DIR}/sqlite/$<CONFIG>")
 endif()
 
 if(MSVC)

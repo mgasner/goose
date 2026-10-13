@@ -24,6 +24,9 @@
 #ifdef GOOSE_HAVE_UI
 #include "ui/ui_api.h"
 #endif
+#ifdef GOOSE_HAVE_SQLITE
+#include "sqlite/sqlite_api.h"
+#endif
 
 namespace goose {
 
@@ -104,6 +107,17 @@ inline void AddUiSymbols(TCCState *s) {
     #endif
 }
 
+// The sqlite layer's functions (src/sqlite/sqlite_api.h), the same way.
+inline void AddSqliteSymbols(TCCState *s) {
+    #ifdef GOOSE_HAVE_SQLITE
+        #define GS_SQL_SYMBOL(ret, name, params) tcc_add_symbol(s, #name, (const void *)&name);
+        GS_SQL_API(GS_SQL_SYMBOL)
+        #undef GS_SQL_SYMBOL
+    #else
+        (void)s;
+    #endif
+}
+
 // Compiles `csrc` in memory and calls its main, returning what the program
 // returned or exited with. `progargs` become the program's argv after argv[0].
 // `layers` says which native layers the program calls into.
@@ -127,6 +141,7 @@ inline int RunJit(const string &csrc, const string &libpath, const string &progn
     if (layers.gfx) AddGfxSymbols(s);
     if (layers.physics) AddPhysicsSymbols(s);
     if (layers.ui) AddUiSymbols(s);
+    if (layers.sqlite) AddSqliteSymbols(s);
     // tcc_run hands these to the program's main, which takes them as C main
     // does: an array of writable pointers. Hence the mutable copies.
     auto name = progname;

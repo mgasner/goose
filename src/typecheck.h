@@ -2051,6 +2051,21 @@ struct TypeCheck {
                          Node *arg);
     StrLit *ConstStrLit(Node *n);
     const string *EmbedShader(Call *c, vector<Node *> &args);
+
+    // Checked SQL (typecheck_sqlite.h): calls through checked statements,
+    // lowered into the unchecked library calls they stand for.
+    bool LowerSqliteCall(Call *c, Ident *id);
+    Ident *SqlIdent(Line line, string_view leaf, string_view ns);
+    int SqlStmtArg(Node *a);
+    const VarDecl *SqlSchemaArg(Node *a);
+    SqlErr SqlErrs();
+    SqlStr SqlStrs();
+    VarDecl *SqlDeclaredBy(Call *c, string_view what);
+    vector<Node *> SqlParams(Call *c, const SqlStmt &st, string_view qname, size_t first);
+    Node *SqlReader(Call *c, TypeExpr *ft, int i, const SqlColumn &col, string_view what,
+                    string_view qname);
+    Node *SqlDecoder(Call *c, TypeExpr *t, const SqlStmt &st, string_view qname);
+    FunVal *SqlBlock(Line line, vector<const char *> params, Block *body);
     void CheckGrowShrink(Node *at, const char *op, Node *recv, const Val &rv);
     // `what` names the array in the diagnostics; `bound` is its type where vd
     // only bounds it (ShrinkTarget).
@@ -2370,6 +2385,9 @@ struct TypeCheck {
         nulltype = ast.RefTo(ast.voidtype, Line {}, true);
         Frame f;
         frames.push_back(f);
+        // A row type resolution could not make (sqlite_check.h).
+        if (ast.sqlcat && !ast.sqlcat->deferred.empty())
+            Error(ast.sqlcat->deferred[0].first, ast.sqlcat->deferred[0].second);
         // Global VarDefs exist up front so names resolve in any order; reads
         // before their initializer ran are caught by the assigned flag.
         for (auto g : ast.globals) {

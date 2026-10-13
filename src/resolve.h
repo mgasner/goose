@@ -11,6 +11,9 @@
 namespace goose {
 
 inline void ResolveTypeNames(Ast &ast) {
+    // Row types made from checked statements become structs first, so they
+    // resolve as any struct does.
+    ExpandSqlRowTypes(ast);
     auto ErrorAt = [&](const TypeExpr *t, const string &msg) {
         throw CompileError {
             cat(ast.sources[t->line.fileidx].first, ":", t->line.line, ": error: ", msg)

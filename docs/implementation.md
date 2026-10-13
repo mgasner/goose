@@ -99,6 +99,8 @@ process started with (`ulimit -s`), which nothing in the executable sets.
 | `--gfx-link msvc\|cc` | print the response file of link inputs a program using `gfx` needs (`gfx.h`, `GfxLinkFile`) |
 | `--physics-link msvc\|cc` | the same for `physics` (`physics.h`, `PhysicsLinkFile`) |
 | `--ui-link msvc\|cc` | the same for `ui` (`ui.h`, `UiLinkFile`) |
+| `--sqlite-link msvc\|cc` | the same for `sqlite` (`sqlite.h`, `SqliteLinkFile`) |
+| `--sqlite-types` | print a row struct for every checked SQL statement the program declares, and stop (`sqlite_check.h`, `docs/design/sqlite_checked.md`) |
 | `--multi-test a.goose b.goose ...` | compile each file in turn with the other flags, as a process of its own on it would (an `Ast` and a compile thread each, which is all the state a compile has), each file's output on both streams ending in a line `==== goose --multi-test: exit <code> <file>`; an `-o` names each file's C with `%` for its name. It runs no programs and writes no dump files. The test runner's batches of compiler runs (`docs/testing.md`) |
 | `--compile-shader f [--shader-source msl\|hlsl]` | hidden: what a shader compiles to, without a program around it |
 
@@ -3745,9 +3747,23 @@ the same way over Box3D, in `src/physics/`, its functions `gs_phys_*` and
 their JIT definitions `AddPhysicsSymbols`; `docs/design/physics.md`
 describes it. **The ui layer** behind `stdlib/ui.goose` is built the same
 way over Nuklear, in `src/ui/`, its functions `gs_ui_*` and their JIT
-definitions `AddUiSymbols`; `docs/design/ui.md` describes it. Codegen notes
-which of the three a program calls in `NativeLayers` (`utils.h`), by symbol
-prefix, for the JIT run to register.
+definitions `AddUiSymbols`; `docs/design/ui.md` describes it. **The sqlite
+layer** behind `stdlib/sqlite.goose` is built the same way over the SQLite
+amalgamation vendored in `third_party/sqlite`, in `src/sqlite/`, its
+functions `gs_sql_*` and their JIT definitions `AddSqliteSymbols`;
+`docs/design/sqlite.md` describes it. **Checked SQL**
+(`docs/design/sqlite_checked.md`) uses the same SQLite inside the compiler:
+`sqlite_check.h` keeps the `Ast`'s catalog of schemas and statements, each
+prepared against an in-memory database the schema's migrations built, and
+`ExpandSqlRowTypes` turns `type X = sqlite::row_type(q);` into a parsed
+`struct X` at the start of `ResolveTypeNames`. `typecheck_sqlite.h`
+rewrites a call through a checked statement, in place, into the unchecked
+library call it stands for (`LowerSqliteCall`, from `CheckNamedCall`):
+`rows<T>` into `query` with a block that builds a `T` from the row, and so
+on. Every pass after the checker sees ordinary calls. Unlike the others it may be called
+from a `thread_fn`, so `gs_sql_` is not among the prefixes the thread check
+rejects. Codegen notes which of the layers a program calls in `NativeLayers`
+(`utils.h`), by symbol prefix, for the JIT run to register.
 
 **Varints**: ULEB128 read/write/size, zigzag for signed positions, the
 one-byte fast path macros `GS_ULEB_READ`/`GS_ULEB_SIZE` for length prefixes

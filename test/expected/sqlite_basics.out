@@ -1,0 +1,30 @@
+true true
+open missing: false true unable to open database file
+open: true 0 not an error
+true
+changes 1, total 2, last rowid 2
+columns 5
+i: type 1 null false bytes 2 value Int { 42 }
+r: type 2 null false bytes 3 value Real { 2.5 }
+s: type 3 null false bytes 2 value Text { "hi" }
+b: type 4 null false bytes 3 value Blob { 00ff10 }
+n: type 5 null true bytes 0 value Value.Null
+42 2.5 [hi] 00ff10 0 0
+-1 0.5 42 true
+42 42.0 2
+12
+index of s 2, of zz -1
+i [INTEGER]
+s [TEXT]
+next []
+readonly true sql select i, s, i + 1 as next from t
+readonly false
+false 1 no such column: nope at 7
+false near "selec": syntax error at 0
+false more than one statement; use sqlite::exec_script for several
+false true 2067 UNIQUE constraint failed: u.name
+false NOT NULL constraint failed: u.name
+false near "bogus": syntax error
+true near "bogus": syntax error
+rows 3 true
+true 0 1073741824

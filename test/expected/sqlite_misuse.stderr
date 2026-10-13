@@ -1,0 +1,1 @@
+sqlite: sqlite::prepare: a connection that was closed, or never opened

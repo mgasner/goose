@@ -9,6 +9,8 @@ abort (nonzero exit) after printing their expected stdout. Each nonblank line
 in expected/<name>.stderr must occur in stderr, so an unrelated crash cannot
 satisfy an expected abort. Compiler error fixtures require `// error:`
 diagnostic substrings in their source and the compiler's normal error exit.
+`// c-has: regex` and `// c-lacks: regex` lines are matched against a
+fixture's -O2 C, for code generation its output cannot show.
 `// warning:` substrings declare the warnings a fixture's typecheck prints,
 one warning line each, in any order; a positive fixture without them must
 print none. A first-line `runtime-debug` marker adds a targeted
@@ -155,6 +157,13 @@ def error_markers(path):
 
 def warning_markers(path):
     return re.findall(r"^// warning: (.+)$", path.read_text(encoding="utf-8"), re.MULTILINE)
+
+
+def c_markers(path):
+    """`// c-has: regex` and `// c-lacks: regex` lines: what the fixture's -O2
+    C must and must not match, for code generation the program's output
+    cannot show."""
+    return re.findall(r"^// c-(has|lacks): (.+)$", path.read_text(encoding="utf-8"), re.MULTILINE)
 
 
 def unmatched_warnings(markers, warnings):
@@ -658,6 +667,21 @@ class Runner:
                     args.append("--jit")
                 with self.gpu(modules):
                     gen[ol] = self.goose(*args, f)
+            markers = c_markers(f)
+            if markers and "2" in levels:
+                self.check_c(f, cfiles["2"], markers)
+
+    def check_c(self, f, cfile, markers):
+        """Matches the fixture's c-has/c-lacks markers against its -O2 C."""
+        if not cfile.is_file():
+            return   # The cgen failure is reported with the program's runs.
+        text = cfile.read_text(encoding="utf-8")
+        bad = [f"c-{kind}: {pat}" for kind, pat in markers
+               if bool(re.search(pat, text, re.MULTILINE)) != (kind == "has")]
+        if bad:
+            self.fail(f"generated C {f.name}", "\n".join(bad))
+        else:
+            self.ok(f"generated C {f.name}")
 
     def build_options(self, key):
         """How a fixture's C is built: at a level ("0", "2"), its dump's

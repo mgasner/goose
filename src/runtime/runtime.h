@@ -70,6 +70,15 @@
 #define GS_NOINLINE __attribute__((noinline))
 #endif
 
+/* The free slots of a limited array a construction leaves uninitialized
+   (goose_spec.md 4.2). MSVC 19.44-19.51 miscompiles reads through a copy
+   of a partially written struct (Appendix E), so there they are zeroed. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#define GS_UNWRITTEN(p, n) memset((p), 0, (size_t)(n))
+#else
+#define GS_UNWRITTEN(p, n) ((void)0)
+#endif
+
 #if GS_NEED_THREADS
 #ifdef _MSC_VER
 #define GS_TLS __declspec(thread)

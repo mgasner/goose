@@ -1014,9 +1014,98 @@ inline void CodeGen::FixedArrayLitAt(ArrayLit *al, const string &base, bool inro
         emitelem(al->elems[i], cat(base, ".e[", i, "]"));
 }
 
+// A struct that a literal can build field by field where it stays, every
+// byte of it written by a field: one without pads, which nothing writes.
+inline bool CodeGen::InPlaceStruct(TypeExpr *t) {
+    if (t->kind != TY_STRUCT || !IsFix(t)) return false;
+    auto si = SI(t);
+    if (LastRealField(si->st->fields) < 0) return false;
+    for (auto &f : si->st->fields) if (f.ispad) return false;
+    return true;
+}
+
+// An array literal FixedArrayLitAt builds at a destination of type t: a
+// fixed array, or a limited one of static capacity.
+inline bool CodeGen::InPlaceArray(ArrayLit *al, TypeExpr *t) {
+    if (al->capexpr || t->kind != TY_ARRAY || !TEq(al->exprtype, t)) return false;
+    auto ak = t->arr->akind;
+    return ak == A_FIXED || (ak == A_LIMITED && t->arr->sizeexpr && IsFix(t));
+}
+
+// The slots of the limited array at lv past the first `count`, which a
+// construction leaves uninitialized (§4.2): nothing outside MSVC, whose
+// miscompile of a copied partially-written struct needs them zeroed.
+inline void CodeGen::UnwrittenSlots(const string &lv, TypeExpr *t, int64_t count) {
+    if (count >= ArrSize(t->arr)) return;
+    L("GS_UNWRITTEN(&", lv, ".e[", count, "], (", ArrSize(t->arr), " - ", count, ") * sizeof(",
+      lv, ".e[0]));");
+}
+
+// The default value of fixed type t (no declared field defaults in it)
+// written in place at lv: a limited array's length alone, its slots left
+// uninitialized (§4.2), and the fields of a struct one by one around it.
+// Other types are zero bytes throughout, as EmitDefaultInto writes them.
+inline void CodeGen::DefaultAt(const string &lv, TypeExpr *t) {
+    if (HasUninitSlots(t) && InPlaceStruct(t)) {
+        auto si = SI(t);
+        for (size_t i = 0; i < si->st->fields.size(); i++)
+            DefaultAt(cat(lv, ".", Sanitize(si->st->fields[i].name)), si->ftypes[i]);
+        return;
+    }
+    if (t->kind == TY_ARRAY && t->arr->akind == A_LIMITED && t->arr->sizeexpr && IsFix(t)) {
+        L(lv, ".len = 0;");
+        UnwrittenSlots(lv, t, 0);
+        return;
+    }
+    EmitDefaultInto(lv, t);
+}
+
+// A field's initializer built where the field stays, in a destination
+// nothing else can read while it is built (a fresh local or temporary):
+// a default, a struct, array or string literal, which would otherwise
+// be built in a temporary of its own and copied over (§4.3). False where
+// the initializer is not one of those.
+inline bool CodeGen::FieldInitAt(Node *init, const string &path, TypeExpr *ft, bool inroot) {
+    if (HasRelRef(ft)) return false;
+    if (auto c = Is<Call>(init); c && c->builtin == B_DEFAULT && !c->rettypes.empty() &&
+                                 TEq(c->rettypes[0], ft)) {
+        if (!c->defaultinit) {
+            DefaultAt(path, ft);
+            return true;
+        }
+        if (ft->kind == TY_ARRAY) return false;   // Filled element by element.
+        if (!FieldInitAt(c->defaultinit, path, ft, inroot))
+            GenAny(c->defaultinit, Dst { DK_LVALUE, path, ft });
+        return true;
+    }
+    if (auto sl = Is<StructLit>(init); sl && InPlaceStruct(ft) && TEq(sl->exprtype, ft)) {
+        StructLitAt(sl, path, inroot, true);
+        return true;
+    }
+    if (auto str = Is<StrLit>(init); str && ft->kind == TY_ARRAY && TEq(str->exprtype, ft) &&
+                                     (ft->arr->akind == A_FIXED ||
+                                      (ft->arr->akind == A_LIMITED && ft->arr->sizeexpr))) {
+        auto n = (int64_t)str->val.size();
+        if (ft->arr->akind == A_LIMITED) L(path, ".len = ", n, ";");
+        if (n) L("memcpy(", path, ".e, ", StrRaw(str->val), ", ", n, ");");
+        if (ft->arr->akind == A_LIMITED) UnwrittenSlots(path, ft, n);
+        return true;
+    }
+    if (auto al = Is<ArrayLit>(init); al && InPlaceArray(al, ft)) {
+        FixedArrayLitAt(al, path, inroot);
+        if (ft->arr->akind == A_LIMITED)
+            UnwrittenSlots(path, ft, al->fillval ? ((IntLit *)al->fillcount)->val
+                                                 : (int64_t)al->elems.size());
+        return true;
+    }
+    return false;
+}
+
 // `inroot` says `base` is the value's real address inside its root (see
-// EmitRelStoreAt); a temporary that is copied afterwards is not.
-inline void CodeGen::StructLitAt(StructLit *sl, const string &base, bool inroot) {
+// EmitRelStoreAt); a temporary that is copied afterwards is not. `fresh`
+// says nothing else reads `base` while the literal is built, so a field's
+// own literal or default builds in place too (FieldInitAt).
+inline void CodeGen::StructLitAt(StructLit *sl, const string &base, bool inroot, bool fresh) {
     auto et = sl->exprtype;
     // `baseoff` is where the fields run starts within the whole value, so a
     // `self` field can store its (constant) offset back to it.
@@ -1040,6 +1129,7 @@ inline void CodeGen::StructLitAt(StructLit *sl, const string &base, bool inroot)
                     EmitRelStoreAt(cat("(uint8_t *)&", path), ft, GenX(init), sl->line, inroot);
                 continue;
             }
+            if (fresh && FieldInitAt(init, path, ft, inroot)) continue;
             GenAny(init, Dst { DK_LVALUE, path, ft });
         }
     };
@@ -1245,6 +1335,10 @@ inline void CodeGen::GenFrameObjLit(StructLit *sl, StructInst *si, const string 
             EmitRelStoreAt(cat("(uint8_t *)&", flv), ft, GenX(init), sl->line, true);
             continue;
         }
+        // The object is new, or a whole assignment's, whose value may not
+        // name what it replaces (§4.4): a field's literal or default builds
+        // in the field.
+        if (FieldInitAt(init, flv, ft, true)) continue;
         GenAny(init, Dst { DK_LVALUE, flv, ft });
     }
 }

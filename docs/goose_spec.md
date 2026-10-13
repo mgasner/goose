@@ -1137,9 +1137,14 @@ Use grow-only arrays for arenas, pools, string builders, tree storage, and
 scratch buffers that are refilled or popped between phases.
 
 **When a grow-only array may shrink.** The receiver is the array's variable,
-a reference variable or parameter bound to the whole array, or a global —
-not an element of a larger value, and not a `reusable` pool (§5.4: its
-freelist keeps every slot live). The shrink may be anywhere in an
+a reference variable or parameter bound to the whole array, or a global, or
+the tail field of a struct named one of those ways through fields it holds
+by value (`res.body.clear()` for a `res: Response&` ending in `body:
+u8[>..]`, §3.4) — not an element of a larger value otherwise, and not a
+`reusable` pool (§5.4: its freelist keeps every slot live). A tail field is
+the struct's own resizable part, so its shrink is the struct's: what is
+rooted at the struct counts as referring into the array, a reference to
+another of its fields included. The shrink may be anywhere in an
 expression — an operand, an argument, a condition, the value of a block,
 `if`, `match` or loop — so `print(a.pop())` and `if !load(s) { … }` are
 fine. At the shrink, nothing *live* may refer into the array. That rules
@@ -3442,14 +3447,11 @@ the end, each with where its resolution lives.
     cannot represent, so post-loop bounds rest on the inferred invariants
     instead; LLVM meets the same wall and works around it by duplicating
     blocks so the conditions never merge, which is available here too. A
-    value loaded from an array has no known range, so indirect indexing
+    64-bit value loaded from an array has no known range (a narrower one
+    has its type's, as a variable does), so indirect indexing
     (`dist[out[k]]`, `bench/goose/graph_csr.goose`) keeps its check — see
     0e. Release-mode wrapping (§6.2) is deliberate and stays, so the
     analysis proves absence of wrap explicitly where it needs to.
-    `docs/design/compiler_weak_spots.md` has more, with reproductions: a
-    counter that also takes one larger (guarded) step loses its invariants
-    in every loop that uses it; a `u8` loaded as an inner index (`T[s[i]]`)
-    gets no range from its type; `i == n` does not combine with `i <= n`.
 0c. **Pointee writes through optionals** — a narrowed optional writes
     through fine, but there is no way to write through an optional without
     narrowing; and rebinding to a plain reference first (`let r: T& = o;`)
@@ -3839,8 +3841,10 @@ compiler's own description, pass by pass and analysis by analysis, is
   on a scratch stack at `qput` and unpacked at the receiver's destination.
 * **C locals at function scope.** Every aggregate-typed C local (a struct,
   array, slice or header) is declared at the top of its C function rather
-  than in the block that uses it, and a literal temporary with unused
-  limited-array slots is zero-initialized. Both work around MSVC 19.44–19.51,
+  than in the block that uses it, and under MSVC the free slots a
+  construction leaves in a limited array (§4.2) are zeroed (`GS_UNWRITTEN`;
+  a literal temporary that does not build field by field is zeroed whole
+  everywhere). Both work around MSVC 19.44–19.51,
   which at any optimization level miscompiles a read through a copy of a
   struct holding the address of a block-scoped local (a slice of a fixed
   array declared in a loop body, passed to an inlined callee), and exploits

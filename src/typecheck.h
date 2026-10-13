@@ -2067,6 +2067,7 @@ struct TypeCheck {
     Node *SqlDecoder(Call *c, TypeExpr *t, const SqlStmt &st, string_view qname);
     FunVal *SqlBlock(Line line, vector<const char *> params, Block *body);
     void CheckGrowShrink(Node *at, const char *op, Node *recv, const Val &rv);
+    [[noreturn]] void GrowShrinkReceiverError(Node *at, const char *op);
     // `what` names the array in the diagnostics; `bound` is its type where vd
     // only bounds it (ShrinkTarget).
     void GrowOnlyShrinkAt(Node *c, const string &op, VarDef *vd, const string &what,

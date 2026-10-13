@@ -82,6 +82,15 @@ R"GSRT(/* Goose runtime — the part every compiler-generated C file starts with
 #define GS_NOINLINE __attribute__((noinline))
 #endif
 
+/* The free slots of a limited array a construction leaves uninitialized
+   (goose_spec.md 4.2). MSVC 19.44-19.51 miscompiles reads through a copy
+   of a partially written struct (Appendix E), so there they are zeroed. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#define GS_UNWRITTEN(p, n) memset((p), 0, (size_t)(n))
+#else
+#define GS_UNWRITTEN(p, n) ((void)0)
+#endif
+
 #if GS_NEED_THREADS
 #ifdef _MSC_VER
 #define GS_TLS __declspec(thread)
@@ -180,15 +189,15 @@ static void gs_memcpy(void *dst, const void *src, size_t n) {
     if (n) memcpy(dst, src, n);
 }
 
-static int gs_memcmp(const void *a, const void *b, size_t n) {
+)GSRT"
+R"GSRT(static int gs_memcmp(const void *a, const void *b, size_t n) {
     return n ? memcmp(a, b, n) : 0;
 }
 
 /* ---------------------------------------------------------------------------
    Integer semantics (§6.2): every operation runs at its operands' type. The
    operations compute wide (so wrap is defined in C), truncate back, and — when
-)GSRT"
-R"GSRT(   the generated C is compiled with -DGS_DEBUG=1 — abort when the wide result
+   the generated C is compiled with -DGS_DEBUG=1 — abort when the wide result
    does not fit the type. Shifts mask their count to the width; division is
    zero-checked always.
 
@@ -353,14 +362,14 @@ static uint64_t gs_shr_u64(uint64_t a, int64_t n) { return a >> (n & 63); }
 
 #define gs_add_u32(a, b) ((uint32_t)((a) + (b)))
 #define gs_sub_u32(a, b) ((uint32_t)((a) - (b)))
-#define gs_mul_u32(a, b) ((uint32_t)((uint64_t)(a) * (uint64_t)(b)))
+)GSRT"
+R"GSRT(#define gs_mul_u32(a, b) ((uint32_t)((uint64_t)(a) * (uint64_t)(b)))
 #define gs_shl_u32(a, n) ((uint32_t)((uint64_t)(a) << ((n) & 31)))
 #define gs_shr_u32(a, n) ((uint32_t)((uint64_t)(a) >> ((n) & 31)))
 
 #define gs_add_i64(a, b, f, l) ((int64_t)((uint64_t)(a) + (uint64_t)(b)))
 #define gs_sub_i64(a, b, f, l) ((int64_t)((uint64_t)(a) - (uint64_t)(b)))
-)GSRT"
-R"GSRT(#define gs_mul_i64(a, b, f, l) ((int64_t)((uint64_t)(a) * (uint64_t)(b)))
+#define gs_mul_i64(a, b, f, l) ((int64_t)((uint64_t)(a) * (uint64_t)(b)))
 #define gs_neg_i64(a, f, l)    ((int64_t)(0u - (uint64_t)(a)))
 #define gs_shl_i64(a, n) ((int64_t)((uint64_t)(a) << ((n) & 63)))
 #define gs_shr_i64(a, n) ((int64_t)((a) >> ((n) & 63)))
@@ -536,7 +545,8 @@ static void gs_stks_grow(int64_t n, const char *file, int line) {
     }
 }
 
-#define GS_ENSURE(n, f, l) do { if ((n) > gs_nstks) gs_stks_grow((n), (f), (l)); } while (0)
+)GSRT"
+R"GSRT(#define GS_ENSURE(n, f, l) do { if ((n) > gs_nstks) gs_stks_grow((n), (f), (l)); } while (0)
 
 static gs_stack *gs_new_stack_block(void) {
     gs_stack *b = (gs_stack *)calloc(GS_MAX_STACKS, sizeof(gs_stack));
@@ -546,8 +556,7 @@ static gs_stack *gs_new_stack_block(void) {
 
 static void gs_stack_init(gs_stack *s) {
     s->top = gs_reserve_region();
-)GSRT"
-R"GSRT(}
+}
 
 static void gs_rt_init(int argc, char **argv) {
     gs_rt_start(argc, argv, GS_MAX_STACKS * 4, GS_STACK_RESERVE, GS_STACK_GAP);
@@ -756,7 +765,8 @@ static int64_t gs_zig_write(uint8_t *p, int64_t v) {
    a malformed encoding instead of running past it. */
 
 /* The ULEB128 at p, or 0 if it runs past `end`, past ten bytes, or carries
-   payload bits above the 64th, or is not shortest. The result is the byte count. */
+)GSRT"
+R"GSRT(   payload bits above the 64th, or is not shortest. The result is the byte count. */
 static int64_t gs_uleb_check(const uint8_t *p, const uint8_t *end, uint64_t *out) {
     uint64_t v = 0;
     int shift = 0;
@@ -766,8 +776,7 @@ static int64_t gs_uleb_check(const uint8_t *p, const uint8_t *end, uint64_t *out
         if (q >= end) return 0;
         b = *q++;
         if (shift > 63 || (shift == 63 && (b & 0x7e))) return 0;
-)GSRT"
-R"GSRT(        v |= (uint64_t)(b & 0x7f) << shift;
+        v |= (uint64_t)(b & 0x7f) << shift;
         if (!(b & 0x80)) {
             if (shift && !b) return 0;  /* Redundant high zero group. */
             break;

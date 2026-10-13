@@ -354,8 +354,11 @@ inline string Call::CgX(CodeGen &cg) {
 // not survive the copy.
 inline string StructLit::CgX(CodeGen &cg) {
     auto tv = cg.T();
-    cg.FixedLocal(exprtype, tv, cg.HasUninitSlots(exprtype) ? "{0}" : "");
-    cg.StructLitAt(this, tv, false);
+    // A struct every byte of which its fields write needs no zeroing first:
+    // the slots its limited arrays leave are left to GS_UNWRITTEN.
+    auto inplace = cg.InPlaceStruct(exprtype);
+    cg.FixedLocal(exprtype, tv, !inplace && cg.HasUninitSlots(exprtype) ? "{0}" : "");
+    cg.StructLitAt(this, tv, false, true);
     return tv;
 }
 

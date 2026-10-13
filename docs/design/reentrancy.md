@@ -82,10 +82,67 @@ library that takes the host process with it, with no chance to log or
 shut down. This is less a bug than a missing piece of the C boundary, but
 it belongs with the rest.
 
-## Phase 1: fail loudly
+## Phase 1: fail loudly (done)
 
 Make every case above a clear runtime error, without supporting any of
 them yet. Self-contained, and closes the soundness hole in case 2.
+
+**Status.** Done: cases 1 to 3 now abort with the messages below (case 4
+is phase 3's), and `test/embed/` runs them, with the cases that must keep
+working, as C hosts at -O0 and -O2. What was built departs from the plan
+below in these ways:
+
+* **One mark for the depth and the name.** `gs_export_guard.active`, the
+  name of what is running (or null), is the depth: phase 1 never lets it
+  past one, so a counter would only repeat it. It shares one thread-local
+  struct with the thread mark, `gs_export_guard.thread`, so a wrapper
+  finds both through one thread-local address (on macOS that lookup is a
+  call). Phase 2, which lets the depth pass one, can save and restore the
+  name in the wrapper, or bring the counter back.
+* **One branch.** The wrapper's existing "goose_init must be called"
+  check is folded into the same test, `!thread || active`; a cold
+  `gs_export_misuse` tells the three cases apart, and the message for a
+  call before `goose_init` is unchanged. A wrapper is now:
+
+  ```c
+  int64_t inner(int64_t gs_export_arg0) {
+      if (!gs_export_guard.thread || gs_export_guard.active)
+          gs_export_misuse("inner");
+      gs_export_guard.active = "inner";
+      int64_t gs_export_result = inner_g(gs_export_arg0, 0);
+      gs_export_guard.active = 0;
+      return gs_export_result;
+  }
+  ```
+
+  At -O2 on Apple M-series, a trivial export costs about 0.55 ns more per
+  call (0.7 to 1.3 ns). Programs without exports, and Goose-to-Goose
+  calls, exports included, are unchanged.
+* **The thread message** reads `exported function inner called on a
+  thread other than the one that ran goose_init`: a second thread that
+  calls `goose_init` after the first finds it done and is not marked, so
+  "a thread that did not call goose_init" would be wrong for it.
+* **`goose_init` is guarded throughout,** not only while `fn main()` runs:
+  it sets the marks before the globals' initializers, which may call
+  externs too, so a callback from either is reported as `... while
+  goose_init is running`.
+* **Programs with their own `main` are guarded as well.** Their wrappers
+  are reachable from `--include` C, and a callback through one has the
+  same two problems. There `main` sets the marks (a callback says `while
+  main is running`), and they are `GS_TLS`, not `GS_THREAD_LOCAL`: such a
+  program has no threads but its workers, so it needs thread-local marks
+  only with those, and those are what TinyCC, which cannot place
+  thread-local storage in an in-memory run, already refuses. So `--jit`
+  builds programs with exports as before; `--header` is C output only, so
+  TinyCC never sees `GS_THREAD_LOCAL`. The JIT suite was run with
+  7a52bb9 (the macOS SDK fix, not on this base) applied for the check.
+* **Linking.** A library without threads needs nothing more at link
+  time on macOS, as an executable or a dylib, with or without
+  `-lpthread`. Linux and Windows were not tried.
+* **Tests.** Besides the plan's cases, `reenter_main` covers a callback
+  from `fn main()` under `goose_init`. Case 3's hosts call from their
+  thread without the callback first, which would now abort on re-entry
+  before the thread was reached.
 
 * **Re-entry guard.** A thread-local `gs_export_depth`. Each exported
   wrapper increments it on entry and decrements it on return; entering

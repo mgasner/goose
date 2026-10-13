@@ -2464,7 +2464,9 @@ C must preserve the types and lifetimes of borrowed storage, must not
 retain a borrowed argument beyond the call, and may only append to a
 builder. The compiler assumes an extern may write through its arguments
 but does not mutate unrelated Goose globals; C code is responsible for
-honoring those obligations.
+honoring those obligations. C cannot break the last by calling back into the
+program: an exported function called while Goose is in an extern call aborts
+(§7.11).
 
 ### 7.11 Exporting Goose functions to C
 
@@ -2497,11 +2499,29 @@ and a source without a Goose `fn main()` is accepted. The header declares
 function. It initializes the runtime and the globals and then runs the Goose
 `fn main()`, if there is one, so `main` is where a library keeps its own
 start-up code; exported functions may be called from it. A second call does
-nothing. Initialization is idempotent on the initializing thread; exported
-calls and mutable Goose globals are not thread-safe and must remain on that
-thread. `--header` requires generated C output and at least one export, and
+nothing. `--header` requires generated C output and at least one export, and
 writes declarations and the required packed C type definitions for the
 exported API.
+
+The program belongs to the thread that started it: the one that called
+`goose_init`, or for a program with its own `main`, the one running it. Its
+data stacks and globals are that thread's, so the wrapper checks each call:
+
+* A call on any other thread aborts: `exported function f called on a thread
+  other than the one that ran goose_init`.
+* A call while Goose code is running on that thread aborts: `exported
+  function f re-entered from C while g is running`, where `g` is the export
+  running, or `goose_init` (or `main`) while the program's `fn main()` and its
+  globals' initializers run. Such a call can only come from C that Goose
+  called, through an `extern fn` (§7.10), and would start on the data stacks
+  of the call it interrupts and change globals that call assumes unchanged.
+* A call before `goose_init` aborts: `goose_init must be called before
+  exported functions`.
+
+An export calling another from Goose is an ordinary Goose call, not a call
+through the wrapper, and none of this applies to it. Exported calls in
+sequence from the program's thread, with C calls out of Goose between them,
+are what the boundary supports.
 
 An exported C symbol is emitted as written, as an `extern` one is, and must be a
 C identifier that is not a C keyword and that the program does not otherwise

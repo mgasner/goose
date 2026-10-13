@@ -1,0 +1,2 @@
+main: inner(3) = 3003, total = 1
+thread: calling inner(3)

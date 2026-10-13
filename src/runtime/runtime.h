@@ -89,6 +89,15 @@
 #define GS_TLS
 #endif
 
+/* Thread-local whether or not the program has workers: a library's C host
+   may call it from threads of its own, which the export guards (§7.11)
+   tell apart from the one that ran goose_init. */
+#ifdef _MSC_VER
+#define GS_THREAD_LOCAL __declspec(thread)
+#else
+#define GS_THREAD_LOCAL __thread
+#endif
+
 /* The linkage of everything the runtime defines outside this file. */
 #ifdef GS_SEPARATE_RUNTIME
 #define GS_API extern

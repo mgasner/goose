@@ -1,0 +1,3 @@
+main: spawned and waited for a worker
+main: inner(3) = 3003, total = 1
+thread: calling inner(3)

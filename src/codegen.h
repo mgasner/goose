@@ -96,6 +96,8 @@ struct CodeGen {
     string exportprotos;
     bool usesthreads = false;
     bool library = false;
+    // Whether any function is exported, which brings in the export guards.
+    bool hasexports = false;
     // Which native layers (stdlib/gfx.goose, physics.goose, ui.goose) the
     // program calls into.
     NativeLayers layers;
@@ -1047,6 +1049,9 @@ struct CodeGen {
     void EmitGlobalInit();
     string GlobalLenLv(VarDef *d);
     void InitGlobalStack(VarDef *d);
+    void EmitExportGuards();
+    string ExportGuardEnter(const char *name);
+    string ExportGuardLeave();
     void EmitProgramInit();
     void EmitExports();
     string MainCall();

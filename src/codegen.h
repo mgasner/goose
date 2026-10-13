@@ -821,7 +821,12 @@ struct CodeGen {
     void FixedLitAt(Node *n, const string &dst);
     void FixedLitAtLv(Node *n, const string &base, bool inroot);
     void FixedArrayLitAt(ArrayLit *al, const string &base, bool inroot);
-    void StructLitAt(StructLit *sl, const string &base, bool inroot);
+    void StructLitAt(StructLit *sl, const string &base, bool inroot, bool fresh = false);
+    bool InPlaceStruct(TypeExpr *t);
+    bool InPlaceArray(ArrayLit *al, TypeExpr *t);
+    bool FieldInitAt(Node *init, const string &path, TypeExpr *ft, bool inroot);
+    void DefaultAt(const string &lv, TypeExpr *t);
+    void UnwrittenSlots(const string &lv, TypeExpr *t, int64_t count);
     void EmitValStoreTag(const string &stk, IntStorage ts, const string &x);
     void GenArrayLit(ArrayLit *al, const string &stk, const string &lenlv = "",
                      TypeExpr *as = nullptr);

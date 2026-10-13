@@ -3836,8 +3836,10 @@ compiler's own description, pass by pass and analysis by analysis, is
   on a scratch stack at `qput` and unpacked at the receiver's destination.
 * **C locals at function scope.** Every aggregate-typed C local (a struct,
   array, slice or header) is declared at the top of its C function rather
-  than in the block that uses it, and a literal temporary with unused
-  limited-array slots is zero-initialized. Both work around MSVC 19.44–19.51,
+  than in the block that uses it, and under MSVC the free slots a
+  construction leaves in a limited array (§4.2) are zeroed (`GS_UNWRITTEN`;
+  a literal temporary that does not build field by field is zeroed whole
+  everywhere). Both work around MSVC 19.44–19.51,
   which at any optimization level miscompiles a read through a copy of a
   struct holding the address of a block-scoped local (a slice of a fixed
   array declared in a loop body, passed to an inlined callee), and exploits

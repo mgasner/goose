@@ -5,3 +5,6 @@ samples/*.ppm
 samples/*.pgm
 samples/*.png
 __pycache__
+# Mbed TLS, fetched by scripts/fetch_mbedtls.py (third_party/mbedtls/README.md).
+third_party/mbedtls/*
+!third_party/mbedtls/README.md

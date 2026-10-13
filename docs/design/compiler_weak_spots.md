@@ -6,8 +6,8 @@ Each item was reproduced against the compiler at `20ebab6`. Fixing item 1
 also turned up two soundness bugs in the same analysis, fixed alongside
 (see "Found while fixing" at the end).
 
-Writing an HTTP/1.1 request parser in Goose (`stdlib/http.goose`, in
-progress), and benchmarking it against picohttpparser, turned up the
+Writing an HTTP/1.1 request parser in Goose (then `stdlib/http.goose`,
+now the http package's `packages/http/http.goose`; in progress at the time), and benchmarking it against picohttpparser, turned up the
 following weak spots. None of them is a correctness bug. Each one either
 cost measurable time in a hot loop or forced code into a less natural
 shape. The parser works around each one, and the workarounds are noted
@@ -300,13 +300,18 @@ held by value; the struct's root is what shrinks. The existing scans and
 call summaries all judge by root, so they carry over: a view rooted at the
 struct, a holder on record, a parameter's callers. A view of another field
 of the struct counts as one into the array, which is conservative. A path
-through a reference field is still refused. §5.1 says so now.
+through a reference field was still refused. §5.1 says so now.
 `shrink_tail_field` runs the accepted cases; `errors_tc/shrink_tail_field_*`
 are the rejected ones (a live slice of the field, a call that shrinks it,
-a view in the callee, a reference to another field, a reference field on
-the path, a `const` reference).
+a view in the callee, a reference to another field, a `const` reference).
 
-## What `stdlib/http.goose` can drop
+Upstream fixed the same item independently (`4d6f942`), more generally: a
+receiver whose roots are known shrinks those roots, through a reference
+field too, and a whole assignment shrinks as a `clear` would. The merge of
+upstream keeps that rule in place of this one, so the reference-field case
+is accepted now and its rejection fixture is gone.
+
+## What `stdlib/http.goose` (now `packages/http/http.goose`) can drop
 
 On the `http` branch as of `63e3967`, once these fixes are merged:
 

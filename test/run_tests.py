@@ -27,17 +27,17 @@ the backend refuses outright is counted as a skip, not a failure.
 The audio/ tests use the SDL3 PCM mixer without a device, the gfx/ tests
 use the SDL3 graphics module, the physics/ tests the Box3D
 physics module, the sqlite/ tests the SQLite module, the ui/ tests the
-Nuklear ui module and the tls/ tests the http module's https:// over
-Mbed TLS (`--tls-link`). They always parse,
+Nuklear ui module and the tls/ tests the http package's https:// over
+Mbed TLS (where the package has it). They always parse,
 typecheck and generate C; they build and run where the compiler has the
 native layers they use built in -- their category's, and any other they
-import, as a ui test drawing through gfx does -- linking what `goose
---audio-link`, `--gfx-link`, `--physics-link`, `--sqlite-link` or `--ui-link` names, and a machine without a
-GPU device counts as a skip for gfx. A fixture there with `// error:`
-markers is a rejection test, as in errors_tc/. test/api_check.py checks
-stdlib/audio.goose, stdlib/gfx.goose, stdlib/physics.goose, stdlib/sqlite.goose and
-stdlib/ui.goose against their C
-layers' own lists of functions, structs and constants.
+import, as a ui test drawing through gfx does -- built by `goose build`,
+which links the packages the compiler was configured with, and a machine
+without a GPU device counts as a skip for gfx. A fixture there with
+`// error:` markers is a rejection test, as in errors_tc/. The packages
+check their modules against their C layers themselves (test/api_check.py in
+each of their repositories); the sqlite and http packages, which live in this
+tree (packages/), are checked here.
 
 Profiles keep the CI coverage deliberate: baseline compares Goose/native C
 -O0 and -O2 plus the targeted debug-runtime runs; sanitize uses Goose -O2 and
@@ -53,8 +53,12 @@ TinyCC also emits the same C when available.
 The work runs on --jobs threads, each waiting on the processes it starts, and
 the log comes out in the same order whatever the number of jobs: each piece of
 work prints into a buffer of its own, shown once everything before it has
-been. A fixture's own runs happen one after another, since a program may write
-files the next run of it would see. The bootstrap's chains at each level, its
+been. The log is in sections, each ending in a line counting its checks, with
+everything but the ok lines printed in place: failures with what led to them,
+and skips. -v prints the ok lines too; under GitHub Actions they are in a
+collapsed group per section. The FAIL lines repeat at the end, with their
+sections. A fixture's own runs happen one after another, since a program may
+write files the next run of it would see. The bootstrap's chains at each level, its
 JIT self-compiles and the samples' runner start first, being the longest.
 One compiler run per fixture parses, checks the dump roundtrip (--roundtrip)
 and typechecks; one per level writes the C and also runs the program through
@@ -67,10 +71,11 @@ its own; a batch that crashes or does not build leaves its files to runs of
 their own, which report the failure as theirs. --batch 1 runs everything one
 to a process.
 
-  python test/run_tests.py [--exe path/to/goose] [--nocgen] [--no-jit] [-j N] [--batch N]
+  python test/run_tests.py [--exe path/to/goose] [--nocgen] [--no-jit] [-j N] [--batch N] [-v]
 """
 
 import argparse
+import json
 import concurrent.futures
 import os
 import re
@@ -85,7 +90,6 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "scripts"))
 import toolchain as tc
-import api_check
 
 
 def native_modules(f, native):
@@ -250,6 +254,60 @@ class Out:
         self.value = None
 
 
+class Section:
+    """One section of the log, printed as its slots finish: what they print
+    but their ok lines, in place, and a closing line counting its checks.
+    ok lines print too with `verbose`. Under GitHub Actions they go into
+    collapsed groups, closed before anything else prints, so that no failure
+    hides inside one. Without either, the title starts the line that the
+    counts end, unless something else prints in between. Either way the
+    title prints as the section starts, ahead of anything in it, and shows
+    where the suite was should it stop there."""
+
+    def __init__(self, title, verbose, github):
+        self.title, self.verbose, self.github = title, verbose, github
+        self.oks, self.fails, self.failures = 0, [], 0
+        # "title": the title is on a line not yet ended; "group": a GitHub
+        # group is open; None: at the start of a line, outside a group.
+        if github:
+            sys.stdout.write(f"::group::{title}\n")
+            self.state = "group"
+        else:
+            sys.stdout.write(f"== {title}" + ("\n" if verbose else ""))
+            self.state = None if verbose else "title"
+        sys.stdout.flush()
+
+    def add(self, out):
+        self.failures += out.failures
+        for line in "".join(out.text).splitlines():
+            if line.startswith("ok   "):
+                self.oks += 1
+                if self.github:
+                    if self.state != "group":
+                        sys.stdout.write(f"::group::{self.title} (continued)\n")
+                        self.state = "group"
+                elif not self.verbose:
+                    continue
+            else:
+                if line.startswith("FAIL "):
+                    self.fails.append(line)
+                sys.stdout.write({"group": "::endgroup::\n", "title": "\n"}.get(self.state, ""))
+                self.state = None
+            sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+
+    def close(self):
+        # A failure that printed no FAIL line still counts.
+        fails = max(len(self.fails), self.failures)
+        counts = f"{self.oks} ok" + (f", {fails} FAIL" if fails else "")
+        if self.state == "title":
+            sys.stdout.write(f": {counts}\n")
+        else:
+            sys.stdout.write(("::endgroup::\n" if self.state == "group" else "") +
+                             f"== {self.title}: {counts}\n")
+        sys.stdout.flush()
+
+
 class Fixture:
     """One positive fixture's results, an Out per section of the log it
     prints in, and the skips it adds to the summaries."""
@@ -262,20 +320,29 @@ class Fixture:
         self.line, self.dumped = "", False
         # By build_options key, the compiler run that wrote the C and where.
         self.modules, self.jitlevels, self.gen, self.c = [], (), {}, {}
+        # Whether the compiler builds its program (goose build) rather than
+        # this runner: a .build sidecar beside it (C of its own), or a
+        # packages/ fixture, whose packages may have C the runner cannot
+        # see.
+        self.sidecar = False
 
 
 class Runner:
     """Runs the suite's work on a pool of threads, which mostly wait for the
     processes they start, and prints it in a fixed order: each piece of work
-    prints into an Out of its own, and `slots` lists, in the order the log
-    shows them, the callables that hand the Outs over. A job may wait for a
-    job submitted before it, which the pool has started by then, never for
-    a later one. With one job everything runs as it is submitted, on this
-    thread."""
+    prints into an Out of its own, and `sections` lists, in the order the log
+    shows them, each section's title and its slots, the callables that hand
+    the Outs over. A job may wait for a job submitted before it, which the
+    pool has started by then, never for a later one. With one job everything
+    runs as it is submitted, on this thread."""
 
-    def __init__(self, exe, jobs):
+    def __init__(self, exe, jobs, verbose=False):
         self.exe = exe
         self.failures = 0
+        # Every FAIL line the log printed, with its section's title.
+        self.failed = []
+        self.verbose = verbose
+        self.github = os.environ.get("GITHUB_ACTIONS") == "true"
         self.local = threading.local()
         self.pool = concurrent.futures.ThreadPoolExecutor(jobs) if jobs > 1 else None
         self.jobs = jobs
@@ -283,7 +350,8 @@ class Runner:
         # number of files and jobs.
         self.batch = 0
         self.fronts = {}
-        self.slots = []
+        # Slots shown before any section print as they are.
+        self.sections = [(None, [])]
         self.gpulock = None
         # What the C that `goose -o` writes links with, built once per
         # configuration by whichever job first asks for it.
@@ -363,10 +431,15 @@ class Runner:
             return out
         return self.submit(run, alone=alone)
 
+    def section(self, title):
+        """Starts a section of the log: the slots shown from here on, up to
+        the next section, print under `title`."""
+        self.sections.append((title, []))
+
     def show(self, source):
         """Adds a slot: a future of an Out, or a callable returning one."""
-        self.slots.append(source.result if isinstance(source, concurrent.futures.Future)
-                          else source)
+        self.sections[-1][1].append(source.result if isinstance(source, concurrent.futures.Future)
+                                    else source)
 
     def show_task(self, fn, *args):
         future = self.task(fn, *args)
@@ -382,23 +455,47 @@ class Runner:
             with self.into(out):
                 fn(*args)
             return out
-        self.slots.append(run)
+        self.show(run)
 
     def flush(self):
         """Prints the slots in order, each as soon as it and everything before
-        it is done, and adds up their failures."""
-        for slot in self.slots:
-            try:
-                out = slot()
-            except Exception:
-                out = Out()
-                out.text.append(traceback.format_exc())
-                out.text.append("FAIL runner exception\n")
-                out.failures = 1
-            sys.stdout.write("".join(out.text))
-            sys.stdout.flush()
-            self.failures += out.failures
-        self.slots = []
+        it is done, a section at a time (Section), and adds up their
+        failures."""
+        for title, slots in self.sections:
+            section = Section(title, self.verbose, self.github) if title else None
+            for slot in slots:
+                try:
+                    out = slot()
+                except Exception:
+                    out = Out()
+                    out.text.append(traceback.format_exc())
+                    out.text.append("FAIL runner exception\n")
+                    out.failures = 1
+                if section:
+                    section.add(out)
+                else:
+                    sys.stdout.write("".join(out.text))
+                    sys.stdout.flush()
+                self.failures += out.failures
+            if section:
+                section.close()
+                self.failed += [(title, line) for line in section.fails]
+        self.sections = [(None, [])]
+
+    def finish(self):
+        """Prints how the suite went, after the log: the FAIL lines again, by
+        section, which under GitHub Actions are also annotations of the run.
+        The exit code."""
+        if not self.failures:
+            print("all tests passed")
+            return 0
+        print(f"{self.failures} FAILURE(S)" + (":" if self.failed else ""))
+        for title, line in self.failed:
+            if self.github:
+                print("::error::" + f"{title}: {line}".replace("%", "%25"))
+            else:
+                print(f"{title}: {line}")
+        return 1
 
     # --- running the compiler and what it built ---------------------------
 
@@ -565,6 +662,7 @@ class Runner:
         program writes, still happen one after another."""
         res = Fixture()
         res.line = line = first_line(f)
+        res.sidecar = f.with_suffix(".build").exists() or f.parent.name == "packages"
         bce = has_bce_annotations(f)
         with self.into(res.front):
             res.dumped = self.front(f, line, bce, res)
@@ -658,7 +756,11 @@ class Runner:
         name = f.stem
         res.modules = modules = native_modules(f, self.native)
         levels = self.levels if self.cc else ()
-        res.jitlevels = jitlevels = ("0", "2") if self.jit and "no-jit" not in line else ()
+        # A native module's fixture runs in-process only where the package
+        # is compiled in; the compiler would otherwise build the package.
+        available = all(self.native[m] for m in modules)
+        res.jitlevels = jitlevels = ("0", "2") if self.jit and available and \
+            "no-jit" not in line else ()
         gen, cfiles = res.gen, res.c
         with self.into(res.cgen):
             for ol in sorted(set(levels) | set(jitlevels)):
@@ -696,11 +798,12 @@ class Runner:
 
     def builds_together(self, res, key):
         """Whether the C a fixture() result wrote for `key` is there to build
-        with others': not where a native layer it links is not built in, or
-        it was not written (where a JIT run of it followed, the run has the
+        with others': not where a native layer it links is not built in or
+        the compiler builds it itself, or it was not written (where a JIT run of it followed, the run has the
         exit code)."""
         cfile = res.c.get(key)
-        if cfile is None or any(not self.native[m] for m in res.modules):
+        # A program with C of its own is built by `goose build`.
+        if cfile is None or res.sidecar or any(not self.native[m] for m in res.modules):
             return False
         return cfile.is_file() if key in res.jitlevels else res.gen[key][0] == 0
 
@@ -719,7 +822,7 @@ class Runner:
         opt, defines = self.build_options(key)
         ok, _ = self.cc.compile_programs([generated[f].result().c[key] for f in fixtures], exe,
                                          opt=opt, defines=defines, extra=self.extra,
-                                         libs=[lib for m in modules for lib in self.native[m]],
+                                         libs=[lib for m in modules for lib in self.native_libs[m]],
                                          runtime=self.runtime, log=exe.with_suffix(".cc.log"))
         return {f: [exe, str(k)] for k, f in enumerate(fixtures)} if ok else {}
 
@@ -729,7 +832,6 @@ class Runner:
         judges the program's TinyCC runs."""
         name = f.stem
         modules = res.modules
-        libs = [lib for m in modules for lib in self.native[m]]
         levels = self.levels if self.cc else ()
         jitlevels, gen, cfiles = res.jitlevels, res.gen, res.c
         if levels:
@@ -752,13 +854,26 @@ class Runner:
                         bad = True
                         continue
                     argv = built.get(ol)
-                    if not argv:
+                    if not argv and (res.sidecar or modules):
+                        # A program with C of its own, or using a native
+                        # module, is built by the compiler, which builds or
+                        # finds that C too (native.h, builtin.h).
+                        argv = [efile]
+                        code, out, err = tc.run_capture([self.exe, "build", f"-O{ol}", "-o", efile, f])
+                        if code != 0:
+                            if tc.NO_TOOLCHAIN in err or tc.NO_CMAKE in err:
+                                res.nativeskips.append(f.name)
+                            else:
+                                self.fail(f"goose build -O{ol} {f.name}", out + err)
+                            bad = True
+                            continue
+                    elif not argv:
                         # A program that did not build in a batch shows here
                         # why, built on its own.
                         argv = [efile]
                         opt, _ = self.build_options(ol)
                         ok, log = self.cc.compile(cfile, efile, opt=opt,
-                                                  extra=self.extra, strict_decls=True, libs=libs,
+                                                  extra=self.extra, strict_decls=True,
                                                   runtime=self.runtime,
                                                   log=self.gendir / f"{name}-O{ol}.cc.log")
                         if not ok:
@@ -784,6 +899,10 @@ class Runner:
 
         if not self.jit:
             return
+        if any(not self.native[m] for m in modules):
+            if f.name not in res.nativeskips:
+                res.nativeskips.append(f.name)
+            return
         if not jitlevels:
             res.jitskips.append(f.name)
             return
@@ -797,7 +916,8 @@ class Runner:
                 if code != 0 and tc.JIT_UNSUPPORTED in err:
                     res.jitskips.append(f.name)
                     return
-                if any(tc.native_unavailable(m, err) for m in modules):
+                if any(tc.native_unavailable(m, err) for m in modules) or \
+                        (code != 0 and (tc.NO_TOOLCHAIN in err or tc.NO_CMAKE in err)):
                     res.nativeskips.append(f.name)
                     return
                 out = self.check_run(name, f"jit -O{ol} {f.name}", code, out, err)
@@ -871,7 +991,7 @@ class Runner:
         # --specs command or pinning unstable specialization IDs/pass counts.
         bodies = {}
         for spec in specs.split("// spec ")[1:]:
-            match = re.search(r"^fn (tre_\w+)\([^\n]*\) \{\n", spec, re.MULTILINE)
+            match = re.search(r"^fn ((?:tre|gb)_\w+)\([^\n]*\) \{\n", spec, re.MULTILINE)
             if match:
                 bodies[match[1]] = spec[match.end():]
         optimized = level != "-O0"
@@ -895,6 +1015,86 @@ class Runner:
             if got != want:
                 self.fail(f"tail-recursion {level} {name}",
                           f"(loop, self call): got {got}, want {want}")
+                valid = False
+        # Guarded base-case inlining: a copy of the body's first statement
+        # per self-call site the rewrite took.
+        copies = {
+            "gb_build": 3 if optimized else 1,
+            "gb_walk": 2 if optimized else 1,
+            "gb_count": 3 if optimized else 1,
+            "gb_arena": 3 if optimized else 1,
+            "gb_method": 3 if optimized else 1,
+            "gb_global": 1,
+            "gb_field": 1,
+            "gb_arith": 1,
+            "gb_var": 1,
+        }
+        for name, want in copies.items():
+            body = bodies.get(name)
+            got = None if body is None else body.count("gb_visits += 1;")
+            if got != want:
+                self.fail(f"guarded base case {level} {name}",
+                          f"copies of the body's start: got {got}, want {want}")
+                valid = False
+        # Inlining heuristics: which bodies are left out of line.
+        live = set(re.findall(r"^(?:inline )?fn (i[hl]_\w+)\(", specs, re.MULTILINE))
+        left = {
+            "ih_rare": True,
+            "ih_early": True,
+            "ih_check": not optimized,
+            "ih_wrap": not optimized,
+            "ih_twin": True,
+            "ih_key": not optimized,
+            "ih_slow": True,
+            "ih_front": True,
+            "ih_work": not optimized,
+            # inline fn: inlined however big; its twin without the keyword
+            # stays; one returning two values stays a call in Goose.
+            "il_big": not optimized,
+            "il_plain": True,
+            "il_pair": True,
+        }
+        for name, want in left.items():
+            if (name in live) != want:
+                self.fail(f"inlining heuristics {level} {name}",
+                          f"left out of line: got {name in live}, want {want}")
+                valid = False
+        return valid
+
+    def check_loop_shapes(self, text):
+        # The loops codegen restates mark themselves in the C with a comment
+        # naming the shape (optimize_loops.h, BCE's lenbound). Every shape_
+        # function of the fixture must have the one it is named for, and no
+        # keep_ function any.
+        bodies = {}
+        for m in re.finditer(r"^static [^\n;]*?\b((?:shape|keep)_\w+?)_g\d*\([^\n]*\) \{\n(.*?)^\}\n",
+                             text, re.MULTILINE | re.DOTALL):
+            bodies[m[1]] = re.findall(r"/\* loop shape: ([^*]*?) \*/", m[2])
+        strip = "strip-mined by"
+        sums = "sum terms in blocks of 8"
+        bound = "trip count bounded by"
+        down = "countdown counted up"
+        shapes = {
+            "shape_strip_lanes": f"{strip} 8", "shape_strip_count": f"{strip} 4",
+            "shape_strip_range": f"{strip} 3", "shape_strip_u8": f"{strip} 16",
+            "shape_strip_return": f"{strip} 4", "shape_strip_structs": f"{strip} 2",
+            "shape_strip_fixed": f"{strip} 4",
+            "shape_sum_dot": sums, "shape_sum_count": sums, "shape_sum_f32": sums,
+            "shape_sum_range": sums, "keep_sum_reads": None,
+            "shape_bound_count": f"{bound} 8", "shape_bound_any": f"{bound} 8",
+            "shape_bound_all": f"{bound} 8", "shape_bound_for": f"{bound} 6",
+            "shape_bound_grow": f"{bound} 8",
+            "shape_down": down, "shape_down_u8": down, "shape_down_i8": down,
+            "shape_down_u64": down, "shape_down_jumps": down, "keep_down_twice": None,
+        }
+        valid = True
+        for name, want in shapes.items():
+            got = bodies.get(name)
+            if got is None:
+                self.fail(f"loop shapes {name}", "no C function of its own (inlined?)")
+                valid = False
+            elif (want not in got) if want else got:
+                self.fail(f"loop shapes {name}", f"got {got}, want {want or 'none'}")
                 valid = False
         return valid
 
@@ -1064,6 +1264,7 @@ class Runner:
                     self.ok("goose_in_goose self-compile matches between O0 and O2")
 
         def show():
+            self.section("goose_in_goose bootstrap")
             if not cc:
                 self.show_later(self.say, "skip native goose_in_goose bootstrap "
                                           "(no C compiler found or --nocgen)")
@@ -1110,6 +1311,9 @@ def main():
                          "many programs one executable holds (default: by the number of "
                          "files and jobs, and up to 128 programs); 1 gives each a process "
                          "and an executable of its own")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="print a line for every check that passed, not only each "
+                         "section's count of them")
     args = ap.parse_args()
 
     if args.nocgen and (args.cc or args.require_clang or args.profile != "baseline"):
@@ -1121,6 +1325,9 @@ def main():
         ap.error("--jobs must be at least 1, and --gpu-jobs and --batch at least 0")
 
     tc.setup_console()
+    # The compiler's cache (runtime objects, fetched packages) for everything
+    # the suite runs: under the build tree, never the user's own.
+    os.environ["GOOSE_HOME"] = str(tc.REPO_ROOT / "build" / "goose-home")
     started = time.perf_counter()
     # The suite opens no windows: a gfx program asking for one draws off
     # screen instead.
@@ -1135,8 +1342,8 @@ def main():
     # Not under the sanitizers: the program runs inside the compiler process and
     # is not itself instrumented, and its runtime allocations are still held
     # when the compiler exits, which LeakSanitizer reports against the compiler.
-    jit = not args.no_jit and args.profile != "sanitize" and tc.have_jit(exe)
-    r = Runner(exe, args.jobs)
+    jit = not args.no_jit and args.profile != "sanitize"
+    r = Runner(exe, args.jobs, args.verbose)
     r.gpulock = threading.BoundedSemaphore(args.gpu_jobs) if args.gpu_jobs else None
     r.batch = args.batch
 
@@ -1146,8 +1353,7 @@ def main():
     if args.goose_in_goose_only:
         show_goose_in_goose()
         r.flush()
-        print(f"{r.failures} FAILURE(S)" if r.failures else "all tests passed")
-        return int(r.failures != 0)
+        return r.finish()
 
     # The samples: compiled, built, run and compared with their expected output
     # (or only typechecked without a C compiler), by their own runner, with
@@ -1167,9 +1373,13 @@ def main():
 
     def samples():
         result = subprocess.run(sargs, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        r.say(tc.decode(result.stdout).rstrip("\n"))
+        # The section's count says what the runner's last line would.
+        lines = [line for line in tc.decode(result.stdout).splitlines()
+                 if line != "all samples passed"]
+        if lines:
+            r.say("\n".join(lines))
         if result.returncode != 0:
-            r.local.out.failures += 1
+            r.local.out.failures += max(1, sum(line.startswith("FAIL ") for line in lines))
     # On a thread of its own rather than one of the pool's, which it would
     # keep waiting the whole time.
     samples_future = r.task(samples, alone=True)
@@ -1177,18 +1387,19 @@ def main():
     clang = None if args.nocgen or args.profile == "sanitize" else tc.find_clang_c()
     if args.require_clang and not clang:
         ap.error("requested secondary C front end is unavailable: clang")
-    # What a gfx, physics or ui test program links, by the category directory
-    # it is in and what it imports, empty for a compiler built without that
-    # layer: those tests then only generate C.
-    native = {"audio": tc.audio_link(exe, cc) if cc else [],
-              "gfx": tc.gfx_link(exe, cc) if cc else [],
-              "physics": tc.physics_link(exe, cc) if cc else [],
-              "sqlite": tc.sqlite_link(exe, cc) if cc else [],
-              "ui": tc.ui_link(exe, cc) if cc else [],
-              "tls": tc.tls_link(exe, cc) if cc else []}
+    # Which native modules (by a fixture's category directory and what it
+    # imports) have their package compiled into the compiler: a fixture using
+    # one that is not only generates C, so that the suite never has the
+    # compiler fetch and build a package. The tls/ fixtures need the http
+    # package built with its TLS layer, which it is where Mbed TLS is in
+    # this tree (scripts/fetch_mbedtls.py; packages/http/CMakeLists.txt).
+    builtin = tc.builtin_modules(exe)
+    native = {m: m in builtin for m in tc.NATIVE_MODULES}
+    native["tls"] = native["http"] and \
+        (tc.REPO_ROOT / "third_party" / "mbedtls" / "library" / "ssl_tls.c").is_file()
     print(f"profile: {args.profile}; C backend: {cc.desc if cc else 'none'}; "
           f"JIT backend: {'TinyCC' if jit else 'none'}; " +
-          "; ".join(f"{m}: {'linked' if libs else 'not built in'}" for m, libs in native.items()))
+          "; ".join(f"{m}: {'built in' if have else 'not built in'}" for m, have in native.items()))
     builddir = tc.REPO_ROOT / "build"
     builddir.mkdir(parents=True, exist_ok=True)
     dumpdir = builddir / "dump"
@@ -1196,6 +1407,12 @@ def main():
     gendir = builddir / "gen" / args.profile
     gendir.mkdir(parents=True, exist_ok=True)
     r.cc, r.native, r.profile, r.extra, r.jit = cc, native, args.profile, extra, jit
+    # What a batch of programs using native modules links: each builtin
+    # package's response file (`goose --<name>-link`), in the order the
+    # fixture names the modules, a ui one's before the gfx one it draws
+    # through. A single program is built by `goose build` instead.
+    r.native_libs = {m: tc.native_link(exe, cc, m) if cc and have and m in tc.NATIVE_MODULES
+                     else [] for m, have in native.items()}
     r.levels = ("0", "2") if args.profile == "baseline" else ("2",)
     r.gendir, r.dumpdir = gendir, dumpdir
     deepdir = gendir
@@ -1212,7 +1429,7 @@ def main():
     tests = [f for f in tests if f not in native_errors]
     # Checked SQL is checked by the compiler's own SQLite: a compiler built
     # without it rejects those programs, so they are skipped there.
-    has_sql = tc.run_capture([exe, "--sqlite-link", "cc"])[0] == 0
+    has_sql = tc.have_sql_check(exe)
     if not has_sql:
         checked = [f for f in tests + native_errors
                    if f.parent.name == "sqlite" and re.search(r"sqlite::schema", f.read_text(encoding="utf-8"))]
@@ -1348,6 +1565,8 @@ def main():
 
     # --- what the log shows, in order ---------------------------------------
 
+    r.section("lexer, shader compiler and native module APIs")
+
     def lexer_tokens():
         code, out, err = r.goose("--tokens", HERE / "syntax" / "lexer_tokens.goose")
         if code != 0:
@@ -1390,31 +1609,31 @@ def main():
     for name in ("gfx_err_shader_syntax", "gfx_err_shader_part"):
         r.show_task(shader_error_line, name)
 
-    # Both sides of each native module's C boundary describe it: they must
-    # agree. TLS has no Goose-facing layer of its own: http.goose calls the
-    # runtime, which reaches the layer through gs_net_tls_ops.
-    def api(module):
-        problems = api_check.check(module)
-        what = f"{module}-api stdlib/{module}.goose against its C layer's header"
-        if problems:
-            r.fail(what, "\n".join(problems))
-        else:
-            r.ok(what)
-    for module in native:
-        if module in api_check.MODULES:
-            r.show_task(api, module)
 
-    # stdlib/sqlite.goose's argument-count overloads are generated.
+    # packages/sqlite/sqlite.goose's argument-count overloads are generated.
     def sqlite_arity():
         code, out, err = tc.run_capture([sys.executable, tc.REPO_ROOT / "scripts" / "sqlite_arity.py",
                                          "--check"])
-        what = "sqlite-arity stdlib/sqlite.goose's generated overloads are up to date"
+        what = "sqlite-arity packages/sqlite/sqlite.goose's generated overloads are up to date"
         if code != 0:
             r.fail(what, out + err)
         else:
             r.ok(what)
     r.show_task(sqlite_arity)
-    has_sql_types = tc.run_capture([exe, "--sqlite-link", "cc"])[0] == 0
+
+    # The sqlite and http packages live in this tree, so their modules are
+    # checked against their C layers here (packages/<name>/test/api_check.py).
+    def package_api(name, header):
+        code, out, err = tc.run_capture([sys.executable, tc.REPO_ROOT / "packages" / name / "test" /
+                                         "api_check.py"])
+        what = f"api packages/{name}: {header} and {name}.goose agree"
+        if code != 0:
+            r.fail(what, out + err)
+        else:
+            r.ok(what)
+    r.show_task(package_api, "sqlite", "sqlite_api.h")
+    r.show_task(package_api, "http", "http_api.h")
+    has_sql_types = has_sql
 
     # What --sqlite-types prints for the checked SQL test's statements.
     def sqlite_types():
@@ -1429,11 +1648,14 @@ def main():
     if has_sql_types:
         r.show_task(sqlite_types)
 
+    r.section("parse, roundtrip and typecheck")
     for f in tests:
         r.show(lambda f=f: fixtures[f].result().front)
 
     # The optimizer runs at -O1 in every typecheck above; also exercise the
     # other levels (and the --specs dump path) on the optimizer coverage file.
+    r.section("optimizer, stack report and C shapes")
+
     def optimize(lvl):
         code, out, err = r.goose(lvl, "--check", "--specs", HERE / "optimizer" / "optimize.goose")
         if code != 0:
@@ -1443,23 +1665,130 @@ def main():
     for lvl in ("-O0", "-O1", "-O2"):
         r.show_task(optimize, lvl)
 
+    # The data stack report (--stacks): a program with a worker, whose
+    # first-line budget caps the workers at one, and a recursive one whose
+    # first-line GS_MAX_STACKS the compiler checks the count against. The
+    # counts themselves follow the emitted code and are not pinned.
+    def stacks_report(f, patterns):
+        # The report goes where the compiler's messages do: without an -o,
+        # stderr where it has TinyCC to run the program, stdout where it
+        # would write the .c instead.
+        code, out, err = r.goose("-O1", "--check", "--stacks", f)
+        missing = [p for p in patterns
+                   if not any(re.search(p, s, re.MULTILINE) for s in (out, err))]
+        if code != 0 or missing:
+            r.fail(f"stacks {f.name}", f"missing {missing}\n{out}{err}")
+        else:
+            r.ok(f"stacks {f.name}")
+    r.show_task(stacks_report, HERE / "threads" / "thread_cap.goose", [
+        r"^data stacks: 2 GB reserved per stack, 1 MB guard gap, 4 GB budget: 1 regions, GS_MAX_STACKS 1024$",
+        r"^main program: \d+ data stacks \+ 0 global stacks = \d+ regions$",
+        r"^worker `worker`: [1-9]\d* data stacks \+ 0 argument and global stacks = \d+ regions$",
+        r"^thread cap: 1 workers \(\(1 - \d+\) / \d+\), what hardware_threads\(\) reports at most$",
+        r"^fn worker: [1-9]\d* own, \d+ with callees$",
+    ])
+    r.show_task(stacks_report, HERE / "codegen" / "cycle_scratch_locals.goose", [
+        r"^data stacks: .*, GS_MAX_STACKS 4$",
+        r"^main program: [1-4] data stacks \+ 0 global stacks = [1-4] regions$",
+        r"^thread cap: none, no workers$",
+        r"^fn in_block: [1-9]\d* own, [1-4] with callees$",
+    ])
+    # The loops codegen restates, read in the C of their fixture, where -O1
+    # keeps each function a C function of its own.
+    def loop_shapes():
+        f = HERE / "optimizer" / "loop_shapes.goose"
+        cfile = gendir / "loop_shapes-shapes.c"
+        code, out, err = r.goose("-O1", "-o", cfile, f)
+        if code != 0:
+            r.fail(f"loop shapes {f.name}", out + err)
+        elif r.check_loop_shapes(cfile.read_text()):
+            r.ok(f"loop shapes {f.name}")
+    r.show_task(loop_shapes)
+    # An inline fn returning two values stays a call in Goose and is declared
+    # GS_INLINE in the C, for the C compiler to inline (§7.13).
+    def inline_fn_c():
+        f = HERE / "optimizer" / "optimize.goose"
+        cfile = gendir / "optimize-inline.c"
+        code, out, err = r.goose("-O1", "-o", cfile, f)
+        if code != 0:
+            r.fail("inline fn C", out + err)
+            return
+        text = cfile.read_text()
+        pair = re.search(r"^static GS_INLINE [^\n;]*\bil_pair_g\d*\(", text, re.MULTILINE)
+        plain = re.search(r"^static GS_INLINE [^\n;]*\bil_plain_g\d*\(", text, re.MULTILINE)
+        if not pair or plain:
+            r.fail("inline fn C", f"il_pair GS_INLINE: {bool(pair)}, il_plain GS_INLINE: {bool(plain)}")
+        else:
+            r.ok("inline fn C")
+    r.show_task(inline_fn_c)
+    # A slice and a builder parameter are two C parameters each (spec C.3),
+    # the slice's data pointer as `void *` (ParamFields).
+    def member_params():
+        f = HERE / "codegen" / "member_parameters.goose"
+        cfile = gendir / "member_parameters-sig.c"
+        code, out, err = r.goose("-O1", "-o", cfile, f)
+        if code != 0:
+            r.fail(f"member parameters {f.name}", out + err)
+            return
+        sig = re.search(r"^static void walk_g\w*\(([^)]*)\) \{$", cfile.read_text(),
+                        re.MULTILINE)
+        want = (r"void \*\w+, int64_t \w+, int64_t \w+, gs_rhdr \*\w+, gs_stack \*\w+, "
+                r"void \*\w+, int64_t \w+")
+        if not sig or not re.fullmatch(want, sig[1]):
+            r.fail(f"member parameters {f.name}",
+                   f"walk's parameters: got {sig[1] if sig else None}")
+        else:
+            r.ok(f"member parameters {f.name}")
+    r.show_task(member_params)
+    # Fields nothing can move are member stores, not stores through a
+    # pointer taken first (StableDest).
+    def member_stores():
+        f = HERE / "codegen" / "member_stores.goose"
+        cfile = gendir / "member_stores-c.c"
+        code, out, err = r.goose("-O1", "-o", cfile, f)
+        if code != 0:
+            r.fail(f"member stores {f.name}", out + err)
+            return
+        body = re.search(r"^static void store_links_g\w*\([^\n]*\) \{\n(.*?)^\}\n",
+                         cfile.read_text(), re.MULTILINE | re.DOTALL)
+        stores = body and all(re.search(rf"\)\.{fld}_g = ", body[1]) for fld in ("w", "prev"))
+        if not stores or re.search(r"double \*t\d+ = &", body[1]):
+            r.fail(f"member stores {f.name}", body[1] if body else "no store_links in the C")
+        else:
+            r.ok(f"member stores {f.name}")
+    r.show_task(member_stores)
+
     # Every annotated regression, including the expected-abort cases. These
     # describe the default O1 pass; O0/O2 execution checks semantics.
+    r.section("bounds-check annotations")
     for f in tests:
         r.show(lambda f=f: fixtures[f].result().bce)
 
     # --- codegen: generate C, compile, run, compare ------------------------
+    def native_skips():
+        skipped = [name for f in tests for name in fixtures[f].result().nativeskips]
+        if skipped:
+            r.say(f"skip running {len(set(skipped))} audio, gfx, physics, sqlite, ui or tls test(s) (no "
+                  f"layer for them, or no GPU device): " + ", ".join(sorted(set(skipped))))
+
+    r.section("generated C, built and run at " + " and ".join(f"-O{ol}" for ol in r.levels))
     if not cc:
         r.show_later(r.say, "skip codegen run tests (no C compiler found or --nocgen)")
-    else:
-        for section in ("cgen", "dump", "debug"):
+    for f in tests if cc else ():
+        r.show(lambda f=f: fixtures[f].result().cgen)
+    r.show_later(native_skips)
+    if cc:
+        for kind, title in (("dump", "dump-runtime programs"), ("debug", "GS_DEBUG programs")):
+            r.section(title)
             for f in tests:
-                r.show(lambda f=f, section=section: getattr(fixtures[f].result(), section))
+                r.show(lambda f=f, kind=kind: getattr(fixtures[f].result(), kind))
+
+        r.section("compiler roots, runtime lifecycle and clang")
 
         # Algebraic properties of the compiler's root domain are easier to
-        # exhaust over small abstract states than to express in Goose.
-        def compiler_roots():
-            name = "compiler_roots"
+        # exhaust over small abstract states than to express in Goose, and
+        # its containers to compare with the standard ones directly.
+        def compiler_unit(name):
             out_exe = gendir / f"{name}{tc.EXE_SUFFIX}"
             ok, log = cc.compile(HERE / f"{name}.cpp", out_exe, cpp=True,
                                  opt=2 if args.profile == "baseline" else 1,
@@ -1472,7 +1801,8 @@ def main():
                     r.fail(f"compiler {name}", out + err)
                 else:
                     r.ok(f"compiler {name}")
-        r.show_task(compiler_roots)
+        for name in ("compiler_roots", "compiler_containers"):
+            r.show_task(compiler_unit, name)
 
         # Direct runtime lifecycle checks use small region limits and allocator
         # instrumentation that cannot be expressed by a Goose program. Keep
@@ -1544,12 +1874,221 @@ def main():
                 out = r.run_expected([out_exe], "codegen_exec", f"clang-{label} codegen_exec.goose")
                 if out is not None and r.check_stdout("codegen_exec", f"clang-{label}", out):
                     r.ok(f"cgen-clang-{label} codegen_exec.goose")
+        # The versions of the simd functions (spec §7.12) exist only where
+        # clang builds for x86-64: each level the C may be built for runs
+        # here, at -O2 so the loops vectorize, and has to print what the
+        # baseline does. On a CPU without AVX-512 or AVX2 the higher builds
+        # run the highest version it has, which is still a version.
+        # simd_versions.goose covers the language's side; the stdlib fixtures
+        # check the library's simd functions, as clang builds them.
+        def clang_simd_versions(ctext):
+            # Every simd function keeps its versions, the single-use ones the
+            # optimizer would otherwise inline and the element-run twin too.
+            # The generic total has two specializations, numbered.
+            missing = [f for f in ("caesar_g", "checksum_g", "muladd_g", "squares_g", "minmax_g",
+                                   "biased_g", "fib_g", "sum3_g", "squares_g_er")
+                       if f"{f}_simd1(" not in ctext or f"{f}_simd2(" not in ctext]
+            if len(set(re.findall(r"\b(total_g_\d+)_simd[12]\(", ctext))) != 2:
+                missing.append("total_g")
+            return missing
+
+        def clang_simd_named(*names):
+            # A C name may carry a specialization's number after the module's.
+            def missing(ctext):
+                return [f for f in names
+                        if not re.search(rf"\b{f}_g\d+(_\d+)?_simd1\(", ctext)
+                        or not re.search(rf"\b{f}_g\d+(_\d+)?_simd2\(", ctext)]
+            return missing
+
+        def clang_simd(name, path, versions):
+            src = gendir / f"simdclang-{name}.c"
+            code, out, err = r.goose("-O2", "-o", src, path)
+            if code != 0:
+                r.fail(f"simd-clang {name}.goose", out + err)
+                return
+            missing = versions(src.read_text(encoding="utf-8"))
+            if missing:
+                r.fail(f"simd-clang {name}.goose", f"no simd versions of {', '.join(missing)}")
+                return
+            for level in ("2", "1", "0"):
+                label = f"simd{level}"
+                out_exe = gendir / f"simdclang-{name}-{level}{tc.EXE_SUFFIX}"
+                ok, log = clang.compile(src, out_exe, opt=2, warn="off", strict_decls=True,
+                                        defines=[f"GS_SIMD={level}"], runtime=r.runtime,
+                                        log=gendir / f"simdclang-{name}-{level}.log")
+                if not ok:
+                    r.fail(f"{label}-clang {name}.goose", "\n".join(log.splitlines()[:8]))
+                    continue
+                out = r.run_expected([out_exe], name, f"clang-{label} {name}.goose")
+                if out is not None and r.check_stdout(name, f"clang-{label}", out):
+                    r.ok(f"{label}-clang {name}.goose")
         if args.profile == "sanitize":
             pass  # The full generated-C suite already ran through Clang.
         elif not clang:
             r.show_later(r.say, "skip cgen-clang (no clang found)")
         else:
             r.show_task(clang_codegen)
+            r.show_task(clang_simd, "simd_versions", HERE / "codegen" / "simd_versions.goose",
+                        clang_simd_versions)
+            r.show_task(clang_simd, "stdlib_base64", HERE / "stdlib" / "stdlib_base64.goose",
+                        clang_simd_named("base64_encode", "base64_decode"))
+
+    def extern_types():
+        from extern_types import check_extern_types
+        try:
+            check_extern_types(exe, cc, gendir, jit=jit, runtime=r.runtime, extra=extra)
+            r.ok("extern types: unused and partially used C adapters")
+        except RuntimeError as e:
+            r.fail("extern types", str(e))
+    if cc or jit:
+        r.section("extern types")
+        r.show_task(extern_types)
+
+    def resource_paths():
+        from resource_paths import check_resource_paths
+        try:
+            check_resource_paths(exe, cc, gendir, jit=jit, runtime=r.runtime, extra=extra)
+            r.ok("resource paths: JIT/native roots, relocation and unchanged cwd")
+        except RuntimeError as e:
+            r.fail("resource paths", str(e))
+    if cc or jit:
+        r.section("resource paths")
+        r.show_task(resource_paths)
+
+    def git_packages():
+        from packages_git import check_git_packages
+        try:
+            skipped = check_git_packages(exe, gendir, jit=jit)
+            if skipped:
+                r.say(f"skip packages from git ({skipped})")
+            else:
+                r.ok("packages from git: concurrent fetches, submodules, interrupted fetch, "
+                     "tag, commit, update, differing ref")
+        except RuntimeError as e:
+            r.fail("packages from git", str(e))
+    r.section("packages from git")
+    r.show_task(git_packages)
+
+    def driver_verbs():
+        """The verb forms of the command line against the flag forms they
+        stand for: `goose run`, `goose check` and `goose version`."""
+        probe = gendir / "verbs.goose"
+        tc.write_text(probe, 'fn main() { print("verbs"); }\n')
+        checks = []
+        if jit:
+            code, out, err = tc.run_capture([exe, "run", probe])
+            checks.append(("run", code == 0 and out.strip() == "verbs", out + err))
+        code, out, err = tc.run_capture([exe, "check", probe])
+        checks.append(("check", code == 0 and "typechecked ok" in out + err and
+                       "verbs" not in out, out + err))
+        code, out, err = tc.run_capture([exe, "run", "-o", str(gendir / "verbs.c"), probe])
+        checks.append(("run -o (refused)", code != 0 and "takes no -o" in err, out + err))
+        code, out, err = tc.run_capture([exe, "version"])
+        checks.append(("version", code == 0 and
+                       re.match(r"goose runtime [0-9a-f]{12}\s*$", out) is not None, out + err))
+        # The compiler's own toolchain discovery: where this runner found a C
+        # compiler, the compiler must find one too, and say so as JSON.
+        code, out, err = tc.run_capture([exe, "toolchain", "--json"])
+        try:
+            info = json.loads(out)
+            good = (cc is None or info.get("cc") is not None) and \
+                   code == (0 if info.get("cc") else 1)
+        except ValueError:
+            good = False
+        checks.append(("toolchain --json", good, out + err))
+        if cc:
+            # `goose build` against the toolchain the compiler finds itself:
+            # the executable beside -o, running; a dry run writing none.
+            built = gendir / ("verbs_built" + tc.EXE_SUFFIX)
+            code, out, err = tc.run_capture([exe, "build", "-o", str(built), probe])
+            good = code == 0 and built.exists()
+            if good:
+                code, out2, err2 = tc.run_capture([built])
+                good = code == 0 and out2.strip() == "verbs"
+                out, err = out + out2, err + err2
+            checks.append(("build", good, out + err))
+            dry = gendir / ("verbs_dry" + tc.EXE_SUFFIX)
+            code, out, err = tc.run_capture([exe, "build", "--dry-run", "-o", str(dry), probe])
+            checks.append(("build --dry-run", code == 0 and not dry.exists() and
+                           "verbs" in out and "goose_runtime" in out, out + err))
+        for what, good, text in checks:
+            if good:
+                r.ok(f"goose {what}")
+            else:
+                r.fail(f"goose {what}", text)
+    r.section("driver verbs")
+    r.show_task(driver_verbs)
+
+    def cli_paths():
+        from cli_paths import check_cli_paths
+        try:
+            check_cli_paths(exe, cc, gendir)
+            r.ok("command line paths: new -o directories, \".\" and \"..\" sources, rooted "
+                 "--include, unresolved imports")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("command line paths", str(e))
+    r.show_task(cli_paths)
+
+    def runtime_cache():
+        from runtime_cache import check_runtime_cache
+        try:
+            check_runtime_cache(exe, cc, gendir)
+            r.ok("runtime cache: concurrent builds, failed compile, retry and reuse")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("runtime cache", str(e))
+    if cc:
+        r.show_task(runtime_cache)
+
+    def exit_race():
+        from exit_race import check_exit_race
+        try:
+            check_exit_race(exe, gendir)
+            r.ok("exit race: threads exiting at once end with their code")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("exit race", str(e))
+    if cc:
+        r.show_task(exit_race)
+
+    def huge_pages():
+        from huge_pages import check_huge_pages
+        try:
+            skipped = check_huge_pages(exe, gendir)
+            if skipped:
+                r.say(f"skip huge pages ({skipped})")
+            else:
+                r.ok("huge pages: data stack regions start without them")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("huge pages", str(e))
+    if cc:
+        r.show_task(huge_pages)
+
+    def native_toolchain():
+        from native_toolchain import check_native_toolchain
+        try:
+            skipped = check_native_toolchain(exe, gendir, jit=jit)
+            if skipped:
+                r.say(f"skip native toolchain ({skipped})")
+            else:
+                r.ok("native toolchain: one C toolchain for a CMake package, the runtime "
+                     "and the link")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("native toolchain", str(e))
+    if cc:
+        r.show_task(native_toolchain)
+
+    def native_rebuild():
+        from native_rebuild import check_native_rebuild
+        try:
+            skipped = check_native_rebuild(exe, gendir, jit=jit)
+            if skipped:
+                r.say(f"skip native rebuild ({skipped})")
+            else:
+                r.ok("native rebuild: edited C, new and excluded extern fns, CMake options, targets "
+                     "and C++")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("native rebuild", str(e))
+    if cc:
+        r.show_task(native_rebuild)
 
     show_goose_in_goose()
 
@@ -1557,13 +2096,14 @@ def main():
     # No C file, no external toolchain: what this checks is that the generated
     # C is portable enough for a third, very different C implementation, and
     # that a program means the same when TinyCC builds it.
+    r.section("JIT (TinyCC) runs")
     if not jit:
         r.show_later(r.say, "skip JIT run tests (sanitizer profile, --no-jit, or a compiler "
                             "built without the TinyCC backend)")
     else:
-        for section in ("jit", "jitdebug"):
+        for kind in ("jit", "jitdebug"):
             for f in tests:
-                r.show(lambda f=f, section=section: getattr(fixtures[f].result(), section))
+                r.show(lambda f=f, kind=kind: getattr(fixtures[f].result(), kind))
 
         def jit_skips():
             skipped = [name for f in tests for name in fixtures[f].result().jitskips]
@@ -1579,15 +2119,9 @@ def main():
         code, out, err = r.screened(f, parse_runs[f]())
         if r.check_error(f, "expected-error", code, out, err):
             r.ok(f"error {f.name}")
+    r.section("parse errors (errors/)")
     for f in parse_errors:
         r.show_later(parse_error, f)
-
-    def native_skips():
-        skipped = [name for f in tests for name in fixtures[f].result().nativeskips]
-        if skipped:
-            r.say(f"skip running {len(set(skipped))} audio, gfx, physics, sqlite, ui or tls test(s) (no "
-                  f"layer for them, or no GPU device): " + ", ".join(sorted(set(skipped))))
-    r.show_later(native_skips)
 
     # Typecheck error tests: must parse, must fail the typechecker. One
     # compiler run tells the two apart by whether it reported the parse done.
@@ -1600,6 +2134,7 @@ def main():
             r.fail(f"tc-error-parses {f.name}", out + err)
         elif r.check_error(f, "expected-tc-error", code, out, err):
             r.ok(f"tc-error {f.name}")
+    r.section("typecheck errors (errors_tc/ and native modules' rejection tests)")
     for f in tc_errors:
         r.show_later(tc_error, f)
 
@@ -1622,20 +2157,18 @@ def main():
     for f in build_errors:
         r.show_later(build_error, f)
 
+    r.section("long call chains and guard runs")
     for future in deep:
         r.show(future)
 
+    r.section("samples")
     r.show(samples_future)
 
     r.flush()
     if r.pool:
         r.pool.shutdown()
     print(f"({time.perf_counter() - started:.0f}s with {args.jobs} job(s))")
-    if r.failures:
-        print(f"{r.failures} FAILURE(S)")
-        return 1
-    print("all tests passed")
-    return 0
+    return r.finish()
 
 
 if __name__ == "__main__":

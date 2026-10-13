@@ -61,6 +61,8 @@
 // are typecheck_nodes.h.
 #pragma once
 
+#include "type_queries.h"
+
 namespace goose {
 
 enum IterKind { IK_RANGE, IK_COUNT, IK_ARRAY, IK_SLICE };
@@ -122,8 +124,15 @@ inline bool IsBranchConstruct(const Node *n) {
 
 struct TypeCheck {
     Ast &ast;
+    StableTypeGraph stabletypes;
+    unordered_map<const void *, vector<TypeExpr *>> arrayelements;
+    // CanContain's and ReachesThroughRefs' answers for complete type graphs:
+    // RootCandidates asks them of every variable in scope and every global,
+    // at each store and shrink it judges.
+    using TypePairCache = flat_map<pair<TypeExpr *, TypeExpr *>, bool>;
+    TypePairCache cancontain, reachesthrough;
     bool library = false;   // Built for a C host (--header): fn main() is optional.
-    bool checkonly = false; // --check: nothing is built, so fn main() is optional.
+    bool nomain = false;    // Checking only: a file without fn main() is checked on its own.
 
     // (Val, the checked value of an expression, lives in ast.h: node Check
     // overrides return it.)
@@ -170,9 +179,19 @@ struct TypeCheck {
     // before or after it, then those the declaring body sees from outside,
     // each with the environment it is declared in. Kept after the declaring
     // scope ends, for a function whose value leaves it.
+    // A nested function a body can call, with the environment it is
+    // declared in, the scope declaring it (its Scope::serial) and its place
+    // among that scope's declarations: those of one name in one scope are
+    // one overload set (§7.5).
+    struct OuterFn {
+        SFunction *sf = nullptr;
+        FnSpec *env = nullptr;
+        int scopeserial = 0;
+        int order = 0;
+    };
     struct DeclSite {
         vector<pair<VarDef *, int>> vars;
-        vector<pair<SFunction *, FnSpec *>> fns;
+        vector<OuterFn> fns;
         int scope = 0;               // The declaring scope, and its Scope::serial.
         int serial = 0;
     };
@@ -217,6 +236,10 @@ struct TypeCheck {
         // where it made the latest (JoinCycle).
         int cyclecalls = 0;
         Line cyclecall;
+        // The body state its statements are checked in (StateOf): the
+        // index in outerbodies the state is saved at while a body is
+        // checked inside it, or past them for the state being checked now.
+        int bodyidx = 0;
         // A specialization's body being checked (CheckSpecBodyOnce): its exits.
         BodyExits *exits = nullptr;
     };
@@ -242,7 +265,9 @@ struct TypeCheck {
         bool operator==(const FlowEntry &) const = default;
     };
     struct FlowState {
-        vector<FlowEntry> locals;
+        small_vector<FlowEntry, 16> locals;
+        // The narrowed globals only, in ast.globals order: the others are
+        // not narrowed.
         vector<pair<VarDef *, TypeExpr *>> globals;
         bool reachable = true;
         bool operator==(const FlowState &) const = default;
@@ -295,6 +320,7 @@ struct TypeCheck {
     };
     void CheckStmts(Block *b);
     bool MentionsName(Node *n, string_view name, set<SFunction *> &seen);
+    bool EscapingContinue(Node *n);
     bool UsedAfter(VarDef *v);
 
     // The node being checked and every node it is nested in, innermost last,
@@ -339,7 +365,7 @@ struct TypeCheck {
     bool Descend(Node *n);
     void Ascend(Node *n);
     // The checked value of every expression that points somewhere, by node.
-    unordered_map<Node *, Val> nodevals;
+    flat_map<Node *, Val> nodevals;
     void RecordVal(Node *n, const Val &v) {
         if (!v.None() || v.holderset) nodevals[n] = v;
     }
@@ -383,6 +409,9 @@ struct TypeCheck {
     template<typename F> void AfterHead(Node *n, Node *next, F f);
     vector<VarDef *> vars;                            // All in-scope variables, all frames.
     vector<pair<int, SFunction *>> localfns;          // Nested fns, with their scope index.
+    // The overload sets of nested functions bound as function values
+    // (FnValBind::set): one copy of each, so that equal sets compare equal.
+    std::set<vector<SFunction *>> localfnsets;
     int scopeserial = 0;
     deque<DeclSite> declsites;
     // The latest declaration site of each nested function, by the
@@ -660,7 +689,8 @@ struct TypeCheck {
 
     // ------------------------------------------------------------------
     // Constant expression evaluation: array sizes, match arm bounds, literal
-    // fit. Understands literals, arithmetic, and `let` globals.
+    // fit. Understands literals, arithmetic, `let` globals, and the `.len` and
+    // `.cap` of globals their declarations fix.
 
     // A size, fill count or match pattern `at` (a `what`), which takes the
     // named constants its expression names at their initializers' values
@@ -674,6 +704,8 @@ struct TypeCheck {
 
     bool ConstIntValue(Node *n, Val &v, bool &literal, set<VarDecl *> &visiting,
                        ConstUse *use = nullptr);
+    bool ConstExtent(Ident *id, bool cap, int64_t &extent, set<VarDecl *> &visiting,
+                     ConstUse *use);
 
     bool ConstInt(Node *n, int64_t &v, ConstUse *use = nullptr) {
         Val value;
@@ -739,6 +771,8 @@ struct TypeCheck {
         } else if (auto b = Is<Binary>(n)) {
             ConstExprNames(b->left, what, f);
             ConstExprNames(b->right, what, f);
+        } else if (auto d = Is<Dot>(n)) {
+            if (auto obj = Is<Ident>(d->obj)) f(obj, what);
         }
     }
 
@@ -1001,7 +1035,7 @@ struct TypeCheck {
     void LimitNestedInsts(TypeExpr *t);
     // The field runs of a nominal type (ast.h FieldRun), instantiating it
     // as needed; empty for every other kind.
-    vector<FieldRun> FieldRuns(TypeExpr *t);
+    span<const FieldRun> FieldRuns(TypeExpr *t);
     // Whether `f` holds of some field type of t, pads skipped, and the same
     // for each of them; instantiating t as FieldRuns does.
     template<typename F> bool AnyField(TypeExpr *t, F f) { return AnyFieldOf(FieldRuns(t), f); }
@@ -1159,7 +1193,26 @@ struct TypeCheck {
     bool GrowShrinkContains(TypeExpr *t, TypeExpr *of);
     bool RefMayPointInto(VarDef *v, VarDef *root, bool growonly = false,
                          TypeExpr *bound = nullptr);
-    bool ClassReadMayPointInto(VarDef *cls, VarDef *root, TypeExpr *bound);
+    bool ClassReadMayPointInto(VarDef *cls, VarDef *root, TypeExpr *bound,
+                               bool inplace = false);
+    // A reference to a whole resizable value leads into the array: a
+    // rendering walking in place follows it, and so may the right-hand side
+    // of a whole assignment, which runs while the array is rebuilt (§4.4),
+    // through a variable it takes a reference out of (ExposedLater). The
+    // shrink scans otherwise take one for the path to the array, which a
+    // shrink leaves valid (CanHoldViewInto).
+    bool pathslive = false;
+    struct PathsScope {
+        TypeCheck &tc;
+        bool saved;
+        PathsScope(TypeCheck &t, bool on) : tc(t), saved(t.pathslive) { tc.pathslive = saved || on; }
+        ~PathsScope() { tc.pathslive = saved; }
+    };
+    // The shrink being scanned is a whole assignment's, whose right-hand
+    // side is the rest of its statement (CheckAssignedValue, ExposedLater).
+    bool rebuilding = false;
+    bool ExposedLater(VarDef *v);
+    bool CanHoldViewInto(TypeExpr *t, TypeExpr *arr);
     bool RefMayRetarget(VarDef *v, VarDef *root);
     bool SlotReadable(TypeExpr *t);
     bool HeldRefsMayPointInto(VarDef *v, const Prov &p, TypeExpr *t, VarDef *root,
@@ -1200,12 +1253,13 @@ struct TypeCheck {
     }
 
     // The same for the nested functions it can call, in the order a name
-    // resolves to them, each with the environment it is declared in.
+    // resolves to them, each with the environment and scope it is declared
+    // in.
     template <typename F> bool ForOuterFns(int fi, F f) {
         for (;;) {
             auto &fr = frames[fi];
             if (fr.decl) {
-                for (auto [sf, env] : fr.decl->fns) if (f(sf, env)) return true;
+                for (auto &o : fr.decl->fns) if (f(o)) return true;
                 return false;
             }
             auto p = fr.lexframe;
@@ -1213,7 +1267,7 @@ struct TypeCheck {
             for (auto i = (int)localfns.size() - 1; i >= 0; i--) {
                 auto [si, sf] = localfns[i];
                 if (si >= frames[p].scopebase && si < frames[p + 1].scopebase &&
-                    f(sf, frames[p].lexspec))
+                    f(OuterFn { sf, frames[p].lexspec, scopes[si].serial, i }))
                     return true;
             }
             fi = p;
@@ -1231,7 +1285,7 @@ struct TypeCheck {
     int FrameOfScope(int s);
     bool NamesFrame(int fi, int target);
     FnSpec *NamedSpec(FnSpec *env);
-    SFunction *LookupLocalFn(string_view name);
+    bool LookupLocalFn(string_view name);
 
     FlowState SaveFlow();
     void RestoreFlow(const FlowState &f);
@@ -1239,7 +1293,7 @@ struct TypeCheck {
     // the ones it is lexically nested in, the global initializers', and
     // those the function values bound in `spec`, or in the specialization
     // of any of those frames, were written in (which calling one reaches).
-    vector<int> NamedFrames(int fi, FnSpec *spec);
+    small_vector<int, 8> NamedFrames(int fi, FnSpec *spec);
     // The variables of those frames, in vars order.
     template<typename F> void EachNamedVar(int fi, FnSpec *spec, F f) {
         for (auto k : NamedFrames(fi, spec)) {
@@ -1386,12 +1440,40 @@ struct TypeCheck {
     TypeExpr *GrowU8Array(Line l);
 
     TypeExpr *LoadType(TypeExpr *t);
+    bool LoadedTypeEq(TypeExpr *t, TypeExpr *of);
     TypeExpr *ValueType(TypeExpr *t);
+    TypeExpr *DeclType(TypeExpr *t, TypeExpr *s);
     static bool ImplicitInt(IntStorage from, IntStorage to);
     TypeExpr *DerefType(TypeExpr *t);
     Val CheckIntAny(Node *n);
     bool HasRelRefT(TypeExpr *t, bool inpool = false);
-    void NoRelRefCopy(Node *n, TypeExpr *t);
+    bool BuiltWhereReceived(Node *n, size_t result);
+    void NoRelRefCopy(Node *n, TypeExpr *t, size_t result = 0, const VarDecl *bind = nullptr,
+                      const Val *src = nullptr);
+    void NoRelRefTempRead(Node *base, TypeExpr *t, TypeExpr *member);
+    // The single value a return or a body's tail is checking (CheckReturn,
+    // CheckSpecBody), which a named result may be (AllowNamedResult).
+    Node *retvalnode = nullptr;
+    struct RetValScope {
+        TypeCheck &tc;
+        Node *saved;
+        RetValScope(TypeCheck &t, Node *n) : tc(t), saved(t.retvalnode) { tc.retvalnode = n; }
+        ~RetValScope() { tc.retvalnode = saved; }
+    };
+    // A return of a local holding self-relative references, allowed as the
+    // body's named result, which only the whole body says it is
+    // (CheckNamedResultUses).
+    struct NamedResultUse {
+        FnSpec *spec;
+        Node *at;
+        VarDef *var;
+    };
+    vector<NamedResultUse> namedresultuses;
+    bool AllowNamedResult(Ident *id, TypeExpr *t);
+    void CheckNamedResultUses(FnSpec *spec);
+    VarDef *NamedResultOf(FnSpec *spec);
+    void SelfRelPointees(TypeExpr *t, vector<TypeExpr *> &out);
+    bool NamedResultKeepsLinks(TypeExpr *t);
 
     // ------------------------------------------------------------------
     // Pool-relative references (§3.9). `T&<u32 in pool>` names a global pool
@@ -1422,7 +1504,10 @@ struct TypeCheck {
     // What a parameter's references lead to is the caller's storage, known
     // here only by the parameter's root, which is then a bound as well.
 
+    template<typename F> bool StableTypeQuery(TypePairCache &cache, TypeExpr *t, TypeExpr *of,
+                                              F walk);
     bool CanContain(TypeExpr *t, TypeExpr *of);
+    bool CanContainWalk(TypeExpr *t, TypeExpr *of);
     void ReachedThroughRefs(TypeExpr *t, vector<TypeExpr *> &out);
     bool ReachesThroughRefs(TypeExpr *t, TypeExpr *of);
     void BoundReach(VarDef *r, vector<TypeExpr *> &out);
@@ -1442,12 +1527,13 @@ struct TypeCheck {
     Roots ReadBackRoot(TypeExpr *rt, const Roots &container, bool byteview = false,
                        const ReadBack *contents = nullptr, bool slotread = false,
                        bool inplace = false);
-    bool ContentsReadBack(VarDef *h, Roots &out);
+    bool ContentsReadBack(VarDef *h, TypeExpr *of, Roots &out);
     string ReadBackWhy(const Roots &r);
     bool HoldsByValue(TypeExpr *t, TypeExpr *of, vector<TypeExpr *> &open);
     int ElemArrayPlaces(TypeExpr *t, TypeExpr *of);
     bool OneArrayOf(VarDef *r, TypeExpr *elem);
     void ArrayElemsReached(TypeExpr *t, vector<TypeExpr *> &out, vector<TypeExpr *> &open);
+    void AppendArrayElemsReached(TypeExpr *t, vector<TypeExpr *> &out);
     bool RootedAtReceiver(const Val &rv, const Val &av, TypeExpr *elem);
     void CheckRootedAtReceiver(Call *c, const char *op, const Val &rv, const Val &av, TypeExpr *elem,
                                const char *what, const char *sec);
@@ -1489,6 +1575,19 @@ struct TypeCheck {
     // may lie in any of several, or anywhere a root only bounds.
     static VarDef *HolderSource(const Roots &at) {
         return at.Exact() && !IsTemp(at.alts[0].root) ? at.alts[0].root : nullptr;
+    }
+    // What a holder lying where `at` points holds: where it lies in one local
+    // holder exactly, no more than what was stored into that local, which its
+    // record says (§9.5); anywhere else, whatever outlives the storage there,
+    // with the containers it was read out of where `keepfrom` (Bounds).
+    static Roots HeldAt(const Roots &at, bool keepfrom = false) {
+        auto src = HolderSource(at);
+        if (src && src->type && !src->isglobal && !IsRefOrSlice(src->type))
+            return src->contents;
+        if (!keepfrom) return Bounds(at);
+        Roots r = at;
+        r.Weaken();
+        return r;
     }
     // A holder that lies in the storage a parameter's class stands for alone
     // (Val::holderfrom) holds views that storage holds: its contents there
@@ -1540,15 +1639,21 @@ struct TypeCheck {
     // apply reference transparency.
     Val CheckV(Node *n, TypeExpr *expected) {
         NodeScope ns(*this, n);
+        auto cyclecalls = frames.back().cyclecalls;
         auto v = n->Check(*this, expected);
         if (v.type == fntype && !Is<Ident>(n) && !Is<FunVal>(n))
             Error(n, "a function value must be a function name or block literal (§7.6); "
                      "evaluate runtime expressions separately");
+        NoteTemp(n, v, cyclecalls);
         RecordVal(n, v);
         return v;
     }
 
-    Val DecayRef(Val v);
+    Val DecayRef(const Val &v);
+    // The type DecayRef gives v.
+    TypeExpr *DecayedType(const Val &v) {
+        return IsPlainRef(v.type) ? LoadType(v.type->ref->sub) : v.type;
+    }
     bool KeepsRef(const Val &v, TypeExpr *dt);
     Node *AutoRef(Node *n, Val &v, bool writes = true);
     void SlotRoots(Val &v);
@@ -1556,6 +1661,9 @@ struct TypeCheck {
     VarDef *RelyOnNonneg(const Val &v, Node *at);
     void RelyOnConstant(ConstUse &use, VarDef *d);
     void RelyOnNamed(const Val &v, Node *at);
+    bool TypeFixesExtent(VarDef *d, bool cap);
+    void RelyOnExtent(ConstUse &use, VarDef *d, bool cap);
+    void CheckVarExtent(VarDef *d, Node *at);
     TypeExpr *StorageType(const Val &v);
     bool BindsRef(const Val &v, TypeExpr *dt);
     bool IsNonFixedLValue(const Val &v);
@@ -1769,6 +1877,7 @@ struct TypeCheck {
     void ReportRedundantCasts();
     bool ElementwiseOK(TypeExpr *t);
     TypeExpr *ElementwiseScalarType(TypeExpr *t);
+    TypeExpr *UnsignedLeaf(TypeExpr *t);
     Val CheckVariantConst(Dot *d, SEnum *en);
     Val MergeVals(const Val &a, bool areach, const Val &b, bool breach, Node *at, bool wantvalue);
     Val JoinBranches(const Val &a, bool areach, const Val &b, bool breach, Node *at,
@@ -1862,12 +1971,14 @@ struct TypeCheck {
                              MatchInfo &best, TypeExpr *expected, string_view name);
     Val CheckCall(Call *c, TypeExpr *expected);
     Val CheckNamedCall(Call *c, Ident *id, TypeExpr *expected);
+    vector<SFunction *> LookupLocalFns(string_view name, FnSpec *&env);
+    FnValBind LocalFnValue(const vector<SFunction *> &fns, FnSpec *env);
     SEnum *DeferredOf(TypeExpr *t);
     Val CheckInvocation(Call *c, Node *callee, const Val &cv, TypeExpr *expected);
-    SFunction *LookupLocalFnEnv(string_view name, FnSpec *&env);
     Val CheckUfcsCall(Call *c, Dot *d, TypeExpr *expected);
     Val ResolveCall(Call *c, vector<SFunction *> &cands, FnSpec *env, string_view name, Val *preval,
-                    Node *&prenode, bool *nomatch = nullptr, TypeExpr *expected = nullptr);
+                    Node *&prenode, bool entryreach, bool *nomatch = nullptr,
+                    TypeExpr *expected = nullptr);
     void MatchCandidates(Call *c, vector<SFunction *> &cands, FnSpec *env, vector<Val> &argvals,
                          vector<MatchInfo> &tied, vector<MatchInfo> &converting, string *failures,
                          string_view name);
@@ -1897,8 +2008,8 @@ struct TypeCheck {
     bool HasGenerics(TypeExpr *t);
     bool BindTypes(TypeExpr *pt, TypeExpr *at, vector<pair<string_view, TypeExpr *>> &b);
     TypeExpr *SubstOwn(TypeExpr *pt, vector<pair<string_view, TypeExpr *>> &b);
-    Val TryDispatch(Call *c, vector<SFunction *> &cands, vector<Node *> &argnodes,
-                    vector<Val> &argvals, string_view name);
+    Val TryDispatch(Call *c, vector<SFunction *> &cands, FnSpec *env, vector<Node *> &argnodes,
+                    vector<Val> &argvals, string_view name, bool entryreach);
 
     // ------------------------------------------------------------------
     // Specialization: find or create the FnSpec for a resolved call and
@@ -1951,6 +2062,10 @@ struct TypeCheck {
         // The classes created from its parameters' values, or given them at a
         // back edge: each points where it does only while it stays threaded.
         vector<VarDef *> heirs;
+        // Its arguments are read through a threaded class rather than rooted
+        // at one exactly: in every activation it points into storage that
+        // class leads to, though not into the same part of it.
+        bool bounded = false;
     };
     unordered_map<VarDef *, ThreadedClass> threadedclasses;
     void ValidateThreadArgs(FnSpec *spec, vector<Val> &argvals, Node *callnode);
@@ -1978,6 +2093,7 @@ struct TypeCheck {
     int EnvReach(const MatchInfo &mi);
     void CheckSpecBody(FnSpec *spec, vector<Val> *argvals, Line callline);
     void RecordReturn(FnSpec *tspec, vector<Val> &vals, Node *at);
+    void NamedResultCopyWarning(FnSpec *spec);
     Val RetAltVal(FnSpec *spec, const RootAlt &alt, vector<Val> &argvals, TypeExpr *t, Node *at);
     Val CallResult(Call *c, FnSpec *spec, vector<Val> &argvals);
     void CheckReturn(Return *r);
@@ -2011,6 +2127,7 @@ struct TypeCheck {
     Val CheckAssignedValue(Assign *a, TypeExpr *target, TypeExpr *arr, const Roots &built,
                            Dest dest);
     void CheckRebind(Assign *a, LVal &lv);
+    bool InGenericBody();
     bool PointeeWritable(LVal &lv, Node *at);
     void PointeeAssign(Assign *a, LVal &lv, const LVal &at);
     // `via`: how a store through a reference reached slice variable vd
@@ -2054,6 +2171,7 @@ struct TypeCheck {
                          Node *arg);
     StrLit *ConstStrLit(Node *n);
     const string *EmbedShader(Call *c, vector<Node *> &args);
+    const string *EmbedFile(Call *c, vector<Node *> &args);
 
     // Checked SQL (typecheck_sqlite.h): calls through checked statements,
     // lowered into the unchecked library calls they stand for.
@@ -2070,7 +2188,12 @@ struct TypeCheck {
     Node *SqlDecoder(Call *c, TypeExpr *t, const SqlStmt &st, string_view qname);
     FunVal *SqlBlock(Line line, vector<const char *> params, Block *body);
     void CheckGrowShrink(Node *at, const char *op, Node *recv, const Val &rv);
-    [[noreturn]] void GrowShrinkReceiverError(Node *at, const char *op);
+    void GrowOnlyAssignKnown(Assign *a, const Roots &built, bool whole);
+    // Whether a shrink whose receiver has these roots knows the arrays it
+    // frees: none is static data or a temporary (§5.1).
+    static bool ShrinkRootsKnown(const Roots &roots) {
+        return !roots.Any([](const RootAlt &a) { return !a.root || IsTemp(a.root); });
+    }
     // `what` names the array in the diagnostics; `bound` is its type where vd
     // only bounds it (ShrinkTarget).
     void GrowOnlyShrinkAt(Node *c, const string &op, VarDef *vd, const string &what,
@@ -2164,6 +2287,7 @@ struct TypeCheck {
         bool Covered(VarDef *src, VarDef *root, bool exact);
     };
     bool GrowOnlyTail(TypeExpr *t);
+    bool RefsBesideTail(TypeExpr *t);
     bool IsGrowOnlyRootVar(VarDef *r);
     void RefPointees(TypeExpr *t, vector<TypeExpr *> &out);
     void RefSlots(TypeExpr *t, vector<pair<TypeExpr *, bool>> &out);
@@ -2210,6 +2334,15 @@ struct TypeCheck {
     // specialization records (FnRecord::liveshrinks).
     bool IsClassRoot(VarDef *v) {
         return v && !v->type && !v->isglobal && !IsTemp(v);
+    }
+    // Whether local v is one the body being checked names in a frame on the
+    // compile-time path: its own, or one it is lexically nested in, as a
+    // nested function's or a function value's body is (§7.5, §7.6).
+    bool OuterLocal(VarDef *v) {
+        auto d = Depth(v) - 1;
+        if (d < 0 || d >= (int)scopes.size()) return false;
+        auto vf = FrameOfScope(d);
+        return frames[vf].spec == v->ownerspec && NamesFrame((int)frames.size() - 1, vf);
     }
     bool CallersJudge(VarDef *r, VarDef *root);
     void NoteLiveViews(Node *at, const string &prefix, VarDef *root, const string &what,
@@ -2306,6 +2439,18 @@ struct TypeCheck {
     // The states of the bodies being checked around this one, outermost
     // first: the callers' on the compile-time call path.
     vector<BodyState *> outerbodies;
+    BodyState &StateOf(int fi) {
+        auto b = frames[fi].bodyidx;
+        return b < (int)outerbodies.size() ? *outerbodies[b] : cur;
+    }
+    // A statement's non-fixed-size temporaries, which a call into a
+    // recursive cycle may not be made across (§7.8): NoteTemp marks the
+    // nodes whose values are one, FindTemp finds one in what an operand
+    // evaluated, and JoinCycle asks each frame on the call path.
+    void NoteTemp(Node *n, const Val &v, int cyclecalls);
+    Node *FindTemp(Node *n, bool self = true);
+    void CycleCallTemps(int fi, Node *callnode);
+    void CycleCallResult(FnSpec *spec, Node *callnode);
     // A fresh body state for the extent of a scope; the enclosing one
     // returns when it ends.
     struct BodyScope {
@@ -2355,11 +2500,14 @@ struct TypeCheck {
     // The right-hand side of a whole assignment runs while the array's new
     // contents are built over its old ones (§4.4), so nothing it runs may
     // use the array: name it, or a reference to it, directly or in a
-    // function it calls.
-    void CheckBuiltUses(Node *rhs, Node *lval, const Roots &built, TypeExpr *arr);
-    Alias ReachesBuilt(VarDef *v, VarDef *built, bool exact, TypeExpr *arr, VarDef *&root);
+    // function it calls. The location assigned is `lval`, of type `target`.
+    void CheckBuiltUses(Node *rhs, Node *lval, TypeExpr *target, const Roots &built,
+                        TypeExpr *arr);
+    Alias ReachesBuilt(VarDef *v, VarDef *built, bool exact, Node *lval, TypeExpr *target,
+                       TypeExpr *arr, VarDef *&root);
+    bool MayHoldBuilt(TypeExpr *y, Node *lval, TypeExpr *target);
     template<typename F, typename G> void EachUse(Node *n, F named, G called);
-    bool FieldsApart(Node *use, Node *lval);
+    bool FieldsApart(Node *use, Node *lval, TypeExpr *target);
     bool NamedOutside(FnSpec *spec, vector<VarDef *> &out);
     // Its results for callees whose bodies were all checked, which no
     // later check changes.
@@ -2376,8 +2524,11 @@ struct TypeCheck {
     // ------------------------------------------------------------------
     // The driver: globals in order, then main, then thread entry points.
 
-    TypeCheck(Ast &_ast, bool _library = false, bool _checkonly = false)
-        : ast(_ast), library(_library), checkonly(_checkonly) {
+    TypeCheck(Ast &_ast, bool _library = false, bool _nomain = false) : ast(_ast), library(_library), nomain(_nomain) {
+        // A checked program records values for about two thirds as many
+        // nodes as it parsed to, clones included, so this is the size the
+        // table grows to anyway.
+        nodevals.reserve(ast.allnodes.size());
         temproot = ast.NewVarDef();
         temproot->name = "<temporary>";
         temproot->istemp = true;
@@ -2437,10 +2588,7 @@ struct TypeCheck {
         for (auto t : ast.alltypes)
             if (t->kind == TY_REF && t->ref->pool && !HasGenerics(t->ref->sub)) ValidatePool(t);
         auto mainsf = ast.MainFunction();
-        // A check builds nothing, so a library's root file (a module that
-        // imports its parts) checks on its own: its functions go through
-        // CheckUnreached below as any no call reaches do.
-        if (!mainsf && !library && !checkonly)
+        if (!mainsf && !library && !(nomain && !ast.DeclaresMain()))
             throw CompileError { "program needs exactly one global fn main()" };
         if (mainsf) {
             if (!mainsf->params.empty() || mainsf->has_rets || !mainsf->generics.empty() ||
@@ -2541,7 +2689,11 @@ struct TypeCheck {
     // (RootArg's defaults), concrete and exact, standing for that global
     // (VarDef::classfrom). So the body may shrink or grow the array apart
     // from the others' and store its references wherever a global's may go,
-    // inside a recursive cycle too.
+    // inside a recursive cycle too. A plain reference to the element type of
+    // a pool (§3.9), the one pool of that type, is given a reference into
+    // that pool instead, as a call building a linked structure there would
+    // pass, so the body may store it in the pool's relative links; the
+    // parameters given one share its class, as a call's would.
     void CheckUnreached(SFunction *sf) {
         if (!sf->specs.empty() || sf->isthread || sf->isnested || sf->deferredof) return;
         if (!sf->generics.empty()) return;
@@ -2559,13 +2711,46 @@ struct TypeCheck {
         spec->sf = sf;
         vector<Val> args(sf->params.size());
         auto classes = 0;
+        // The pool a plain reference of type t points into, where exactly one
+        // pool holds its pointee type.
+        auto poolfor = [&](TypeExpr *t) -> VarDef * {
+            if (t->kind != TY_REF || t->ref->lenstorage >= 0) return nullptr;
+            VarDef *found = nullptr;
+            for (auto g : poolglobals) {
+                if (!g->type || !IsArrayKind(g->type, A_GROW) ||
+                    !TypeEq(g->type->arr->sub, t->ref->sub))
+                    continue;
+                if (found) return nullptr;
+                found = g;
+            }
+            return found;
+        };
+        map<VarDef *, int> poolclasses;
         for (size_t i = 0; i < sf->params.size(); i++) {
             auto &p = sf->params[i];
             auto t = Subst(p.type);
             ValidateType(t, sf->line, VT_PARAM);
             spec->argtypes.push_back(t);
             RootArg ra;
+            RootArg noview;
+            noview.cls = -1;
             auto holder = !IsRefOrSlice(t) && HoldsPlainRef(t);
+            if (auto pool = poolfor(t)) {
+                auto &cls = poolclasses[pool];
+                if (!cls) cls = ++classes;
+                ra.cls = cls;
+                ra.concrete = true;
+                ra.writable = true;
+                ra.pool = pool;
+                vector<TypeExpr *> elems, open;
+                ArrayElemsReached(t, elems, open);
+                for (auto e : elems)
+                    if (OneArrayOf(pool, e)) ra.onearray.push_back(e);
+                args[i].Set(pool, true);
+                spec->roots.push_back(ra);
+                spec->views.push_back(noview);
+                continue;
+            }
             if (IsRefOrSlice(t) || holder) {
                 ra.cls = ++classes;
                 ra.concrete = true;
@@ -2591,8 +2776,6 @@ struct TypeCheck {
                 ra.heldexact = !sf->isrec;
             }
             spec->roots.push_back(ra);
-            RootArg noview;
-            noview.cls = -1;
             spec->views.push_back(noview);
         }
         sf->specs.push_back(spec);
@@ -2616,19 +2799,16 @@ struct TypeCheck {
                                      entry->sf->name, ")"));
                 }
                 if (auto c = Is<Call>(n)) {
-                    // The native layers keep one state for the process, and
-                    // SDL's windowing is main-thread only.
+                    // A native layer that keeps one state for the process,
+                    // or SDL's windowing, is main-thread only: its package
+                    // says so in its sidecar (main_thread_only), and the
+                    // error names the module the extern fn was declared in.
                     if (c->spec && c->spec->sf->isextern) {
-                        auto &cname = c->spec->sf->cname;
-                        auto module = cname.rfind("gs_audio_", 0) == 0  ? "audio"
-                                      : cname.rfind("gs_gfx_", 0) == 0  ? "gfx"
-                                      : cname.rfind("gs_phys_", 0) == 0 ? "physics"
-                                      : cname.rfind("gs_ui_", 0) == 0   ? "ui"
-                                                                        : nullptr;
-                        if (module)
-                            Error(n, cat(module, " runs on the main thread only: ",
-                                         c->spec->sf->qname, " is reached from thread_fn ",
-                                         entry->sf->name));
+                        auto fileidx = c->spec->sf->line.fileidx;
+                        if (ast.packages[ast.filepkg[fileidx]].main_thread_only)
+                            Error(n, cat(PathStem(ast.sources[fileidx].first),
+                                         " runs on the main thread only: ", c->spec->sf->qname,
+                                         " is reached from thread_fn ", entry->sf->name));
                     }
                     rec(c->spec);
                     for (auto d : c->dispatch) rec(d);
@@ -2719,8 +2899,8 @@ struct TypeCheck {
 };
 
 // Runs the whole pass; errors throw CompileError.
-inline void TypeCheckProgram(Ast &ast, bool library = false, bool checkonly = false) {
-    TypeCheck tc(ast, library, checkonly);
+inline void TypeCheckProgram(Ast &ast, bool library = false, bool nomain = false) {
+    TypeCheck tc(ast, library, nomain);
 }
 
 }  // namespace goose

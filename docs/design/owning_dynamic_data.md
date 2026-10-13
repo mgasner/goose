@@ -1,5 +1,19 @@
 # Independently owned dynamic data: an editor's open documents
 
+<details>
+<summary>Table of contents</summary>
+
+- [The ordinary owning representation](#the-ordinary-owning-representation)
+- [Documents as runs in a slice pool](#documents-as-runs-in-a-slice-pool)
+- [What the slice pool costs](#what-the-slice-pool-costs)
+- [The other Goose representations](#the-other-goose-representations)
+- [Future option A: bounded independent dynamic stacks](#future-option-a-bounded-independent-dynamic-stacks)
+- [Future option C: opaque API resources](#future-option-c-opaque-api-resources)
+- [Extending slice pools](#extending-slice-pools)
+- [Evaluating what remains](#evaluating-what-remains)
+
+</details>
+
 Research example. The requirement is a runtime-sized set of independently
 editable buffers, with memory reclaimed when each document closes. The
 difficulty is independent growth and release in arbitrary order, rather than
@@ -103,7 +117,7 @@ check or detect an invalid pool assignment earlier.
 
 * **One reservation for all documents.** The pool is one grow-only array on
   one data stack, so all documents together are capped by that stack's
-  reservation (`GS_STACK_RESERVE`, 256 MB by default; spec 10.4 allows up to
+  reservation (`GS_STACK_RESERVE`, 2 GB by default; spec 10.4 allows up to
   2^48 bytes). Exceeding it aborts at the guard region: there is no recoverable
   allocation failure.
 * **The array never shrinks.** Closed documents' runs are reused, but the
@@ -122,10 +136,10 @@ check or detect an invalid pool assignment earlier.
 * **Element types.** Elements are fixed-size, and `realloc_slice` rejects
   element types holding self-relative references, whose offsets a copy would
   leave measuring from the old place (spec 3.9).
-* **Per-operation cost.** Placement scans the free spans in order; adding or
-  removing a span shifts the spans above it (docs/implementation.md 9.7). A
-  workload with thousands of simultaneously free runs pays for both. A slice
-  handed back that the checker cannot place in the pool also pays a range test.
+* **Per-operation cost.** Placement, growth and release each walk a tree of
+  the free spans, so their cost grows with the logarithm of the number of
+  simultaneously free runs (docs/implementation.md 9.7). A slice handed back
+  that the checker cannot place in the pool also pays a range test.
 
 ## The other Goose representations
 

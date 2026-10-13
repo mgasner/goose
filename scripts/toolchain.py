@@ -13,6 +13,7 @@ intent.
 import concurrent.futures
 import ctypes
 import hashlib
+import json
 import os
 import platform
 import re
@@ -78,30 +79,13 @@ def find_goose(explicit=None):
     # Single-config CMake generators put the binary straight in the build
     # directory; the Visual Studio and Xcode generators put it in a
     # per-configuration subdirectory.
-    for sub in ("Debug", "", "Release", "RelWithDebInfo"):
+    # Routine runs should use an optimized compiler when one is available.
+    # Correctness/CI runs that require assertions select Debug with --exe.
+    for sub in ("Release", "RelWithDebInfo", "", "Debug"):
         p = REPO_ROOT / "build" / sub / ("goose" + EXE_SUFFIX)
         if p.exists():
             return p
     sys.exit("no goose binary under build/ -- build it first, or pass --exe")
-
-
-def have_jit(exe):
-    """Whether this compiler was built with the TinyCC backend, answered by
-    running a one-line program through it. That also proves the support
-    library CMake staged alongside it is where the compiler looks for it,
-    which no build-time flag could tell us. A backend that is built in but
-    cannot run the probe stops the run rather than reading as absent, which
-    would otherwise skip every JIT test and pass."""
-    probe = REPO_ROOT / "build" / "jitprobe.goose"
-    probe.parent.mkdir(parents=True, exist_ok=True)
-    write_text(probe, "fn main() { print(7); }\n")
-    code, out, err = run_capture([exe, "--jit", probe])
-    if code == 0 and out.strip() == "7":
-        return True
-    if "built without the TinyCC backend" in err:
-        return False
-    sys.exit(f"{exe} has the TinyCC backend but cannot run a one-line program "
-             f"with it (pass --no-jit to skip JIT runs):\n{err.rstrip()}")
 
 
 # The compiler's own wording for a program the TinyCC backend cannot run yet.
@@ -109,10 +93,16 @@ def have_jit(exe):
 # returns by itself once the backend grows the feature.
 JIT_UNSUPPORTED = "JIT mode does not support"
 
+# What the compiler says when a program needs a C compiler (a native part
+# to build) and the machine has none it can find: a skip, like a layer
+# that was not built in.
+NO_TOOLCHAIN = "cannot find a C compiler"
+NO_CMAKE = "cannot find `cmake`"
+
 
 def have_gfx(exe):
-    """Whether this compiler has the gfx layer built in, answered as have_jit
-    answers for TinyCC: by running a one-line program that calls into it."""
+    """Whether this compiler has the gfx layer built in, answered by running
+    a one-line program that calls into it."""
     probe = REPO_ROOT / "build" / "gfxprobe.goose"
     probe.parent.mkdir(parents=True, exist_ok=True)
     write_text(probe, "import gfx;\nfn main() { print(gfx::available()); }\n")
@@ -120,11 +110,36 @@ def have_gfx(exe):
     return code == 0 and out.strip() == "true"
 
 
+def builtin_modules(exe):
+    """The native modules (audio, gfx, physics, sqlite, ui) whose packages are
+    compiled into this compiler, from `goose toolchain --json`: a program
+    using one of them runs and builds without the package being built first,
+    which is what the runners need to know. Empty when the compiler cannot
+    say."""
+    code, out, _ = run_capture([exe, "toolchain", "--json"])
+    try:
+        return list(json.loads(out).get("builtin", []))
+    except ValueError:
+        return []
+
+
+def have_sql_check(exe):
+    """Whether this compiler checks SQL at compile time (its own SQLite,
+    sqlite_check.h), from `goose toolchain --json`."""
+    code, out, _ = run_capture([exe, "toolchain", "--json"])
+    try:
+        return bool(json.loads(out).get("sql_check", False))
+    except ValueError:
+        return False
+
+
 def native_link(exe, cc, module):
-    """The link inputs a program using a stdlib module with a native layer
-    (gfx, physics, sqlite, ui) needs with this toolchain, as a list for CC.compile's
-    `libs`: the response file cmake/<module>.cmake wrote. An empty list when
-    the compiler was built without that module."""
+    """The link inputs a program using a blessed package's module (gfx,
+    physics, ui, audio, sqlite) needs with this toolchain, as a list for CC.compile's
+    `libs`: the response file the compiler's build wrote for the package. An
+    empty list when the package is not compiled in. The runners build such
+    programs with `goose build`, which finds this itself; this is for the
+    windowed gfx tests, which compile a C program of their own."""
     code, out, _ = run_capture([exe, f"--{module}-link", "msvc" if cc.style == "msvc" else "cc"])
     return [f"@{out.strip()}"] if code == 0 and out.strip() else []
 
@@ -145,21 +160,10 @@ def ui_link(exe, cc):
     return native_link(exe, cc, "ui")
 
 
-def sqlite_link(exe, cc):
-    return native_link(exe, cc, "sqlite")
-
-
-def tls_link(exe, cc):
-    """TLS for the http module's https:// (cmake/tls.cmake): its response
-    file also defines GS_TLS_LINKED, which turns the TLS section of the
-    program's C on. Not built for MSVC."""
-    return [] if cc.style == "msvc" else native_link(exe, cc, "tls")
-
-
-# The stdlib modules with a native layer, and the pattern of a program's own
-# import of one: the layers it links. The ui module draws through gfx, so a
-# program showing its ui imports both.
-NATIVE_MODULES = ("audio", "gfx", "physics", "sqlite", "ui")
+# The blessed packages' modules with a native part, and the pattern of a
+# program's own import of one. The ui module draws through gfx, so a program
+# showing its ui imports both.
+NATIVE_MODULES = ("audio", "gfx", "http", "physics", "sqlite", "ui")
 
 
 def native_imports(text):
@@ -167,15 +171,17 @@ def native_imports(text):
     return [m for m in NATIVE_MODULES if re.search(rf"^import {m};", text, re.M)]
 
 
-# What the compiler says when asked to run a gfx, physics or ui program
-# without that layer built in, and what a gfx test prints when there is no
-# GPU device to run on. The runners report these as skips.
-GFX_UNAVAILABLE = "built without SDL3"
+# What the compiler says when asked for the link inputs of a package it was
+# not built with (the runners then skip that module's fixtures, rather than
+# have the compiler build the package), and what a gfx test prints when
+# there is no GPU device to run on.
+GFX_UNAVAILABLE = "built without the package gfx"
 GFX_NO_DEVICE = "gfx: no GPU device"
-PHYSICS_UNAVAILABLE = "built without Box3D"
-UI_UNAVAILABLE = "built without Nuklear"
-SQLITE_UNAVAILABLE = "built without SQLite"
-AUDIO_UNAVAILABLE = "built without SDL3 audio"
+PHYSICS_UNAVAILABLE = "built without the package physics"
+UI_UNAVAILABLE = "built without the package gfx"
+AUDIO_UNAVAILABLE = "built without the package gfx"
+SQLITE_UNAVAILABLE = "built without the package sqlite"
+HTTP_UNAVAILABLE = "built without the package http"
 
 
 def native_unavailable(module, err):
@@ -189,8 +195,10 @@ def native_unavailable(module, err):
         return UI_UNAVAILABLE in err
     if module == "sqlite":
         return SQLITE_UNAVAILABLE in err
+    if module == "http":
+        return HTTP_UNAVAILABLE in err
     if module == "tls":
-        return False   # a program without TLS still runs; its https:// fails
+        return HTTP_UNAVAILABLE in err
     return PHYSICS_UNAVAILABLE in err
 
 

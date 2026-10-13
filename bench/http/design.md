@@ -1,7 +1,7 @@
 # HTTP server benchmarks
 
-This suite measures the Goose HTTP server (`stdlib/http.goose`, on
-`src/runtime/runtime_net.h`) against standard C servers. It also measures the
+This suite measures the Goose HTTP server (the http package,
+`packages/http/http.goose`, on its C layer `src/http_layer.c`) against standard C servers. It also measures the
 Goose request parser by itself against a standard C parser. The server's
 design is `docs/design/http.md`.
 

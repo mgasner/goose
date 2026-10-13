@@ -10,22 +10,17 @@ relative links, and variable-size enums, without heap allocation. Each file
 starts with a comment explaining what it demonstrates. The files are numbered
 in reading order. The later samples assume familiarity with the first six.
 
-Build and run any sample from this directory using a C compiler, with the
-runtime, which `--emit-runtime` writes, compiled once:
+Build any sample into an executable beside it with the C compiler the Goose
+compiler finds on the machine, or run it straight away inside the compiler's
+process:
 
-    goose --emit-runtime goose_runtime.c && cc -c goose_runtime.c
-    goose -o tour.c 01_tour.goose && cc tour.c goose_runtime.o -o tour -lm -pthread && ./tour
-
-    goose --emit-runtime goose_runtime.c && cl /c goose_runtime.c
-    goose -o tour.c 01_tour.goose && cl tour.c goose_runtime.obj && tour
-
-`--standalone` writes a C file that holds the runtime itself and builds on its
-own.
-
-With the TinyCC backend, omit `-o` to compile and run the program inside the
-Goose compiler's process:
-
+    goose build 01_tour.goose && ./01_tour
     goose 01_tour.goose
+
+The C the compiler writes can also be built by hand (`goose -o tour.c
+01_tour.goose`, linked with the runtime `goose --emit-runtime` writes, or
+`--standalone` for a C file that holds the runtime itself); `goose build
+--dry-run` prints those commands.
 
 `run_samples.py` compiles and runs them all and compares their output with
 `expected/`, both ways where the backend is available; `test/run_tests.py`
@@ -90,7 +85,7 @@ calls it, so they are compiled and run as part of the test suite.
 
 | Sample | What it shows |
 |---|---|
-| [33_sqlite_inventory](33_sqlite_inventory.goose) | A shop's inventory with the `sqlite` module: a writer `thread_fn` owns the database and applies commands sent over a typed queue, while the main thread reports through a read-only connection of its own to the same WAL file. Parameters as arguments, rows built straight into structs by `query`, the scalar forms, SQLite's own errors as values, and a sale as a transaction that a `return` leaves early, rolled back at the connection's next use. Run with `sqlite_inventory < data/sqlite_inventory.stdin`; build with `cc ... @$(goose --sqlite-link cc)`. |
+| [33_sqlite_inventory](33_sqlite_inventory.goose) | A shop's inventory with the `sqlite` module: a writer `thread_fn` owns the database and applies commands sent over a typed queue, while the main thread reports through a read-only connection of its own to the same WAL file. Parameters as arguments, rows built straight into structs by `query`, the scalar forms, SQLite's own errors as values, and a sale as a transaction that a `return` leaves early, rolled back at the connection's next use. Run with `sqlite_inventory < data/sqlite_inventory.stdin`; build with `goose build`. Needs SQLite (`scripts/fetch_sqlite.py`) and a compiler built with the sqlite package (`GOOSE_BUILTIN_LIBS`). |
 
 ## Serialization
 
@@ -108,14 +103,14 @@ calls it, so they are compiled and run as part of the test suite.
 
 | Sample | What it shows |
 |---|---|
-| [27_gfx_cube](27_gfx_cube.goose) | A window and a spinning, lit cube with the `gfx` module: GLSL shaders written in the program as `"""` strings and compiled in by `embed_shader`, vertex and index buffers from `bytes_of`, a uniform block as a packed struct, a depth buffer, the arrow keys; saves its last frame as `gfx_cube.png`. Needs a compiler built with SDL3 (`third_party/SDL`); the test runner draws it off screen. |
-| [28_physics_boxes](28_physics_boxes.goose) | Boxes fall into a walled arena containing two pyramids and a rotating arm. The `physics` module simulates them with Box3D on up to eight worker threads. Each frame retrieves all transforms in one call and writes them into an instance buffer. Each box is drawn as a unit cube with sunlight and shadows. Shaders are `"""` strings in the program; the two vertex shaders share their inputs through one global part. Space triggers an explosion, the mouse controls the view, and Up and Down adjust the rate at which boxes fall. Once the arena contains `--boxes` boxes, the oldest are returned to the top. Needs a compiler built with SDL3 and Box3D (`third_party/box3d`); the test runner draws 120 frames off screen. |
+| [27_gfx_cube](27_gfx_cube.goose) | A window and a spinning, lit cube with the `gfx` module: GLSL shaders written in the program as `"""` strings and compiled in by `embed_shader`, vertex and index buffers from `bytes_of`, a uniform block as a packed struct, a depth buffer, the arrow keys; saves its last frame as `gfx_cube.png`. Needs a compiler built with the gfx package (`GOOSE_BUILTIN_LIBS`); the test runner draws it off screen. |
+| [28_physics_boxes](28_physics_boxes.goose) | Boxes fall into a walled arena containing two pyramids and a rotating arm. The `physics` module simulates them with Box3D on up to eight worker threads. Each frame retrieves all transforms in one call and writes them into an instance buffer. Each box is drawn as a unit cube with sunlight and shadows. Shaders are `"""` strings in the program; the two vertex shaders share their inputs through one global part. Space triggers an explosion, the mouse controls the view, and Up and Down adjust the rate at which boxes fall. Once the arena contains `--boxes` boxes, the oldest are returned to the top. Needs a compiler built with the gfx and physics packages (`GOOSE_BUILTIN_LIBS`); the test runner draws 120 frames off screen. |
 
 ## Windows and widgets
 
 | Sample | What it shows |
 |---|---|
-| [29_ui_todo](29_ui_todo.goose) | A to-do list and a color mixer with the `ui` module: Nuklear's immediate-mode widgets drawn through `gfx`. Each frame lists the windows and widgets and reads back what the user did to them: a text field committed with Enter, buttons, check boxes, options, a menu bar, a tooltip, a progress bar, a color picker and properties; the check marks recolored through Nuklear's color table, text in Roboto from the Nuklear submodule, and the whole ui scaled up and down, its font baked again at each scale. Saves its last frame as `ui_todo.png`. Needs a compiler built with SDL3 and Nuklear (`third_party/nuklear`); the test runner draws 30 frames off screen. |
+| [29_ui_todo](29_ui_todo.goose) | A to-do list and a color mixer with the `ui` module: Nuklear's immediate-mode widgets drawn through `gfx`. Each frame lists the windows and widgets and reads back what the user did to them: a text field committed with Enter, buttons, check boxes, options, a menu bar, a tooltip, a progress bar, a color picker and properties; the check marks recolored through Nuklear's color table, text in Roboto from the Nuklear submodule, and the whole ui scaled up and down, its font baked again at each scale. Saves its last frame as `ui_todo.png`. Needs a compiler built with the gfx package (`GOOSE_BUILTIN_LIBS`); the test runner draws 30 frames off screen. |
 
 ## A small game
 
@@ -153,8 +148,15 @@ world deliberately omits mobs, hunger, damage, tool wear, and flowing water.
 |---|---|
 | [31_mini_doom](31_mini_doom.goose) | A playable Freedoom E1M1 using `gfx` and `audio`: checked little-endian WAD parsing, palette and patch decoding, a texture atlas, BSP-clipped floor polygons, textured walls, billboard sprites, sliding collision, stairs, falling, doors, lifts, pickups, combat, and one update/draw loop. Includes pistol, shotgun, chaingun and fists, four enemy types, imp fireballs, exploding barrels, damaging floors, secrets, the blue key and the exit. Uses the supplied `data/freedoom1-e1m1.wad`. |
 
-Run `goose samples/31_mini_doom.goose` from the repository root, or
-`goose 31_mini_doom.goose` from `samples`. It starts directly in the level.
+Run `goose samples/31_mini_doom.goose` from the repository root, or pass the
+source's path from any working directory. It starts directly in the level.
+Its default WAD path is `data/freedoom1-e1m1.wad` under `resource_dir()`:
+beside the entry source for JIT, or beside a compiled executable for AOT.
+When distributing the executable, include that `data` directory, or use
+`--wad <path>` to select an external WAD. The sample runner supplies `--wad`
+because it builds executables outside the sample's asset directory.
+The recursive BSP walk uses caller-owned growable scratch, restoring its
+length on return; clipping has no fixed polygon-corner limit.
 WASD walks, Shift runs, mouse or Left/Right turns, E or Space uses doors
 and switches, and left mouse or Ctrl fires. Select fists, pistol, shotgun,
 or chaingun with 1–4 (the latter two must be collected). Tab toggles the map;
@@ -167,17 +169,14 @@ switch. Lifts lower when used or crossed, wait, and carry you back up. Some
 walls are secret doors. The automap shows the whole map and does not pause
 play. Blue lines mark locked doors; yellow lines mark triggers.
 
-`-- --test` runs the checks without a graphics window or sound device,
-including automated walks to the key and exit with enemies removed. The
-sample runner uses `-- --test --frames 30` to also render a repeatable PNG.
+`-- --frames 30` runs for thirty frames with a fixed timestep and saves a PNG.
+The sample runner uses this mode for its rendering smoke check.
 `-- --silent` disables playback; device failure also permits silent play.
-`-- --wad PATH` selects the supplied WAD when running from another directory.
-The checks deliberately target this particular level.
+`-- --wad PATH` overrides the default WAD; relative paths use the working directory.
 
 This is an independent, approximate game, not a compatible Doom engine.
 It omits music, saves, multiplayer, jumping, vertical aiming, monster
 pathfinding, directional monster art and the larger weapon set. Unimplemented
 weapon/ammo pickups provide bullets; a chainsaw pickup does the same. The
 WAD's own sprites, font and sounds keep the sample self-contained beyond
-that one asset file. See [implementation and API feedback](mini_doom_notes.md)
-for design choices, validation, and possible improvements to Goose.
+that one asset file.

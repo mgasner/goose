@@ -5,6 +5,7 @@
 // and the loop over an OpenAI-compatible provider.
 import std;
 import json;
+import http;   // the package the mock provider and inference run on, named for the runner
 import inference;
 import agent;
 import mock.provider;

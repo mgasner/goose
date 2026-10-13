@@ -1,7 +1,11 @@
 # HTTP/1.1: server and client
 
-Status: implemented. The library is `stdlib/http.goose`, built on
-`src/runtime/runtime_net.h`. The guide is [`../http.md`](../http.md), and the
+Status: implemented. The library is the blessed package `http`
+(`packages/http`): `http.goose`, built on its native part,
+`src/http_layer.c`. It began as a stdlib module over a socket layer in the
+runtime (`runtime_net.h`); with upstream's package model it moved, C and
+all, into a package, as sqlite did. The C used nothing of the runtime, so
+none of it stayed behind. The guide is [`../http.md`](../http.md), and the
 measurements are in `bench/http/` (`design.md` there is the plan,
 `results.md` the numbers).
 
@@ -15,7 +19,7 @@ followed, sharing the parser's pieces.
 
 HTTP/2 and WebSockets are out of scope. TLS came later, for clients of
 hosted APIs that only speak HTTPS (the `inference` library). It is built on
-Mbed TLS, and is an optional part of the build ([TLS](#tls) below).
+Mbed TLS, and is an optional part of the package ([TLS](#tls) below).
 
 ## What Goose gives us, and what it rules out
 
@@ -32,7 +36,7 @@ Four facts from the spec and from the spawn benchmarks
    once, and each one runs `serve` forever: the nginx shape.
 3. **Per-connection buffers cannot be Goose resizables.** Each resizable is
    its own region (an `mmap` of a 256 MB reserve plus a guard). 10k
-   connections would mean 10k regions. So the runtime keeps per-connection
+   connections would mean 10k regions. So the C layer keeps per-connection
    state: the socket, input not yet parsed, and output the socket did not
    take yet. A worker has just two Goose buffers, one for input and one for
    output, and reuses them for every connection.
@@ -43,19 +47,19 @@ Four facts from the spec and from the spawn benchmarks
 ## Layers
 
 ```
- Goose  stdlib/http.goose   parse, serve<F>, Request/Response, the client
+ Goose  http.goose          parse, serve<F>, Request/Response, the client
  ------ extern fn boundary  scalars, u8 slices, u8[>..]& builders
- C      runtime_net.h       gs_net_*: listen, the engine, client sockets
-        runtime_tls.h       gs_tls_*: the program's TLS table, or none
-        src/tls/            the TLS layer over Mbed TLS (optional)
+ C      src/http_layer.c    gs_http_*: listen, the engine, client sockets
+        src/tls_layer.c     the TLS layer over Mbed TLS (optional)
  OS     kqueue (macOS, BSD) | epoll (Linux) | Windows: not yet (calls fail)
 ```
 
-The boundary carries only scalars, `u8` slices and builders. C never names a
-Goose type, so the same runtime object serves every program, and the
-standalone build declares nothing twice.
+The boundary carries only scalars, `u8` slices and builders, as
+`src/http_api.h` lists them (`test/api_check.py` checks `http.goose`
+against it). C never names a Goose type beyond the slice and builder
+layouts the header spells out, and uses nothing of the runtime.
 
-## The engine: `runtime_net.h`
+## The engine: `src/http_layer.c`
 
 The engine is one worker's event loop. Each engine is a kqueue or epoll
 instance, a listener, and a table of connections. A connection handle is
@@ -64,16 +68,16 @@ Engines are numbered in a process-wide table, so a stray number is refused
 rather than dereferenced. The engine moves bytes; it knows nothing of HTTP.
 
 ```c
-int64_t gs_net_wait(int64_t engine, gs_rref buf);   /* blocks; appends a connection's input */
-uint8_t gs_net_write(int64_t engine, int64_t conn, sl_u8 a, sl_u8 b);   /* writev a then b */
-void    gs_net_done(int64_t engine, int64_t conn, sl_u8 rest, int64_t need, uint8_t close);
+int64_t gs_http_wait(int64_t engine, gs_http_builder buf);   /* blocks; appends a connection's input */
+uint8_t gs_http_write(int64_t engine, int64_t conn, gs_http_bytes a, gs_http_bytes b);   /* writev a then b */
+void    gs_http_done(int64_t engine, int64_t conn, gs_http_bytes rest, int64_t need, uint8_t close);
 ```
 
 - **`wait`.**
   - It reads a ready connection's input straight onto the top of the
     worker's input builder: first what was kept from last time, then what
-    the socket has. Writing to a data stack's top is what `gs_bld_append`
-    does, and the region is reserved and committed on touch.
+    the socket has. Writing to a data stack's top is what the runtime's
+    `gs_bld_append` does (the layer has its own copy, `gs_http_append`), and the region is reserved and committed on touch.
   - The common case of a whole request arriving in one segment therefore
     costs no copy in C.
   - If the program said it needs `need` bytes (a body's length), the engine
@@ -107,7 +111,7 @@ void    gs_net_done(int64_t engine, int64_t conn, sl_u8 rest, int64_t need, uint
   `[0, 0, 0, 2000]` connections arrived per socket. nginx's `reuseport`
   shows it too: under load one worker runs at 80% CPU and three sit idle.
 
-So `gs_net_listen` keeps a small registry on macOS and the BSDs. The first
+So `gs_http_listen` keeps a small registry on macOS and the BSDs. The first
 call for an address opens the socket, and later calls for the same address
 get that socket back. Every engine waits on it, and the accept one of them
 wins is that worker's connection. The program is written the same on every
@@ -170,7 +174,7 @@ A handler fills in a `Response`:
 - `body`, the struct's one resizable, at its tail.
 
 `serve` writes the status line from a table, then `Server`, the `Date` the
-runtime formats once a second, `Content-Type`, `Content-Length`,
+C layer formats once a second, `Content-Type`, `Content-Length`,
 `Connection: close` when closing, the extra lines and the body. A body of
 16 KB or more goes out with its head through `writev`, without being
 copied. Smaller ones are copied into the batch.
@@ -199,49 +203,40 @@ on a connection the `Client` keeps open while the server allows it.
 
 ### Where it lives
 
-TLS is three pieces:
+TLS is two pieces, both in the http package:
 
-- **The layer** (`src/tls/tls_layer.c`, over Mbed TLS 3.6). It is plain C
+- **The layer** (`src/tls_layer.c`, over Mbed TLS 3.6). It is plain C
   that knows nothing of Goose. It opens client sessions over a connected
   socket and server sessions over an accepted one, and steps, reads and
-  writes them. `src/tls/tls_api.h` lists its functions.
-- **The runtime** (`runtime_net.h`). The engine and the client sockets call
-  the layer through a table of its functions, `gs_net_tls_ops`, which the
-  program passes in. The runtime never names Mbed TLS.
-- **The TLS section** (`runtime_tls.h`). This is a few lines of the
-  *program*, spliced in after `runtime_ext.h` when the program calls a
-  `gs_tls_` function. Built with `GS_TLS_LINKED`, it declares the layer's
-  functions and hands the runtime their table. Built without it, it hands
-  over none, and the runtime fails `https://` and `serve_tls` with an error
-  that says how to build with TLS.
+  writes them. `src/tls_api.h` lists its functions.
+- **The engine and client sockets** (`src/http_layer.c`). They call the
+  layer through a table of its functions, `gs_net_tls_ops`, set when the
+  package is built with the layer (`GS_HTTP_TLS`) and empty otherwise, so
+  they are written once for TCP and TLS and never name Mbed TLS. Without the
+  layer, `https://` and `serve_tls` fail with an error that says how to
+  build with TLS; `gs_http_tls_available` reports which it is.
 
-Why the program decides, not the runtime:
+TLS is part of the http package rather than a package of its own because
+the engine calls it from C, and one package's C part may not call
+another's (docs/design/packages.md §5.5).
 
-- **Programs without TLS stay as they were.** A program that uses
-  `http://` builds and links with nothing more, as it did before TLS.
-  Linking TLS whenever `fetch` is reached would add 580 KB and a link flag
-  to every client.
-- **The runtime object stays one object.** A program built with `-o` links
-  a runtime object (`goose --emit-runtime`) that is compiled once and shared.
-  If the runtime chose, that object would need a TLS build and a plain one.
-- **The switch is one define.** `goose --tls-link cc` names a response file
-  holding the archive and `-DGS_TLS_LINKED=1`, so `cc prog.c rt.c
-  @link-cc.rsp` gets both. A JIT run defines it, and registers the layer's
-  symbols with TinyCC, when the compiler has the layer built in.
-
-Mbed TLS is vendored the way SQLite is. `scripts/fetch_mbedtls.py` fetches
-a pinned release and checks its SHA-256. `cmake/tls.cmake` builds it into
-`goose_tls` with `src/tls/mbedtls_user_config.h`, which turns threading on
-and DTLS, renegotiation and debugging off. Without it, or with
-`-DGOOSE_TLS=OFF`, nothing else changes. Mbed TLS was chosen over OpenSSL
-because it builds from source with no configure step, and over BearSSL
-because it does TLS 1.3. The 3.6 branch is supported until at least March
-2027; 4.x changes the API.
+Mbed TLS is vendored the way SQLite is: upstream's package model fetches
+packages from git, but has no fetcher for a third-party release tarball, so
+`scripts/fetch_mbedtls.py` fetches a pinned release into
+`third_party/mbedtls` and checks its SHA-256. The package's
+`CMakeLists.txt` looks for it in its own `third_party/mbedtls`, then the
+Goose tree's (or `GOOSE_MBEDTLS_DIR`), and builds it into
+`goose_http_mbedtls` with `src/mbedtls_user_config.h`, which turns
+threading on and DTLS, renegotiation and debugging off. Without it, or with
+`-DGOOSE_HTTP_TLS=OFF`, the package builds without TLS and nothing else
+changes. Mbed TLS was chosen over OpenSSL because it builds from source with
+no configure step, and over BearSSL because it does TLS 1.3. The 3.6 branch
+is supported until at least March 2027; 4.x changes the API.
 
 ### The client
 
 `fetch` connects as before. For `https://` it then opens a session over the
-socket (`gs_tls_client`) and sends and receives through it.
+socket (`gs_http_tls_client`) and sends and receives through it.
 
 - **Verification.** Verification is required. The CAs are the PEM bundle in
   `Client.ca_file`, or the system's: `SSL_CERT_FILE`, then the usual paths
@@ -253,7 +248,7 @@ socket (`gs_tls_client`) and sends and receives through it.
   says what it does.
 - **Blocking.** The socket stays blocking, with `SO_RCVTIMEO` and
   `SO_SNDTIMEO`. A timeout inside the session is an error, not a retry.
-- **Receiving.** `gs_net_tls_recv` blocks for one record, then takes what
+- **Receiving.** `gs_http_tls_recv` blocks for one record, then takes what
   the session already holds and what the socket has without waiting, up to
   what the caller asked for. So a large body is still parsed a logarithmic
   number of times, not once per 16 KB record.
@@ -340,9 +335,11 @@ made them. It covers:
 - a server whose certificate or key cannot be loaded;
 - three client threads against two server workers.
 
-The runner builds it with `--tls-link` and skips it when the compiler has
-no TLS. `stdlib_http` runs without the layer linked, and checks that
-`https://` then fails with the error that says so.
+The runner builds it as any program using the http package, and skips it
+unless the package is built in with TLS (where `third_party/mbedtls` is
+there). `stdlib_http` checks that `https://` to a closed port fails with
+the error that fits the build: no connection with TLS, or the one saying
+TLS is not built in without it.
 
 ## A compiler bug found on the way
 

@@ -5,6 +5,7 @@
 #endif
 #include "../src/includes.h"
 #include "../src/utils.h"
+#include "../src/small_vector.h"
 #include "../src/lexer.h"
 #include "../src/ast.h"
 

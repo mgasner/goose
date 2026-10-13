@@ -1,15 +1,16 @@
 # HTTP in Goose
 
 `import http;` gives a Goose program an HTTP/1.1 server and client. Both are
-written in Goose (`stdlib/http.goose`), on a small socket layer in the
-runtime (`src/runtime/runtime_net.h`). The design and its reasons are in
+written in Goose (`packages/http/http.goose`, the blessed package `http`),
+on a small socket layer in C, the package's native part
+(`packages/http/src/http_layer.c`). The design and its reasons are in
 [`design/http.md`](design/http.md). How fast it is, measured against nginx
 and a libuv server in C, is in
 [`../bench/http/results.md`](../bench/http/results.md).
 
 The server and client run on macOS, Linux and the BSDs. On Windows every
 call fails, as it does when a port cannot be opened. Both speak HTTPS when
-Goose is built with Mbed TLS (§3): the client takes `https://` URLs, and
+the http package is built with Mbed TLS (§3): the client takes `https://` URLs, and
 `serve_tls` serves with a certificate and key.
 
 Threads need a C compiler: build with `goose -o prog.c --standalone
@@ -229,25 +230,29 @@ for the same scheme, host and port.
 
 ### Building with TLS
 
-TLS is Mbed TLS 3.6, an optional part of the build, fetched rather than
-committed ([`../third_party/mbedtls/README.md`](../third_party/mbedtls/README.md)):
+TLS is Mbed TLS 3.6, an optional part of the http package, fetched rather
+than committed ([`../third_party/mbedtls/README.md`](../third_party/mbedtls/README.md)):
 
 ```
 python scripts/fetch_mbedtls.py      # downloads 3.6.7 and checks its SHA-256
-cmake -B build && cmake --build build
+cmake -B build -DGOOSE_BUILTIN_LIBS=all && cmake --build build
 ```
 
-How a program gets TLS depends on how it is run:
+The package's CMakeLists finds Mbed TLS in its own `third_party/mbedtls`, or
+the Goose tree's, and builds the TLS layer into the package's native part
+when it is there (`-DGOOSE_HTTP_TLS=OFF` leaves it out). Every program using
+`http` then has it, however it is built: `goose build` and `goose run` link
+or load the package as they do any other, and C written with `-o` links what
+`goose --http-link cc` names:
 
-- **In-process (JIT) runs** have it when the compiler was built with it.
-- **C written with `-o`** links what `goose --tls-link cc` names. The file
-  also defines `GS_TLS_LINKED`, which turns TLS on in the program's C, so
-  compile and link in one command:
+```
+goose -o prog.c prog.goose && goose --emit-runtime rt.c
+cc prog.c rt.c @$(goose --http-link cc) -o prog
+```
 
-  ```
-  goose -o prog.c prog.goose && goose --emit-runtime rt.c
-  cc prog.c rt.c @$(goose --tls-link cc) -o prog
-  ```
+TLS is part of the http package rather than a package of its own because
+the engine calls the TLS layer from C, and one package's C may not call
+another's (docs/design/packages.md §5.5).
 
 Without TLS a program still builds and runs. `https://` and `serve_tls`
 fail before connecting or listening, and the error says how to build with

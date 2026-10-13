@@ -1,5 +1,19 @@
 # Column arrays: minimal struct-of-arrays storage
 
+<details>
+<summary>Table of contents</summary>
+
+- [Why a new array kind](#why-a-new-array-kind)
+- [Rules](#rules)
+- [What the checker does not need](#what-the-checker-does-not-need)
+- [Representation](#representation)
+- [Implementation](#implementation)
+- [Measurements](#measurements)
+- [Possible extensions, ordered by expected benefit](#possible-extensions-ordered-by-expected-benefit)
+- [Open questions](#open-questions)
+
+</details>
+
 This proposal adds column arrays. A `T[||..]` would store a struct element
 as one array per leaf field, each on its own data stack, with one shared
 length. Elements could be copied out as ordinary structs or written through

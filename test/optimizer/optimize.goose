@@ -463,6 +463,14 @@ recursive fn rec_mark(n: RecNode&, d: i64) {         // Valueless base case.
     if l { rec_mark(l, d - 1); }
 }
 
+// UFCS self-calls, the receiver an array viewed as a slice at the outer
+// call and a slice parameter at the inner ones.
+recursive fn rec_half(xs: i64[:], lo: i64, hi: i64) -> i64 {
+    if hi - lo == 1 { return xs[lo]; }
+    let mid = (lo + hi) / 2;
+    return xs.rec_half(lo, mid) * 2 + xs.rec_half(mid, hi);
+}
+
 // Left alone: the test reads a local, which the call site cannot see.
 recursive fn rec_local(n: RecNode&, d: i64) -> i64 {
     let stop = d <= 0;
@@ -485,6 +493,316 @@ fn recursion_op() {
     print(rec_marks);                                // 3
     print(rec_local(root, 3));                       // 8
     print(rec_even(7) + rec_odd(7));                 // 0 + 1
+    var bits: i64[8] = [1, 0, 1, 1, 0, 0, 1, 0];
+    print(bits.rec_half(0, 8));                      // 16
+}
+
+// --- guarded base-case inlining ---------------------------------------------
+// The other languages' shape: every self-call inside an `if` with no else
+// that compares parameters. Each self-call site gets the body without the
+// if, for where the test fails. The `gb_visits += 1` that each body starts
+// with shows how many copies of it there are (run_tests.py).
+
+var gb_visits = 0;
+var gb_limit = 0;
+var gb_pool: RecNode[>..];
+
+recursive fn gb_build(depth: i64, v: i64) -> RecNode& {
+    gb_visits += 1;
+    let n .= gb_pool.push(RecNode { v: v });
+    if depth > 0 {
+        n.l .= gb_build(depth - 1, v * 2);
+        n.r .= gb_build(depth - 1, v * 2 + 1);
+    }
+    return n;
+}
+
+recursive fn gb_walk(n: RecNode&, d: i64) {          // Valueless.
+    gb_visits += 1;
+    if d > 0 {
+        let l = n.l;
+        if l { gb_walk(l, d - 1); }
+    }
+}
+
+recursive fn gb_count(n: RecNode&, d: i64) -> i64 {  // The result as the tail.
+    gb_visits += 1;
+    var t = n.v;
+    if d != 0 {
+        let l = n.l;
+        if l { t += gb_count(l, d - 1); }
+        let r = n.r;
+        if r { t += gb_count(r, d - 1); }
+    }
+    t
+}
+
+// Left alone: the test reads a global or a node, which the statements before
+// it may change before the callee tests it, or it does arithmetic, which may
+// abort, or the body assigns the parameter it reads.
+recursive fn gb_global(n: RecNode&, d: i64) -> i64 {
+    gb_visits += 1;
+    var t = n.v;
+    if d > gb_limit {
+        let l = n.l;
+        if l { t += gb_global(l, d - 1); }
+        let r = n.r;
+        if r { t += gb_global(r, d - 1); }
+    }
+    return t;
+}
+
+recursive fn gb_field(n: RecNode&, d: i64) -> i64 {
+    gb_visits += 1;
+    var t = n.v;
+    if n.v < 8 && d > 0 {
+        let l = n.l;
+        if l { t += gb_field(l, d - 1); }
+        let r = n.r;
+        if r { t += gb_field(r, d - 1); }
+    }
+    return t;
+}
+
+recursive fn gb_arith(n: RecNode&, d: i64) -> i64 {
+    gb_visits += 1;
+    var t = n.v;
+    if d - 1 >= 0 {
+        let l = n.l;
+        if l { t += gb_arith(l, d - 1); }
+        let r = n.r;
+        if r { t += gb_arith(r, d - 1); }
+    }
+    return t;
+}
+
+// UFCS self-calls, the receiver a reference parameter: an arena by index,
+// pushed through the reference, and nodes walked through optional links.
+struct GbSlot { v: i64, l: i64 = -1, r: i64 = -1 }
+
+recursive fn gb_arena(arena: GbSlot[>..]&, depth: i64, v: i64) -> i64 {
+    gb_visits += 1;
+    let idx = arena.len;
+    arena.push(GbSlot { v: v });
+    if depth > 0 {
+        let l = arena.gb_arena(depth - 1, v * 2);
+        let r = arena.gb_arena(depth - 1, v * 2 + 1);
+        let s .= arena[idx];
+        s.l = l;
+        s.r = r;
+    }
+    return idx;
+}
+
+recursive fn gb_method(n: RecNode&, d: i64) -> i64 {
+    gb_visits += 1;
+    var t = n.v;
+    if d > 0 {
+        let l = n.l;
+        if l { t += l.gb_method(d - 1); }
+        let r = n.r;
+        if r { t += r.gb_method(d - 1); }
+    }
+    return t;
+}
+
+recursive fn gb_var(n: RecNode&, var d: i64) -> i64 {
+    gb_visits += 1;
+    var t = n.v;
+    d -= 1;
+    if d >= 0 {
+        let l = n.l;
+        if l { t += gb_var(l, d); }
+        let r = n.r;
+        if r { t += gb_var(r, d); }
+    }
+    return t;
+}
+
+fn guarded_op() {
+    let root .= gb_build(3, 1);
+    print(gb_pool.len, " ", gb_visits);              // 15 15
+    gb_walk(root, 2);
+    print(gb_visits);                                // 18
+    print(gb_count(root, 3), " ", gb_count(root, 1)); // 120 6
+    print(gb_global(root, 3), " ", gb_field(root, 3)); // 120 120
+    print(gb_arith(root, 3), " ", gb_var(root, 3));  // 120 120
+    print(gb_visits);                                // 96
+    var arena: GbSlot[>..] = [];
+    arena.gb_arena(3, 1);
+    var sum = 0;
+    for s in arena { sum += s.v + s.l + s.r; }
+    print(arena.len, " ", sum, " ", arena[0].l, " ", arena[0].r); // 15 209 1 8
+    print(root.gb_method(3), " ", gb_visits);        // 120 126
+}
+
+// --- inlining heuristics ------------------------------------------------------
+// A callee whose one call is in a cold branch -- the else of a guard, the body
+// of an early return -- and that only the single-use rule would inline stays
+// out of line. A wrapper called twice from loops is inlined where the use rule
+// alone would leave it a call, as it does its twin called twice outside loops.
+// A callee used once on a branch of a small function called from several
+// loops stays out of line, so that the function stays small enough to be
+// inlined there; one it calls on every run is inlined into it, which then
+// stays a call (run_tests.py checks which bodies are left).
+
+fn ih_rare(x: i64) -> i64 {
+    var t = 0;
+    for i in 1..20 {
+        if i % 3 == 0 { t += x * i; } else if i % 5 == 0 { t -= x / i; } else { t ^= i; }
+        if t > 1000 { t = t % 997 + x; }
+        if t < -1000 { t = -(t % 991) - x; }
+    }
+    for i in 1..9 {
+        if (t + i) % 4 == 1 { t += x; } else if i % 3 == 2 { t = t / 2 - i; } else { t -= i * 3; }
+        if t > 2000 { t = t % 1999 + i; }
+    }
+    return t;
+}
+fn ih_early(x: i64) -> i64 {
+    var t = 1;
+    for i in 1..20 {
+        if i % 2 == 0 { t = t * 3 + x; } else if i % 7 == 0 { t -= x * i; } else { t += i; }
+        if t > 5000 { t = t % 4999 - x; }
+        if t < -5000 { t = -(t % 4993) + x; }
+    }
+    for i in 1..9 {
+        if (t - i) % 4 == 3 { t -= x; } else if i % 3 == 1 { t = t / 3 + i; } else { t += i * 5; }
+        if t < -3000 { t = t % 2999 - i; }
+    }
+    return t;
+}
+fn ih_check(x: i64) -> i64 {
+    guard x >= 0 else { return ih_rare(x); }
+    if x > 100 { return ih_early(x); }
+    return x * 2;
+}
+
+fn ih_wrap(a: i64[:], k: i64) -> i64 {
+    let i = k % a.len;
+    var v = a[i];
+    if v < 0 { v = -v; }
+    if v > 10 { v = v % 10 + k % 3; }
+    if v == 7 { v = k % 5 + 1; }
+    if (v + i) % 2 == 1 { v += a[0] % 4; }
+    return v * 2 + i;
+}
+fn ih_twin(a: i64[:], k: i64) -> i64 {
+    let i = k % a.len;
+    var v = a[i];
+    if v < 0 { v = -v; }
+    if v > 10 { v = v % 10 + k % 3; }
+    if v == 7 { v = k % 5 + 1; }
+    if (v + i) % 2 == 1 { v += a[0] % 4; }
+    return v * 2 + i;
+}
+
+fn ih_slow(x: i64) -> i64 {
+    var t = x;
+    for i in 1..20 {
+        if i % 3 == 0 { t += x * i; } else if i % 5 == 0 { t -= x / i; } else { t ^= i; }
+        if t > 1000 { t = t % 997 + x; }
+        if t < -1000 { t = -(t % 991) - x; }
+    }
+    for i in 1..9 {
+        if (t + i) % 4 == 1 { t += x; } else if i % 3 == 2 { t = t / 2 - i; } else { t -= i * 3; }
+        if t > 2000 { t = t % 1999 + i; }
+    }
+    return t;
+}
+fn ih_key(a: i64[:], k: i64) -> i64 {
+    var v = a[k % a.len];
+    if v >= 0 { v = v * 2 + k; } else { v = ih_slow(v); }
+    return v + k;
+}
+fn ih_work(x: i64) -> i64 {
+    var t = x;
+    for i in 1..20 {
+        if i % 2 == 0 { t = t * 3 + x; } else if i % 7 == 0 { t -= x * i; } else { t += i; }
+        if t > 5000 { t = t % 4999 - x; }
+        if t < -5000 { t = -(t % 4993) + x; }
+    }
+    for i in 1..9 {
+        if (t - i) % 4 == 3 { t -= x; } else if i % 3 == 1 { t = t / 3 + i; } else { t += i * 5; }
+        if t < -3000 { t = t % 2999 - i; }
+    }
+    return t;
+}
+fn ih_front(a: i64[:], k: i64) -> i64 {
+    let v = ih_work(a[k % a.len]);
+    return v + k;
+}
+
+fn heuristics_op() {
+    let xs = [-4, 5, 300];
+    for x in xs { print(ih_check(x)); }              // -87, 10, -490
+    let a = [5, -12, 7, 30];
+    var s = 0;
+    for i in 10 { s += ih_wrap(a, i); }
+    for i in 10 { s += ih_wrap(a, i + 1); }
+    print(s + ih_twin(a, 10) + ih_twin(a, 11));      // 183
+    var t = 0;
+    for i in 4 { t += ih_key(a, i); }
+    for i in 4 { t += ih_key(a, i + 1); }
+    for i in 4 { t += ih_key(a, i + 2); }
+    for i in 4 { t += ih_key(a, i + 3); }
+    for i in 4 { t += ih_front(a, i); }
+    for i in 4 { t += ih_front(a, i + 1); }
+    for i in 4 { t += ih_front(a, i + 2); }
+    for i in 4 { t += ih_front(a, i + 3); }
+    print(t);                                        // 7428
+}
+
+// --- inline fn ------------------------------------------------------------------
+// An `inline fn` is inlined at every call whatever its size, where its twin
+// without the keyword stays a call. One returning two values stays a call
+// in Goose and is declared GS_INLINE in the C, for the C compiler to inline
+// (run_tests.py checks which bodies are left, and the C).
+
+inline fn il_big(x: i64) -> i64 {
+    var t = x;
+    for i in 1..20 {
+        if i % 3 == 0 { t += x * i; } else if i % 5 == 0 { t -= x / i; } else { t ^= i; }
+        if t > 1000 { t = t % 997 + x; }
+        if t < -1000 { t = -(t % 991) - x; }
+    }
+    for i in 1..9 {
+        if (t + i) % 4 == 1 { t += x; } else if i % 3 == 2 { t = t / 2 - i; } else { t -= i * 3; }
+        if t > 2000 { t = t % 1999 + i; }
+    }
+    return t;
+}
+fn il_plain(x: i64) -> i64 {
+    var t = x;
+    for i in 1..20 {
+        if i % 3 == 0 { t += x * i; } else if i % 5 == 0 { t -= x / i; } else { t ^= i; }
+        if t > 1000 { t = t % 997 + x; }
+        if t < -1000 { t = -(t % 991) - x; }
+    }
+    for i in 1..9 {
+        if (t + i) % 4 == 1 { t += x; } else if i % 3 == 2 { t = t / 2 - i; } else { t -= i * 3; }
+        if t > 2000 { t = t % 1999 + i; }
+    }
+    return t;
+}
+inline fn il_pair(x: i64) -> i64, i64 {
+    if x < 0 { return -x, 1; }
+    return x / 3, x % 3;
+}
+
+fn inline_op() {
+    let inline = 7;                                  // still a name
+    print(il_big(inline) + il_big(-3) + il_big(250));    // 607
+    print(il_plain(inline) + il_plain(-3) + il_plain(250));    // 607
+    var s = 0;
+    for i in -5..30 {
+        let q, r = il_pair(i);
+        s += q * 10 + r;
+    }
+    let q, r = il_pair(100);
+    print(s + q + r);                                // 1569
+    inline fn twice_plus(v: i64) -> i64 { v * 2 + inline }
+    print(twice_plus(4));                            // 15
 }
 
 fn main_optimize() {
@@ -508,6 +826,9 @@ fn main_optimize() {
     tailrec_op();
     varmode();
     recursion_op();
+    guarded_op();
+    heuristics_op();
+    inline_op();
     print(ginit + G);
     var acc = 0;
     acc += gv;

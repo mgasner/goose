@@ -11,7 +11,7 @@ struct Anthropic {
 }
 
 // A client for the Anthropic API. The default https:// base URL needs a
-// program linked with TLS (`goose --tls-link`).
+// program whose http package has TLS (packages/http).
 fn anthropic(api_key: const u8[:], base_url: const u8[:] = "https://api.anthropic.com") -> Client<Anthropic> {
     Client<Anthropic> { provider: Anthropic { .. }, base_url: base_url, api_key: api_key, .. }
 }

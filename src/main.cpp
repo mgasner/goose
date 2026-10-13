@@ -2,6 +2,8 @@
 
 #include "includes.h"
 #include "utils.h"
+#include "small_vector.h"
+#include "flat_map.h"
 #include "lexer.h"
 #include "ast.h"
 #include "dump.h"
@@ -12,11 +14,6 @@
 #include "deferred.h"
 #include "builtins.h"
 #include "gfx.h"
-#include "audio.h"
-#include "physics.h"
-#include "tls.h"
-#include "ui.h"
-#include "sqlite.h"
 #include "typecheck.h"
 #include "typecheck_types.h"
 #include "typecheck_exprs.h"
@@ -28,6 +25,7 @@
 #include "optimize.h"
 #include "optimize_basecase.h"
 #include "optimize_tre.h"
+#include "optimize_loops.h"
 #include "bce.h"
 #include "codegen.h"
 #include "codegen_types.h"
@@ -39,9 +37,19 @@
 #include "codegen_builtins.h"
 #include "codegen_render.h"
 #include "codegen_emit.h"
+#include "codegen_stacks.h"
 #include "codegen_nodes.h"
 #include "runtime_inline.h"
 #include "jit.h"
+#include "progress.h"
+#include "process.h"
+#include "buildfile.h"
+#include "toolchain.h"
+#include "builtin.h"
+#include "build.h"
+#include "packages.h"
+#include "json.h"
+#include "native.h"
 
 namespace goose {
 
@@ -50,22 +58,26 @@ string DirOf(const string &path) {
     return pos == string::npos ? "" : path.substr(0, pos + 1);
 }
 
+string ExePath(const char *argv0);
+
 static bool FileExists(const string &path) {
     auto f = fopen(path.c_str(), "rb");
     if (f) fclose(f);
     return f != nullptr;
 }
 
-// A path split on either separator, with "." and cancelled "x/.." dropped. An
-// absolute path keeps a leading empty component ("/a" -> {"", "a"}), so two
-// absolute paths share it and an absolute and a relative one never do.
+// A path split on either separator, with "." and cancelled "x/.." dropped. A
+// path with a leading separator keeps a leading empty component ("/a" ->
+// {"", "a"}), so two rooted paths share it and a rooted and a relative one
+// never do; "" and "./" are the relative {}.
 static vector<string> PathParts(const string &path) {
     vector<string> parts;
     string cur;
     for (size_t i = 0; i <= path.size(); i++) {
         auto c = i < path.size() ? path[i] : '/';
         if (c != '/' && c != '\\') { cur += c; continue; }
-        if (cur == "." || (cur.empty() && !parts.empty())) {}
+        if (i == 0 && i < path.size()) parts.push_back(cur);
+        else if (cur == "." || cur.empty()) {}
         else if (cur == ".." && !parts.empty() && parts.back() != "..") parts.pop_back();
         else parts.push_back(cur);
         cur.clear();
@@ -78,7 +90,7 @@ static vector<string> PathParts(const string &path) {
 // relative directory or the other way round, two absolute paths under
 // different Windows drives, or a leftover ".." that only the filesystem could
 // resolve.
-static string RelativeTo(const string &path, const string &dir) {
+string RelativeTo(const string &path, const string &dir) {
     auto p = PathParts(path), d = PathParts(dir);
     if (p.empty()) return path;
     auto updir = [](const vector<string> &parts) {
@@ -107,11 +119,11 @@ static string RelativeTo(const string &path, const string &dir) {
 // Where the standard library lives (§11.1): an explicit --stdlib or
 // GOOSE_STDLIB, else the `stdlib/` directory of the source tree the compiler
 // was built in, found by walking up from the executable.
-vector<string> StdlibDirs(const string &stdlibdir, const string &argv0) {
+vector<string> StdlibDirs(const string &stdlibdir, const string &exe) {
     vector<string> dirs;
     if (!stdlibdir.empty()) dirs.push_back(cat(stdlibdir, "/"));
     if (auto env = getenv("GOOSE_STDLIB")) dirs.push_back(cat(env, "/"));
-    auto exedir = DirOf(argv0);
+    auto exedir = DirOf(exe);
     dirs.push_back(cat(exedir, "stdlib/"));
     dirs.push_back(cat(exedir, "../stdlib/"));
     dirs.push_back(cat(exedir, "../../stdlib/"));
@@ -120,41 +132,232 @@ vector<string> StdlibDirs(const string &stdlibdir, const string &argv0) {
     return dirs;
 }
 
+// A package the root file declared with `import name from "source";`
+// (docs/design/packages.md §4.3).
+struct DeclaredPackage {
+    PackageSource source;
+    int pkg = 0;             // Its index in Ast::packages.
+    int line = 0;            // Where the root declared it.
+};
+
+[[noreturn]] static void ImportError(const string &file, int line, const string &msg) {
+    throw CompileError { cat(file, ":", line, ": error: ", msg) };
+}
+
 // Parses a root file and, transitively, everything it imports (each file once).
-// `import a.b;` resolves relative to the root file's directory, then in the
-// standard library; `import .a.b;` relative to the importing file's. A
+// `import a.b;` resolves relative to the importing file's package root (§11.1):
+// the root file's directory for the program's own files, a library's
+// directory for its modules; then as a module of a package the root
+// declared; then in the standard library. `import .a.b;` resolves relative to
+// the importing file's directory. `import name from "source";` declares a
+// package in the root file and is a requirement anywhere else, which the
+// root's declaration must satisfy (docs/design/packages.md §4.3). A
 // `rootsource` is the root file's text, which is then not read from disk.
 void ParseProgram(Ast &ast, const string &rootpath, const vector<string> &stdlibdirs,
                   const string *rootsource = nullptr) {
+    // The program is package 0; a standard library directory becomes a
+    // package the first time a module in it is reached.
     auto rootdir = DirOf(rootpath);
-    vector<string> queue = { rootpath };
+    ast.packages.push_back(Package { PathStem(rootpath), rootdir, false });
+    LoadSidecar(ast.packages[0], true);
+    auto stdlibpkg = [&](const string &dir) {
+        for (size_t i = 0; i < ast.packages.size(); i++)
+            if (ast.packages[i].stdlib && ast.packages[i].root == dir) return (int)i;
+        ast.packages.push_back(Package { "stdlib", dir, true });
+        return (int)ast.packages.size() - 1;
+    };
+    map<string, DeclaredPackage> declared;
+    // Loads a blessed package (§4.5) once, under its package name among the
+    // declared ones: from where the compiler's build put it when it is
+    // compiled in, else from its source as a declared package would be (a
+    // path in the table is relative to the source tree the standard
+    // library is found in).
+    auto loadblessed = [&](const BlessedEntry &be) -> int {
+        auto it = declared.find(be.package);
+        if (it != declared.end()) return it->second.pkg;
+        auto builtin = BuiltinLookup(be.package);
+        PackageSource src;
+        src.text = be.source;
+        string root;
+        if (builtin && PathExists(cat(builtin->srcdir, be.package, ".goose"))) {
+            src.ispath = true;
+            src.dir = root = builtin->srcdir;
+        } else if (IsPathSource(be.source)) {
+            auto rel = be.source.rfind("./", 0) == 0 ? be.source.substr(2) : be.source;
+            for (auto &dir : stdlibdirs) {
+                auto cand = cat(dir, "../", rel);
+                if (PathExists(cat(cand, "/", be.package, ".goose"))) {
+                    src.ispath = true;
+                    src.dir = PackageDir(cand);
+                    break;
+                }
+            }
+            if (src.dir.empty())
+                throw CompileError { cat("cannot find the blessed package ", be.package,
+                                         " at ", be.source, " of the source tree") };
+            root = PackageRoot(src, be.package);
+        } else {
+            src = ParsePackageSource(cat(be.source, "@", be.ref), "");
+            root = PackageRoot(src, be.package);
+        }
+        ast.packages.push_back(Package { be.package, root, false });
+        auto &p = ast.packages.back();
+        if (!src.ispath) p.cachekey = GitCacheKey(src);
+        if (builtin && root == builtin->srcdir) p.builtin = BuiltinIndex(builtin);
+        LoadSidecar(p, false);
+        declared.emplace(be.package, DeclaredPackage { src, (int)ast.packages.size() - 1, 0 });
+        return (int)ast.packages.size() - 1;
+    };
+    vector<pair<string, int>> queue = { { rootpath, 0 } };   // (path, its package).
     set<string> loaded = { rootpath };
     map<string, int> fileof;                 // Resolved path -> index in ast.sources.
     vector<vector<string>> importsof;        // Per source, the paths it imports.
     while (!queue.empty()) {
-        auto path = queue.back();
+        auto [path, pkg] = queue.back();
         queue.pop_back();
         auto contents = make_unique<string>();
         if (rootsource && path == rootpath) *contents = *rootsource;
-        else if (!LoadFile(path, *contents))
+        else if (!LoadSource(path, *contents))
             throw CompileError { cat("cannot open file: ", path) };
         auto fileidx = (int)ast.sources.size();
         ast.sources.emplace_back(path, std::move(contents));
+        ast.filepkg.push_back(pkg);
         fileof[path] = fileidx;
         importsof.emplace_back();
         auto &[filename, source] = ast.sources.back();
         Parser parser(ast, filename, source->c_str(), fileidx);
         parser.ParseTop();
         for (auto &imp : parser.imports) {
-            auto imppath = cat(imp.relative ? DirOf(path) : rootdir, imp.path, ".goose");
-            if (!imp.relative && !FileExists(imppath)) {
-                for (auto &dir : stdlibdirs) {
-                    auto cand = cat(dir, imp.path, ".goose");
-                    if (FileExists(cand)) { imppath = cand; break; }
+            auto imppkg = pkg;
+            string imppath;
+            if (!imp.source.empty()) {
+                PackageSource src;
+                try {
+                    src = ParsePackageSource(imp.source, DirOf(path));
+                } catch (CompileError &e) {
+                    ImportError(filename, imp.line, e.msg);
+                }
+                auto it = declared.find(imp.path);
+                if (fileidx == 0) {
+                    // The root declares the package, and imports its entry.
+                    if (it != declared.end())
+                        ImportError(filename, imp.line, cat("the package ", imp.path,
+                                                            " is declared twice"));
+                    string root;
+                    try {
+                        root = PackageRoot(src, imp.path);
+                    } catch (CompileError &e) {
+                        ImportError(filename, imp.line, e.msg);
+                    }
+                    ast.packages.push_back(Package { imp.path, root, false });
+                    if (!src.ispath) ast.packages.back().cachekey = GitCacheKey(src);
+                    LoadSidecar(ast.packages.back(), false);
+                    it = declared.emplace(imp.path, DeclaredPackage { src, (int)ast.packages.size() - 1,
+                                                                      imp.line }).first;
+                } else {
+                    // A requirement: satisfied by the root's declaration, or
+                    // by the blessed table where the root declared nothing.
+                    if (it == declared.end())
+                        if (auto be = BlessedLookup(imp.path); be && be->package == imp.path) {
+                            loadblessed(*be);
+                            it = declared.find(imp.path);
+                        }
+                }
+                if (it == declared.end()) {
+                    // A requirement the root does not satisfy: the error is
+                    // the line to add there.
+                    ImportError(filename, imp.line,
+                                cat(ast.packages[pkg].name, " needs the package ", imp.path,
+                                    ": add\n    import ", imp.path, " from \"",
+                                    SourceForRoot(src, rootdir), "\";\nto ", rootpath,
+                                    " (packages are declared by the root file only)"));
+                } else if (fileidx != 0 && !SameSource(it->second.source, src)) {
+                    ImportError(filename, imp.line,
+                                cat(ast.packages[pkg].name, " needs the package ", imp.path,
+                                    " from ", src.text, ", which ", rootpath, ":", it->second.line,
+                                    " declared from a different source, ", it->second.source.text));
+                } else if (fileidx != 0 && it->second.source.ref != src.ref) {
+                    fprintf(stderr, "%s:%d: warning: %s needs the package %s at %s, which %s:%d "
+                                    "declares at %s\n",
+                            filename.c_str(), imp.line, ast.packages[pkg].name.c_str(),
+                            imp.path.c_str(), src.ref.c_str(), rootpath.c_str(), it->second.line,
+                            it->second.source.ref.c_str());
+                }
+                imppkg = it->second.pkg;
+                // What a package requires links after it (§5.5).
+                if (fileidx != 0 && pkg != imppkg) {
+                    auto &req = ast.packages[pkg].required;
+                    if (std::find(req.begin(), req.end(), imppkg) == req.end())
+                        req.push_back(imppkg);
+                }
+                imppath = cat(ast.packages[imppkg].root, imp.path, ".goose");
+            } else if (imp.relative) {
+                imppath = cat(DirOf(path), imp.path, ".goose");
+            } else {
+                // A file under this package's root; a module of a package the
+                // root declared (`import pkg;` is its entry, `import pkg.sub;`
+                // its sub.goose); a blessed name, its package loaded as if
+                // the root had declared it (§4.5); the standard library.
+                auto local = cat(ast.packages[pkg].root, imp.path, ".goose");
+                auto first = imp.path.substr(0, imp.path.find('/'));
+                auto rest = imp.path.size() > first.size() ? imp.path.substr(first.size() + 1)
+                                                           : first;
+                auto it = declared.find(first);
+                // A package's own name, from inside it, is its own file.
+                if (it != declared.end() && it->second.pkg == pkg) it = declared.end();
+                auto blessed = it == declared.end() && !FileExists(local) ? BlessedLookup(first)
+                                                                           : nullptr;
+                if (it != declared.end()) {
+                    if (FileExists(local))
+                        ImportError(filename, imp.line,
+                                    cat(imp.path, " is both a file of this package (", local,
+                                        ") and the declared package ", first, "'s module"));
+                    imppkg = it->second.pkg;
+                    imppath = cat(ast.packages[imppkg].root, rest, ".goose");
+                } else if (blessed) {
+                    imppkg = loadblessed(*blessed);
+                    imppath = cat(ast.packages[imppkg].root, rest, ".goose");
+                } else {
+                    imppath = local;
+                    if (!FileExists(local)) {
+                        for (auto &dir : stdlibdirs) {
+                            auto cand = cat(dir, imp.path, ".goose");
+                            if (FileExists(cand)) {
+                                imppath = cand;
+                                imppkg = stdlibpkg(dir);
+                                break;
+                            }
+                        }
+                        // Not found: where it was looked for, the standard
+                        // library being the directories that hold std.goose.
+                        if (imppath == local) {
+                            auto name = imp.path;
+                            for (auto &c : name) if (c == '/') c = '.';
+                            auto msg = cat("cannot find the module ", name, ", looked for\n    ",
+                                           ForwardSlashes(AbsolutePath(local)));
+                            auto havestd = false;
+                            for (auto &dir : stdlibdirs)
+                                if (FileExists(cat(dir, "std.goose"))) {
+                                    havestd = true;
+                                    Append(msg, "\n    ",
+                                           ForwardSlashes(AbsolutePath(cat(dir, imp.path, ".goose"))));
+                                }
+                            if (!havestd) {
+                                Append(msg, "\nand found no standard library, looking in");
+                                set<string> shown;
+                                for (auto &dir : stdlibdirs) {
+                                    auto abs = ForwardSlashes(AbsolutePath(dir));
+                                    if (shown.insert(abs).second) Append(msg, "\n    ", abs);
+                                }
+                                Append(msg, "\nset --stdlib or GOOSE_STDLIB to its directory");
+                            }
+                            ImportError(filename, imp.line, msg);
+                        }
+                    }
                 }
             }
             importsof[fileidx].push_back(imppath);
-            if (loaded.insert(imppath).second) queue.push_back(imppath);
+            if (loaded.insert(imppath).second) queue.push_back({ imppath, imppkg });
         }
     }
     // Globals initialize in import order: everything a file imports runs before
@@ -216,7 +419,7 @@ void CheckRoundtrip(const string &dumped, const string &path,
 
 void DumpTokens(const string &path) {
     string contents;
-    if (!LoadFile(path, contents)) throw CompileError { cat("cannot open file: ", path) };
+    if (!LoadSource(path, contents)) throw CompileError { cat("cannot open file: ", path) };
     Lexer lex(path, contents.c_str());
     string s;
     while (lex.tok != T_EOF) {
@@ -237,8 +440,7 @@ void DumpTokens(const string &path) {
 // The runtime C sources embedded into the compiler (runtime_inline.h), in the
 // order a standalone program holds them (runtime.h has how they divide).
 static const char *runtimefiles[] = { "runtime.h", "runtime_impl.h", "runtime_threads.h",
-                                      "runtime_ext.h", "runtime_os.h", "runtime_net.h",
-                                      "runtime_tls.h" };
+                                      "runtime_ext.h", "runtime_os.h" };
 
 static string RuntimeSections(std::initializer_list<const char *> names) {
     string s;
@@ -251,7 +453,7 @@ static string RuntimeSections(std::initializer_list<const char *> names) {
 
 // What a separately built program and its runtime object must agree on: a
 // hash of the runtime's text, which names the runtime's entry point.
-static string RuntimeVersion() {
+string RuntimeVersion() {
     uint64_t h = 14695981039346656037ull;
     for (auto &rf : runtime_files)
         for (auto c : string_view(rf.text)) h = (h ^ (uint8_t)c) * 1099511628211ull;
@@ -262,7 +464,7 @@ static string RuntimeVersion() {
 
 // The runtime object's C (goose --emit-runtime): the runtime that programs
 // written with -o declare extern, for any program this compiler writes.
-static string RuntimeObjectSource() {
+string RuntimeObjectSource() {
     return cat("/* The Goose runtime, written by `goose --emit-runtime`. Do not edit.\n"
                "   Compile it once, with the C compiler and flags of the programs it is\n"
                "   for, and link the object with every program `goose -o` writes (all\n"
@@ -272,16 +474,16 @@ static string RuntimeObjectSource() {
                "#define GS_SEPARATE_RUNTIME 1\n#define GS_RUNTIME_OBJECT 1\n"
                "#define GS_NEED_THREADS 1\n#define GS_RUNTIME_VERSION ", RuntimeVersion(),
                "\n\n", RuntimeSections({ "runtime.h", "runtime_impl.h", "runtime_threads.h",
-                                          "runtime_ext.h", "runtime_os.h", "runtime_net.h" }));
+                                          "runtime_ext.h", "runtime_os.h" }));
 }
 
 // Locates the src/runtime/ directory (only needed by --gen-runtime-header):
 // an explicit env override, next to the executable, or relative to it in the
 // source tree layout.
-string FindRuntimeDir(const char *argv0) {
+string FindRuntimeDir(const char *exe) {
     vector<string> cands;
     if (auto env = getenv("GOOSE_RUNTIME")) cands.push_back(cat(env, "/"));
-    auto exedir = DirOf(argv0);
+    auto exedir = DirOf(exe);
     cands.push_back(cat(exedir, "runtime/"));
     cands.push_back(cat(exedir, "../../src/runtime/"));
     cands.push_back(cat(exedir, "../src/runtime/"));
@@ -296,8 +498,8 @@ string FindRuntimeDir(const char *argv0) {
 
 // Regenerates src/runtime_inline.h from src/runtime/, so the compiler binary
 // is self-contained. Anyone editing the runtime re-runs this and rebuilds.
-void GenRuntimeHeader(const char *argv0) {
-    auto dir = FindRuntimeDir(argv0);
+void GenRuntimeHeader(const char *exe) {
+    auto dir = FindRuntimeDir(exe);
     string out = "// Generated by `goose --gen-runtime-header` from src/runtime/. "
                  "Do not edit.\n#pragma once\n\nnamespace goose {\n\n"
                  "struct RuntimeFile {\n    const char *name;\n    string_view text;\n"
@@ -340,16 +542,123 @@ int RunOnCompilerStack(const function<int()> &fn);
 // the file's name as given.
 constexpr const char *MULTIMARK = "==== goose --multi-test: exit";
 
+// A size with an optional K, M, G or T suffix (--stack-reserve).
+bool ParseSize(string s, uint64_t &out) {
+    if (!s.empty() && toupper((unsigned char)s.back()) == 'B') s.pop_back();
+    if (s.empty()) return false;
+    uint64_t mult = 1;
+    switch (toupper((unsigned char)s.back())) {
+        case 'K': mult = 1ull << 10; s.pop_back(); break;
+        case 'M': mult = 1ull << 20; s.pop_back(); break;
+        case 'G': mult = 1ull << 30; s.pop_back(); break;
+        case 'T': mult = 1ull << 40; s.pop_back(); break;
+    }
+    if (s.empty() || s.size() > 18 || s.find_first_not_of("0123456789") != string::npos)
+        return false;
+    auto n = strtoull(s.c_str(), nullptr, 10);
+    if (n > UINT64_MAX / mult) return false;
+    out = n * mult;
+    return true;
+}
+
+// The value of a runtime configuration macro as runtime.h spells its
+// defaults and a -D may: an integer with C suffixes, or `(N << M)`.
+bool ParseConfigValue(string s, uint64_t &out) {
+    auto strip = [](string &t) {
+        while (!t.empty() && isspace((unsigned char)t.back())) t.pop_back();
+        size_t i = 0;
+        while (i < t.size() && isspace((unsigned char)t[i])) i++;
+        t.erase(0, i);
+    };
+    strip(s);
+    while (s.size() >= 2 && s.front() == '(' && s.back() == ')') {
+        s = s.substr(1, s.size() - 2);
+        strip(s);
+    }
+    auto num = [&](string t, uint64_t &v) {
+        strip(t);
+        while (!t.empty() && (tolower((unsigned char)t.back()) == 'u' ||
+                              tolower((unsigned char)t.back()) == 'l'))
+            t.pop_back();
+        if (t.empty() || t.size() > 19 || t.find_first_not_of("0123456789") != string::npos)
+            return false;
+        v = strtoull(t.c_str(), nullptr, 10);
+        return true;
+    };
+    if (auto sh = s.find("<<"); sh != string::npos) {
+        uint64_t a, b;
+        if (!num(s.substr(0, sh), a) || !num(s.substr(sh + 2), b) || b > 63) return false;
+        out = a << b;
+        return true;
+    }
+    return num(s, out);
+}
+
+// The data stack configuration the generated program compiles with, for
+// the --stacks report: the runtime's defaults (runtime.h), then the -D
+// given, --stack-reserve's among them. A -D the compiler cannot read keeps
+// the default in the report; the C compiler sees it either way.
+CodeGen::StackConfig StackConfigOf(const vector<string> &cdefines) {
+    string_view runtime;
+    for (auto &rf : runtime_files)
+        if (string_view(rf.name) == "runtime.h") runtime = rf.text;
+    auto value = [&](const char *name, uint64_t &out) {
+        auto key = cat("#define ", name, " ");
+        if (auto at = runtime.find(key); at != string_view::npos) {
+            auto line = runtime.substr(at + key.size());
+            line = line.substr(0, line.find('\n'));
+            if (auto c = line.find("/*"); c != string_view::npos) line = line.substr(0, c);
+            ParseConfigValue(string(line), out);
+        }
+        for (auto &d : cdefines) {
+            auto eq = d.find('=');
+            if (d.substr(0, eq) == name)
+                ParseConfigValue(eq == string::npos ? string("1") : d.substr(eq + 1), out);
+        }
+    };
+    CodeGen::StackConfig cfg { 0, 0, 0, 0 };
+    uint64_t maxstacks = 0;
+    value("GS_STACK_RESERVE", cfg.reserve);
+    value("GS_STACK_GAP", cfg.gap);
+    value("GS_STACK_BUDGET", cfg.budget);
+    value("GS_MAX_STACKS", maxstacks);
+    cfg.maxstacks = (int64_t)maxstacks;
+    return cfg;
+}
+
 int Main(int argc, char **argv) {
+    auto exe = ExePath(argv[0]);
+    // The verb forms, `goose run|build|check|fetch|toolchain|version ...`. A
+    // first argument that is none of them is read as an option or a file, as
+    // it always was, so `goose foo.goose` is `goose run foo.goose`.
+    string verb;
+    auto firstarg = 1;
+    if (argc > 1) {
+        string v = argv[1];
+        if (v == "run" || v == "build" || v == "check" || v == "fetch" || v == "toolchain" ||
+            v == "version") {
+            verb = v;
+            firstarg = 2;
+        }
+    }
+    if (verb == "version") {
+        printf("goose runtime %s\n", RuntimeVersion().c_str());
+        return 0;
+    }
     string outname, headername, stdlibdir, shaderfile, shadersource, dumpfile;
     auto dump = false, tokens = false, parseonly = false, specs = false, nocgen = false;
     auto sqltypes = false;
     auto roundtrip = false, multitest = false;
     auto nobce = false, bcetest = false, bcelines = false, norfcheck = false;
+    auto stacks = false;
     auto forcejit = false, standalone = false;
-    auto optlevel = 1;
+    auto json = false, refresh = false, debug = false, verbose = false, dryrun = false;
+    string ccrequest;
+    // A build is for a deliverable: the inlining and the C compiler's
+    // optimization both at their highest.
+    auto optlevel = verb == "build" ? 2 : 1;
     vector<string> cdefines, progargs, includenames, files;
-    for (int i = 1; i < argc; i++) {
+    for (int i = firstarg; i < argc; i++) {
         string arg = argv[i];
         // Everything past `--` belongs to the program being run, not here.
         if (arg == "--") {
@@ -362,6 +671,17 @@ int Main(int argc, char **argv) {
         else if (arg == "--roundtrip") roundtrip = true;
         else if (arg == "--dump-file" && i + 1 < argc) dumpfile = argv[++i];
         else if (arg == "--specs") specs = true;
+        else if (arg == "--stacks") stacks = true;
+        else if (arg == "--stack-reserve" && i + 1 < argc) {
+            uint64_t size;
+            if (!ParseSize(argv[++i], size) || !size || size > (1ull << 48)) {
+                fprintf(stderr, "--stack-reserve takes a size from 1 byte to 256 TB (2^48, "
+                                "goose_spec.md 10.4), with an optional K, M, G or T suffix: %s\n",
+                        argv[i]);
+                return 1;
+            }
+            cdefines.push_back(cat("GS_STACK_RESERVE=", size, "ull"));
+        }
         else if (arg == "--check") nocgen = true;
         else if (arg == "--no-bce") nobce = true;
         else if (arg == "--bce-test") bcetest = true;
@@ -371,7 +691,7 @@ int Main(int argc, char **argv) {
         else if (arg == "--jit") forcejit = true;
         else if (arg == "--standalone") standalone = true;
         else if (arg == "--multi-test") multitest = true;
-        else if (arg == "--gen-runtime-header") { GenRuntimeHeader(argv[0]); return 0; }
+        else if (arg == "--gen-runtime-header") { GenRuntimeHeader(exe.c_str()); return 0; }
         else if (arg == "--emit-runtime" && i + 1 < argc) {
             auto path = argv[++i];
             auto src = RuntimeObjectSource();
@@ -388,18 +708,13 @@ int Main(int argc, char **argv) {
         // Hidden: what a shader compiles to, without a program around it.
         else if (arg == "--compile-shader" && i + 1 < argc) shaderfile = argv[++i];
         else if (arg == "--shader-source" && i + 1 < argc) shadersource = argv[++i];
-        else if ((arg == "--audio-link" || arg == "--gfx-link" ||
-                  arg == "--physics-link" || arg == "--ui-link" || arg == "--sqlite-link" ||
-                  arg == "--tls-link") &&
-                 i + 1 < argc) {
+        // `--<name>-link msvc|cc`: the response file of a blessed package
+        // compiled into this compiler (builtin.h).
+        else if (arg.size() > 7 && arg.rfind("--", 0) == 0 &&
+                 arg.compare(arg.size() - 5, 5, "-link") == 0 && i + 1 < argc) {
             try {
                 auto style = argv[++i];
-                auto path = arg == "--audio-link"     ? AudioLinkFile(DirOf(argv[0]), style)
-                            : arg == "--gfx-link"     ? GfxLinkFile(DirOf(argv[0]), style)
-                            : arg == "--physics-link" ? PhysicsLinkFile(DirOf(argv[0]), style)
-                            : arg == "--sqlite-link"  ? SqliteLinkFile(DirOf(argv[0]), style)
-                            : arg == "--tls-link"     ? TlsLinkFile(DirOf(argv[0]), style)
-                                                      : UiLinkFile(DirOf(argv[0]), style);
+                auto path = BuiltinLinkFile(arg.substr(2, arg.size() - 7), style, DirOf(exe));
                 printf("%s\n", path.c_str());
             } catch (CompileError &e) {
                 fprintf(stderr, "%s\n", e.msg.c_str());
@@ -415,6 +730,16 @@ int Main(int argc, char **argv) {
         else if (arg == "--sqlite-types") sqltypes = true;
         else if (arg == "--include" && i + 1 < argc) includenames.push_back(argv[++i]);
         else if (arg == "--stdlib" && i + 1 < argc) stdlibdir = argv[++i];
+        else if (arg == "--cc" && i + 1 < argc) ccrequest = argv[++i];
+        else if (arg == "--json") json = true;
+        else if (arg == "--refresh") refresh = true;
+        else if (arg == "--debug") {
+            debug = true;
+            cdefines.push_back("GS_DEBUG=1");
+        }
+        else if (arg == "-v") verbose = true;
+        else if (arg == "--dry-run") dryrun = true;
+        else if (arg == "--update") package_update = true;
         // A -D lands in the generated C itself rather than on some backend's
         // command line, so a JIT run and a compiled one see the same source.
         else if (arg == "-D" && i + 1 < argc) cdefines.push_back(argv[++i]);
@@ -424,6 +749,48 @@ int Main(int argc, char **argv) {
             return 1;
         }
         else files.push_back(arg);
+    }
+    if (verbose || dryrun) ProgressPlain();
+    if (verb == "toolchain") {
+        try {
+            auto tools = FindTools(ccrequest, refresh);
+            // The modules a program can import without a build: those of
+            // the blessed packages compiled in.
+            vector<string> builtin;
+            for (auto &e : BlessedTable())
+                if (BuiltinLookup(e.package)) builtin.push_back(e.import);
+            fputs(ToolsReport(tools, json, builtin).c_str(), stdout);
+            return tools.havecc ? 0 : 1;
+        } catch (CompileError &e) {
+            fprintf(stderr, "%s\n", e.msg.c_str());
+            return 1;
+        }
+    }
+    // What `goose build` builds with; its -o names the executable, and the
+    // C goes to the program's build directory (build.h).
+    BuildOptions buildopts;
+    string builddir;
+    if (verb == "run") {
+        if (!outname.empty()) {
+            fprintf(stderr, "goose run takes no -o: it compiles and runs the program in this "
+                            "process\n");
+            return 1;
+        }
+        forcejit = true;
+    } else if (verb == "check") {
+        nocgen = true;
+    } else if (verb == "fetch") {
+        // Parsing is what fetches: every package the root declares is
+        // fetched as its entry is reached.
+        parseonly = true;
+    } else if (verb == "build") {
+        if (multitest || !headername.empty()) {
+            fprintf(stderr, "goose build takes one program and no --header; the flag form "
+                            "(-o out.c) writes the C for a C host\n");
+            return 1;
+        }
+        buildopts = BuildOptions { debug, verbose, dryrun, standalone, outname };
+        outname.clear();
     }
     if (files.size() > 1 && !multitest) {
         fprintf(stderr, "multiple input files given\n");
@@ -439,22 +806,29 @@ int Main(int argc, char **argv) {
         return 0;
     }
     if (files.empty()) {
-        fprintf(stderr, "usage: goose [--dump] [--parse] [--tokens] [--roundtrip] "
-                        "[--dump-file out.goose] [--specs] [--check] "
+        fprintf(stderr, "usage: goose run file.goose [options] [-- program args...] | "
+                        "goose check file.goose [options] | goose fetch [--update] file.goose | "
+                        "goose version |\n"
+                        "       goose build file.goose [options] [-o exe] [--debug] [--standalone] "
+                        "[--cc name|path] [-v] [--dry-run] |\n"
+                        "       goose toolchain [--cc name|path] [--json] [--refresh]\n");
+        fprintf(stderr, "   or: goose [--dump] [--parse] [--tokens] [--roundtrip] "
+                        "[--dump-file out.goose] [--specs] [--stacks] [--check] "
                         "[--no-bce] [--bce-test] [--bce-lines] [--unsafe-no-rf-check] [-O0|-O1|-O2] "
-                        "[-o out.c [--standalone]] [--jit] [-DNAME=VALUE]... [--include header.h]... "
+                        "[-o out.c [--standalone]] [--jit] [-DNAME=VALUE]... [--stack-reserve size] "
+                        "[--include header.h]... "
                         "[--header out.h] [--sqlite-types] "
                         "[--stdlib dir] file.goose [-- program args...] | "
                         "--multi-test [options] file.goose... | --emit-runtime runtime.c | "
                         "--gen-runtime-header | "
-                        "--audio-link msvc|cc | --gfx-link msvc|cc | "
-                        "--physics-link msvc|cc | --ui-link msvc|cc | --sqlite-link msvc|cc | "
-                        "--tls-link cc\n");
-        fprintf(stderr, "without -o the program is compiled and run in this process%s.\n",
-                have_jit ? " by TinyCC" : " -- unavailable in this build, so the .c is written");
+                        "--<package>-link msvc|cc\n");
+        fprintf(stderr, "without -o the program is compiled and run in this process by TinyCC.\n");
         fprintf(stderr, "the .c that -o writes links with the runtime that --emit-runtime "
                         "writes, compiled once;\n--standalone writes one that holds the "
                         "runtime itself.\n");
+        fprintf(stderr, "--stacks reports the data stacks the program and each worker can take "
+                        "and the thread cap they\ngive hardware_threads(); --stack-reserve sets "
+                        "the address space reserved per stack (K/M/G/T suffixes).\n");
         fprintf(stderr, "--multi-test compiles each file as a run of its own would, one after "
                         "another, ending what each\nprinted with a line `%s <exit code> <file>` "
                         "on stdout and on stderr; an -o names\neach file's C with a %% "
@@ -462,9 +836,9 @@ int Main(int argc, char **argv) {
         return 1;
     }
     // With no output file the program is compiled into this process and run,
-    // which is what --jit asks for explicitly. A build without the backend
-    // keeps writing the .c next to the source instead.
-    auto jit = forcejit || (outname.empty() && have_jit);
+    // which is what --jit asks for explicitly; a build writes the C to its
+    // build directory instead.
+    auto jit = verb != "build" && (forcejit || outname.empty());
     if (!headername.empty() && (jit || multitest)) {
         fprintf(stderr, "--header requires C output for a single input file\n");
         return 1;
@@ -488,14 +862,18 @@ int Main(int argc, char **argv) {
     vector<string> includes;
     // What a JIT run compiles and starts, once the compile produced it.
     string program;
-    NativeLayers layers;
+    // The program's Ast outlives the compile: a build and a JIT run read
+    // its packages, for the native parts the program needs (native.h).
+    unique_ptr<Ast> astp;
+    vector<int> nativepkgs;
     auto compile = [&]() -> int {
         if (tokens) {
             DumpTokens(filename);
             return 0;
         }
-        Ast ast;
-        auto stdlibdirs = StdlibDirs(stdlibdir, argv[0]);
+        astp = make_unique<Ast>();
+        auto &ast = *astp;
+        auto stdlibdirs = StdlibDirs(stdlibdir, exe);
         ParseProgram(ast, filename, stdlibdirs);
         if (sqltypes) {
             // A row struct for every checked SQL statement (sqlite_check.h).
@@ -567,7 +945,9 @@ int Main(int argc, char **argv) {
             }
             fprintf(msgs, "bce-test: all annotations verified\n");
         }
-        if (nocgen) return 0;
+        // --stacks needs the generated program's bounds, so --check runs
+        // the backend for them and writes nothing.
+        if (nocgen && !stacks) return 0;
         // A quoted include resolves against the including file's own directory
         // first, so the --include headers are written relative to where the .c
         // goes: the generated file then compiles wherever the tree sits,
@@ -580,18 +960,23 @@ int Main(int argc, char **argv) {
                 if (FileExists(inc)) inc = RelativeTo(inc, DirOf(outfile));
         // The extern-support runtime is written against the generated types,
         // so it goes in after them rather than up front.
-        // The TLS section (runtime_tls.h) defines functions the program
-        // calls as well, so it counts as declaring them.
-        string runtime_ext_text;
+        string_view runtime_ext_text;
         for (auto &rf : runtime_files)
-            if (string_view(rf.name) == "runtime_ext.h" || string_view(rf.name) == "runtime_tls.h")
-                runtime_ext_text += rf.text;
-        CodeGen cg(ast, runtime_ext_text, includes, norfcheck, library);
+            if (string_view(rf.name) == "runtime_ext.h") runtime_ext_text = rf.text;
+        auto stackcfg = StackConfigOf(cdefines);
+        CodeGen cg(ast, runtime_ext_text, includes, norfcheck, library, stackcfg.maxstacks);
+        if (stacks) cg.StackReport(msgs, stackcfg);
+        // The packages whose native parts the program needs, which a JIT
+        // run takes functions from and a build links: its own, when it has
+        // one, and every package an extern fn it calls was declared in,
+        // each before the packages it requires, which is the order a
+        // linker resolves their archives in.
+        nativepkgs = NativePackagesUsed(ast, cg.usedexterns);
         // Assemble: compiler-set feature defines, the embedded runtime, then
         // the generated program. A program built with a separate runtime
         // holds what runtime.h has of it and the extern support's
         // declarations; a standalone one, as a JIT run builds, all of it.
-        auto assemble = [&](bool separate, bool jitrun) {
+        auto assemble = [&](bool separate) {
             string out = cat("/* Generated by the Goose compiler from ", filename,
                              ". Do not edit.\n"
                              "   Names from the program carry a _g suffix, which keeps them clear of\n"
@@ -610,54 +995,48 @@ int Main(int argc, char **argv) {
                 Append(out, "#define ", eq == string::npos ? d : d.substr(0, eq), " ",
                        eq == string::npos ? string("1") : d.substr(eq + 1), "\n");
             }
-            // A JIT run hands the program this compiler's own TLS layer; C
-            // written out gets it from `goose --tls-link`, which defines
-            // this too.
-            if (jitrun && cg.usestls && have_tls) out += "#define GS_TLS_LINKED 1\n";
-            auto tls = cg.usestls ? RuntimeSections({ "runtime_tls.h" }) : string();
             if (separate)
                 Append(out, RuntimeSections({ "runtime.h" }), cg.head,
-                       RuntimeSections({ "runtime_ext.h" }), tls, cg.result);
+                       RuntimeSections({ "runtime_ext.h" }), cg.result);
             else
                 Append(out, RuntimeSections({ "runtime.h", "runtime_impl.h", "runtime_threads.h" }),
-                       cg.head, RuntimeSections({ "runtime_ext.h", "runtime_os.h", "runtime_net.h" }),
-                       tls, cg.result);
+                       cg.head, RuntimeSections({ "runtime_ext.h", "runtime_os.h" }), cg.result);
             return out;
         };
-        if (!outfile.empty()) {
-            auto out = assemble(!standalone, false);
-            auto f = fopen(outfile.c_str(), "wb");
-            if (!f) throw CompileError { cat("cannot write output file: ", outfile) };
-            fwrite(out.data(), 1, out.size(), f);
-            fclose(f);
+        if (!outfile.empty() && !nocgen) {
+            auto out = assemble(!standalone);
+            if (!WriteFileMakingDirs(outfile, out))
+                throw CompileError { cat("cannot write output file: ", outfile) };
             fprintf(msgs, "wrote %s (%d bytes)\n", outfile.c_str(), (int)out.size());
         }
         if (!headername.empty()) {
             auto header = cg.ExportHeader();
-            auto f = fopen(headername.c_str(), "wb");
-            if (!f) throw CompileError { cat("cannot write export header: ", headername) };
-            fwrite(header.data(), 1, header.size(), f);
-            fclose(f);
+            if (!WriteFileMakingDirs(headername, header))
+                throw CompileError { cat("cannot write export header: ", headername) };
             fprintf(msgs, "wrote %s (%d bytes)\n", headername.c_str(), (int)header.size());
         }
-        if (jit) {
+        if (jit && !nocgen) {
             // TinyCC's in-memory runner rejects a thread-local section, and
             // the runtime keeps each worker's data stacks in one.
             if (cg.usesthreads)
                 throw CompileError { "JIT mode does not support threads yet (TinyCC cannot "
                                      "place thread-local storage in an in-memory run); "
                                      "compile with -o and a C compiler instead" };
-            // The native layers are this compiler's own, handed to the program.
-            if (cg.layers.audio && !have_audio) throw CompileError { no_audio_error };
-            if (cg.layers.gfx && !have_gfx) throw CompileError { no_gfx_error };
-            if (cg.layers.physics && !have_physics) throw CompileError { no_physics_error };
-            if (cg.layers.ui && !have_ui) throw CompileError { no_ui_error };
-            if (cg.layers.sqlite && !have_sqlite) throw CompileError { no_sqlite_error };
-            program = assemble(false, true);
-            layers = cg.layers;
-            layers.tls = cg.usestls && have_tls;
+            program = assemble(false);
         }
         return 0;
+    };
+    // The C toolchain everything this command builds is built with, found
+    // when first needed: the native parts, the runtime object and the link
+    // have to agree on it.
+    Toolchain tc;
+    string tcwhy;
+    bool tclooked = false, havetc = false;
+    auto findtc = [&] {
+        if (!tclooked) havetc = FindToolchain(ccrequest, tc, tcwhy);
+        tclooked = true;
+        if (!havetc) fprintf(stderr, "%s\n", tcwhy.c_str());
+        return havetc;
     };
     auto run = [&](const string &file) -> int {
         filename = file;
@@ -669,13 +1048,25 @@ int Main(int argc, char **argv) {
                  pos = outfile.find('%', pos + stem.size()))
                 outfile.replace(pos, 1, stem);
         }
-        if (outfile.empty() && !jit) {
-            auto dot = filename.find_last_of('.');
-            outfile = cat(dot == string::npos ? filename : filename.substr(0, dot), ".c");
-        }
         includes = includenames;
+        if (verb == "build") {
+            builddir = ProgramBuildDir(file);
+            std::error_code ec;
+            filesystem::create_directories(filesystem::path(builddir), ec);
+            if (ec) {
+                fprintf(stderr, "cannot create the build directory %s\n", builddir.c_str());
+                return 1;
+            }
+            outfile = cat(builddir, "/", PathStem(file), ".c");
+            // The C is written far from where the command was given, so a
+            // header named relative to here is named relative to nowhere
+            // else: absolute, and the C names it relative to itself.
+            for (auto &inc : includes)
+                if (FileExists(inc)) inc = AbsolutePath(inc);
+        }
         program.clear();
-        layers = NativeLayers();
+        astp.reset();
+        nativepkgs.clear();
         try {
             // The compile has a thread of its own. The program a JIT run
             // starts runs back on this one, the main thread, which a window
@@ -683,11 +1074,58 @@ int Main(int argc, char **argv) {
             // as large as the compile thread's where the platform lets it
             // (CMakeLists.txt).
             auto code = RunOnCompilerStack(compile);
-            if (code || program.empty()) return code;
+            if (code) return code;
+            if (verb == "build") {
+                if (nocgen) return 0;
+                // The native parts first, so that the link can take their
+                // response files: a builtin package's from the compiler's
+                // build, the others' built now.
+                if (!findtc()) return 1;
+                Builder b { tc, buildopts, msgs };
+                vector<string> rsps;
+                for (auto pkg : nativepkgs) {
+                    auto &p = astp->packages[pkg];
+                    if (p.builtin >= 0) {
+                        rsps.push_back(BuiltinPackageLinkFile(builtin_packages[p.builtin],
+                                                              tc.style, DirOf(exe)));
+                        continue;
+                    }
+                    NativeBuild nb;
+                    if (!BuildNativePart(*astp, pkg, filename, b, false, nb)) return 1;
+                    rsps.push_back(nb.rsp);
+                }
+                return BuildExecutable(filename, outfile, builddir, tc, buildopts, DirOf(exe),
+                                       msgs, rsps, astp->packages[0].output);
+            }
+            if (program.empty()) return code;
+            // The native parts the program reaches hand the run their
+            // functions by name: a builtin package's from the table compiled
+            // in with it, the others' from libraries built now and loaded.
+            vector<pair<string, const void *>> symbols;
+            BuildOptions jitopts;
+            jitopts.verbose = verbose;
+            for (auto pkg : nativepkgs) {
+                auto &p = astp->packages[pkg];
+                if (p.builtin >= 0) {
+                    if (auto table = builtin_packages[p.builtin].symbols)
+                        for (auto e = table(); e->name; e++) symbols.emplace_back(e->name, e->addr);
+                    continue;
+                }
+                if (!findtc()) return 1;
+                Builder b { tc, jitopts, msgs };
+                NativeBuild nb;
+                if (!BuildNativePart(*astp, pkg, filename, b, true, nb)) return 1;
+                string err;
+                if (!LoadSharedSymbols(nb.jitlib, symbols, err)) {
+                    fprintf(stderr, "cannot load the package %s's library: %s\n", p.name.c_str(),
+                            err.c_str());
+                    return 1;
+                }
+            }
             // The program shares this process, so its exit code becomes ours
             // and whatever it wrote is already on the same streams.
             fflush(msgs);
-            return RunJit(program, JitLibPath(DirOf(argv[0])), filename, progargs, layers);
+            return RunJit(program, JitLibPath(DirOf(exe)), filename, progargs, symbols);
         } catch (CompileError &e) {
             fprintf(stderr, "%s\n", e.msg.c_str());
             return 1;
@@ -721,9 +1159,40 @@ int Main(int argc, char **argv) {
     #include <process.h>
 #else
     #include <pthread.h>
+    #include <unistd.h>
+    #ifdef __APPLE__
+        #include <mach-o/dyld.h>
+    #endif
 #endif
 
 namespace goose {
+
+// The running executable's path with links resolved, so that what is found
+// relative to the compiler (the standard library, the runtime sources) is found
+// however it was started: by a path, through PATH or through a link to it.
+// argv[0] where the system cannot say.
+string ExePath(const char *argv0) {
+    #ifdef _WIN32
+        char path[4096];
+        auto n = GetModuleFileNameA(nullptr, path, sizeof path);
+        if (n && n < sizeof path) return string(path, n);
+    #elif defined(__linux__)
+        char path[4096];
+        auto n = readlink("/proc/self/exe", path, sizeof path);
+        if (n > 0 && (size_t)n < sizeof path) return string(path, (size_t)n);
+    #elif defined(__APPLE__)
+        char path[4096];
+        uint32_t size = sizeof path;
+        if (_NSGetExecutablePath(path, &size) == 0) {
+            if (auto resolved = realpath(path, nullptr)) {
+                string s = resolved;
+                free(resolved);
+                return s;
+            }
+        }
+    #endif
+    return argv0;
+}
 
 // The compile's native stack: address space reserved up front, of which only
 // what a program's depth reaches is ever committed. The typechecker stops at

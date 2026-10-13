@@ -1,11 +1,11 @@
-// stdlib/http.goose over TLS: serve_tls workers on ephemeral ports with the
+// The http package over TLS: serve_tls workers on ephemeral ports with the
 // test-only certificates in test/tls/certs/ (README there), driven by the
 // https:// client. GET and POST, keep-alive and the retry once an idle
 // connection was closed, large bodies both ways, a chunked response, a
 // certificate from an untrusted CA, one for another host name, a server
 // that cannot load its key, and clients on several threads at once. Runs
-// only where the compiler has TLS built in (cmake/tls.cmake); everything is
-// local.
+// only where the http package is built with TLS (packages/http/CMakeLists.txt);
+// everything is local.
 import std;
 import os;
 import http;

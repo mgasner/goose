@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { compilerPath, moduleRoot } = require('../src/config');
-const { runCompiler, parseDiagnostics, checkDiagnostics } = require('../src/diagnostics');
+const { runCompiler, parseDiagnostics, failureMessage } = require('../src/diagnostics');
 
 const root = path.resolve(__dirname, '../..');
 const compiler = process.env.GOOSE_TEST_COMPILER || compilerPath('', root);
@@ -46,6 +46,23 @@ test('real check succeeds without C output or executing the program, including s
     }
 });
 
+test('real check of a module without fn main() succeeds, and still reports its errors', options, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'goose vscode module '));
+    try {
+        const file = path.join(dir, 'helper.goose');
+        fs.writeFileSync(file, 'fn helper(x: i64) -> i64 { x + 1 }\n');
+        const module = config(file);
+        const ok = await runCompiler(module).promise;
+        assert.equal(ok.error, null, ok.output);
+        fs.writeFileSync(file, 'fn helper(x: i64) -> i64 { x + "s" }\n');
+        const [diagnostic] = parseDiagnostics((await runCompiler(module).promise).output, root);
+        assert.equal(diagnostic.file, file);
+        assert.equal(diagnostic.line, 0);
+    } finally {
+        removeFixture(dir);
+    }
+});
+
 test('real errors in imported modules point to that module and include caller locations', options, async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'goose vscode imports '));
     try {
@@ -66,7 +83,7 @@ test('a module part checks through its root, and the part\'s errors stay in the 
     assert.equal(checked, path.join(root, 'stdlib', 'graphql.goose'));
     const clean = await runCompiler(config(checked)).promise;
     assert.equal(clean.error, null, clean.output);
-    assert.deepEqual(checkDiagnostics({ config: config(checked), ...clean }), []);
+    assert.deepEqual(parseDiagnostics(clean.output, root), []);
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'goose vscode module '));
     try {
@@ -80,7 +97,7 @@ test('a module part checks through its root, and the part\'s errors stay in the 
         assert.equal(ok.error, null, ok.output);
         fs.writeFileSync(api, 'namespace lib;\nfn width(f: Field) -> i64 {\n    return f.missing;\n}\n');
         const broken = await runCompiler(config(moduleRoot(api))).promise;
-        const [diagnostic, ...rest] = checkDiagnostics({ config: config(moduleRoot(api)), ...broken });
+        const [diagnostic, ...rest] = parseDiagnostics(broken.output, root);
         assert.deepEqual(rest, [], broken.output);
         assert.equal(diagnostic.file, api);
         assert.equal(diagnostic.line, 2);
@@ -89,7 +106,7 @@ test('a module part checks through its root, and the part\'s errors stay in the 
     }
 });
 
-test('a real compiler error without a location lands on the checked file', options, async () => {
+test('a real compiler error without a location keeps its message for the checked file', options, async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'goose vscode unlocated '));
     try {
         const file = path.join(dir, 'main.goose');
@@ -97,9 +114,7 @@ test('a real compiler error without a location lands on the checked file', optio
         const result = await runCompiler(config(file)).promise;
         assert.ok(result.error);
         assert.deepEqual(parseDiagnostics(result.output, root), []);
-        const [diagnostic] = checkDiagnostics({ config: config(file), ...result });
-        assert.equal(diagnostic.file, file);
-        assert.match(diagnostic.message, /^cannot open file: .*missing\.goose$/);
+        assert.match(failureMessage(result.output), /^cannot open file: .*missing\.goose$/);
     } finally {
         removeFixture(dir);
     }

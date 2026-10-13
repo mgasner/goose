@@ -2,7 +2,7 @@
   "name": "goose-language",
   "displayName": "Goose Language",
   "description": "Syntax highlighting, compiler diagnostics, navigation and tasks for Goose, without a language server.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "aardappel",
   "license": "Apache-2.0",
   "repository": { "type": "git", "url": "https://github.com/aardappel/goose.git", "directory": "vscode" },
@@ -30,12 +30,16 @@
     "vscode-textmate": "^9.2.0"
   },
   "contributes": {
-    "languages": [{ "id": "goose", "aliases": ["Goose", "goose"], "extensions": [".goose"], "configuration": "./language-configuration.json" }],
-    "grammars": [{ "language": "goose", "scopeName": "source.goose", "path": "./syntaxes/goose.tmLanguage.json" }],
+    "languages": [{ "id": "goose", "aliases": ["Goose", "goose"], "icon": { "dark": "./fileicons/goose-light-icon.svg", "light": "./fileicons/goose-dark-icon.svg" }, "extensions": [".goose"], "configuration": "./language-configuration.json" }],
+    "grammars": [
+      { "language": "goose", "scopeName": "source.goose", "path": "./syntaxes/goose.tmLanguage.json" },
+      { "scopeName": "markdown.goose.codeblock", "path": "./syntaxes/goose.markdown.json", "injectTo": ["text.html.markdown"], "embeddedLanguages": { "meta.embedded.block.goose": "goose" } }
+    ],
     "snippets": [{ "language": "goose", "path": "./snippets/goose.json" }],
     "commands": [
       { "command": "goose.check", "title": "Check Program", "category": "Goose", "enablement": "editorLangId == goose && isWorkspaceTrusted" },
       { "command": "goose.run", "title": "Run with JIT", "category": "Goose", "icon": "$(play)", "enablement": "editorLangId == goose && isWorkspaceTrusted" },
+      { "command": "goose.build", "title": "Build Executable", "category": "Goose", "enablement": "editorLangId == goose && isWorkspaceTrusted" },
       { "command": "goose.generateC", "title": "Generate C", "category": "Goose", "enablement": "editorLangId == goose && isWorkspaceTrusted" },
       { "command": "goose.showOutput", "title": "Show Compiler Output", "category": "Goose" }
     ],
@@ -81,7 +85,7 @@
     "taskDefinitions": [{
       "type": "goose", "required": ["action"],
       "properties": {
-        "action": { "type": "string", "enum": ["run", "check", "generateC"], "description": "Compiler operation. Run uses the JIT and is the contributed build task." },
+        "action": { "type": "string", "enum": ["run", "check", "build", "generateC"], "description": "Compiler operation. Run uses the JIT and is the contributed build task; build makes an executable beside the source with `goose build`." },
         "file": { "type": "string", "description": "Source file relative to the workspace folder. Defaults to goose.entryFile or the active file. Supports ${workspaceFolder} and ${file}." },
         "output": { "type": "string", "description": "C output file for generateC; defaults to the source basename with .c." }
       }

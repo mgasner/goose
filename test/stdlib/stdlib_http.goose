@@ -1,4 +1,4 @@
-// runtime-debug: stdlib/http.goose: the request parser on whole, partial
+// runtime-debug: the http package: the request parser on whole, partial
 // and malformed input; the response parser and URLs; then a server worker
 // on an ephemeral port, driven by the client and by raw sockets. Date
 // headers are left out of what is printed.
@@ -241,10 +241,13 @@ fn live_tests() {
     print(http::post(str(base, "/echo"), big, "text/plain", buf, rep), " ", rep.body.len,
           " ", rep.body == big);
     print(http::get("http://127.0.0.1:1/", buf, rep));
-    // Built without the TLS layer linked (test/tls/ has the tests with it),
-    // https:// fails before connecting, saying why.
+    // https:// to where nothing listens: with the package's TLS layer it
+    // fails to connect; built without it, before connecting, saying why.
+    // test/tls/ has the tests of TLS itself.
     var bad = http::Client { .. };
-    print(http::fetch(bad, "GET", "https://127.0.0.1:1/", buf, rep), " ", bad.error);
+    let has_tls = http::tls_available();
+    print(http::fetch(bad, "GET", "https://127.0.0.1:1/", buf, rep), " expected error=",
+          starts_with(bad.error, if has_tls { "cannot connect" } else { "TLS: this program was built without TLS" }));
 
     print("-- raw");
     raw(port, "GET /hello HTTP/1.1\r\nHost: x\r\n\r\nGET /nope HTTP/1.1\r\nHost: x\r\n\r\nGET /close HTTP/1.1\r\n\r\n");

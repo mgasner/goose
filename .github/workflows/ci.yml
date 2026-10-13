@@ -32,23 +32,19 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      # The TinyCC submodule is what the JIT backend is built from, SDL what
-      # the gfx module is, Box3D what the physics module is and Nuklear what
-      # the ui module is; without any of them the compiler still builds, and
-      # that part of the suite is skipped.
+      # The gfx and physics packages are fetched from their own repositories
+      # by the configure below (GOOSE_BUILTIN_LIBS), submodules and all.
       - uses: actions/checkout@v4
-        with:
-          submodules: true
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
-      # SDL3, built for the gfx module from its submodule, needs the headers
-      # of what it can talk to (third_party/SDL/docs/README-linux.md, less
-      # OpenGL, which it is built without); with no window system at all the
-      # build takes the no-gfx path instead. Mesa's lavapipe is a Vulkan
-      # device with no GPU, for the gfx tests to run on.
+      # SDL3, built for the gfx package, needs the headers of what it can
+      # talk to (SDL's docs/README-linux.md, less OpenGL, which it is built
+      # without); with no window system at all the package builds nothing.
+      # Mesa's lavapipe is a Vulkan device with no GPU, for the gfx tests to
+      # run on.
       - name: Install SDL build dependencies
         if: runner.os == 'Linux'
         run: >-
@@ -67,20 +63,20 @@ jobs:
       - name: Fetch SQLite
         run: python scripts/fetch_sqlite.py
 
-      # Mbed TLS, which https:// in the http module is built on, is fetched
+      # Mbed TLS, which https:// in the http package is built on, is fetched
       # rather than committed (third_party/mbedtls/README.md). Windows skips
       # building it: the http module's sockets do not run there yet.
       - name: Fetch Mbed TLS
         run: python scripts/fetch_mbedtls.py
 
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DGOOSE_BUILTIN_LIBS=all
 
       - name: Build
         run: cmake --build build --config Debug
 
       - name: Test
-        run: python test/run_tests.py --profile baseline --cc native --require-clang
+        run: python test/run_tests.py --exe build/${{ runner.os == 'Windows' && 'Debug/goose.exe' || 'goose' }} --profile baseline --cc native --require-clang
 
   sanitize:
     name: Linux / ASan + UBSan
@@ -99,11 +95,11 @@ jobs:
         with:
           python-version: '3.x'
 
-      # No submodule checkout: the sanitizer profile does not run the JIT,
-      # whose program is uninstrumented and outlives its own allocations.
-      # Without SDL, Box3D and Nuklear this is also the build that takes the
-      # no-gfx, no-physics and no-ui paths, where those tests still typecheck
-      # and generate C.
+      # No builtin packages: this is the build that takes the no-gfx and
+      # no-physics paths, where those tests still typecheck and generate C.
+      # The sanitizer profile does not
+      # run the JIT, whose program is uninstrumented and outlives its own
+      # allocations.
 
       # Instrument the C++ compiler as well as the C it emits. -O1 keeps
       # useful sanitizer stacks and compiler build time modest. Generated C

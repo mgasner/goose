@@ -12,9 +12,9 @@
 // itself (a duplicate name) as values. A connection belongs to the thread
 // that opened it, so each thread opens its own.
 //
-// Build and run (from this directory):
-//   goose -o sqlite_inventory.c 33_sqlite_inventory.goose
-//   cc sqlite_inventory.c @$(goose --sqlite-link cc) -o sqlite_inventory
+// Build and run (from this directory); goose build links the sqlite
+// package, which a compiler built with it has compiled in:
+//   goose build 33_sqlite_inventory.goose -o sqlite_inventory
 //   ./sqlite_inventory < data/sqlite_inventory.stdin
 import std;
 import os;

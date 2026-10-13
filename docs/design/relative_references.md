@@ -1,5 +1,18 @@
 # Relative references: self-relative or base-relative?
 
+<details>
+<summary>Table of contents</summary>
+
+- [1. What each encoding means](#1-what-each-encoding-means)
+- [2. Speed](#2-speed)
+- [3. Expressivity](#3-expressivity)
+- [4. Compiler complexity](#4-compiler-complexity)
+- [5. Options](#5-options)
+- [Recommendation](#recommendation)
+- [Outcome](#outcome)
+
+</details>
+
 A relative reference (`T&<u8>`, `T&<u16>`, `T&<u32>`, `T&<u64>`, `T&<varint>`,
 spec §3.9) is a reference stored as a narrow offset. This note compares two
 encodings. At the time of the experiment, the spec defined the first; the second

@@ -11,9 +11,10 @@ The design and its reasons are in
 [`design/inference.md`](design/inference.md).
 
 **HTTPS.** Every hosted provider is HTTPS-only, and the default base URLs
-are `https://`. They work when the program has TLS: the compiler was built
-with Mbed TLS and the program is run in-process, or its C was linked with
-what `goose --tls-link cc` names ([`http.md`](http.md) §3 has the build).
+are `https://`. They work when the program has TLS: the http package it runs
+on was built with Mbed TLS, which then holds for `goose run`, `goose build`
+and C linked with what `goose --http-link cc` names ([`http.md`](http.md)
+§3 has the build).
 The client verifies the provider's certificate against the system's CAs,
 or against the PEM bundle in `c.http.ca_file`. Without TLS, an `https://`
 request fails at once with `http`'s own error, which says how to build

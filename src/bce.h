@@ -389,8 +389,9 @@ struct BCE {
     map<VarDef *, int> mono;   // +1 nondecreasing / -1 nonincreasing, wrap-free.
 
     // While recording: the variables whose assumed invariants some query or
-    // fact used.
+    // fact used, and whether any candidate's write was checked at all.
     set<VarDef *> axused;
+    bool candwrite = false;
     void NoteAxiom(VarDef *v) { if (mode == M_RECORD) axused.insert(v); }
 
     bool Reach(VarDef *v) {
@@ -1427,6 +1428,7 @@ struct BCE {
     void RecordShift(VarDef *v, int64_t c) {
         auto it = cands.find(v);
         if (it == cands.end()) return;
+        candwrite = true;
         auto &st = it->second;
         auto [lo, hi] = IntRange(v->type->intstorage);
         if (c > 0) {
@@ -1448,6 +1450,7 @@ struct BCE {
     void RecordSet(VarDef *v, const Term &t, bool isdecl) {
         auto it = cands.find(v);
         if (it == cands.end()) return;
+        candwrite = true;
         auto &st = it->second;
         if (isdecl) st.declseen = true;
         st.ge0 = st.ge0 && NoWrap(t, v->type->intstorage) && Query(Zero(), t.b, t.off);
@@ -2194,23 +2197,40 @@ struct BCE {
             for (auto v : addrof) gaddr.insert(v);
         }
         for (auto &[v, ok] : gge0) if (gaddr.count(v)) ok = false;
-        for (auto sp : ast.fnspecs) {
-            if (!sp->live || !sp->body) continue;
-            auto any = false;
-            for (auto &[v, ok] : gge0) if (ok) any = true;
-            if (!any) return;
-            SetupSpec(sp);
-            for (auto &[v, ok] : gge0)
-                if (ok) {
-                    cands[v].declseen = true;
-                    ge0.insert(v);   // The inductive hypothesis.
+        // A body checked before a candidate was dropped may have leaned on
+        // it (`x = y` with `y >= 0` assumed, then `y = -5` elsewhere), so the
+        // sweep repeats until one drops nothing: every write is then checked
+        // against exactly the set granted. Each repeat drops a candidate, so
+        // this ends.
+        // A body that writes no candidate cannot drop one, so the repeats
+        // walk only the bodies the first sweep found writing one.
+        set<FnSpec *> writers;
+        auto first = true;
+        for (auto dropped = true; dropped; first = false) {
+            dropped = false;
+            for (auto sp : ast.fnspecs) {
+                if (!sp->live || !sp->body || (!first && !writers.count(sp))) continue;
+                auto any = false;
+                for (auto &[v, ok] : gge0) if (ok) any = true;
+                if (!any) break;
+                SetupSpec(sp);
+                for (auto &[v, ok] : gge0)
+                    if (ok) {
+                        cands[v].declseen = true;
+                        ge0.insert(v);   // The inductive hypothesis.
+                    }
+                mode = M_RECORD;
+                flow = Flow {};
+                candwrite = false;
+                Walk(sp->body);
+                if (candwrite) writers.insert(sp);
+                for (auto &[v, ok] : gge0) {
+                    auto it = cands.find(v);
+                    if (ok && it != cands.end() && !it->second.ge0) {
+                        ok = false;
+                        dropped = true;
+                    }
                 }
-            mode = M_RECORD;
-            flow = Flow {};
-            Walk(sp->body);
-            for (auto &[v, ok] : gge0) {
-                auto it = cands.find(v);
-                if (it != cands.end() && !it->second.ge0) ok = false;
             }
         }
         ge0.clear();

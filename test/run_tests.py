@@ -1196,7 +1196,7 @@ def main():
     # One level of category directories; nested syntax helpers and the modules
     # of the goose_in_goose bootstrap are exercised through their entry points.
     tests = [f for f in sorted(HERE.glob("*/*.goose"))
-             if f.parent.name not in ("errors", "errors_tc", "goose_in_goose") and f.name != "lexer_tokens.goose"]
+             if f.parent.name not in ("errors", "errors_tc", "errors_build", "goose_in_goose") and f.name != "lexer_tokens.goose"]
     if len({f.stem for f in tests}) != len(tests):
         ap.error("fixture names must be unique across categories (shared expected/ and build outputs)")
     # A gfx, physics or ui fixture with error markers is a rejection test,
@@ -1557,6 +1557,25 @@ def main():
             r.ok(f"tc-error {f.name}")
     for f in tc_errors:
         r.show_later(tc_error, f)
+
+    # Build error tests: programs a check accepts, since it builds nothing,
+    # and a build rejects (no fn main(), which only an entry point needs). The
+    # check must print no warnings; the build writes C, so it needs no C
+    # compiler. Their modules' parts live in subdirectories.
+    build_errors = sorted((HERE / "errors_build").glob("*.goose"))
+    build_checks = r.goose_each(["--check"], build_errors)
+    build_runs = r.goose_each(["-o", gendir / "errors_build_%.c"], build_errors)
+
+    def build_error(f):
+        code, out, err = r.screened(f, build_checks[f]())
+        if code != 0:
+            r.fail(f"build-error-checks {f.name} (exit {code})", out + err)
+        elif r.check_warnings(f, out, err):
+            code, out, err = r.screened(f, build_runs[f]())
+            if r.check_error(f, "expected-build-error", code, out, err):
+                r.ok(f"build-error {f.name}")
+    for f in build_errors:
+        r.show_later(build_error, f)
 
     for future in deep:
         r.show(future)

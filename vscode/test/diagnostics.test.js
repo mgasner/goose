@@ -3,7 +3,8 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const path = require('node:path');
-const { parseDiagnostics, CheckQueue } = require('../src/diagnostics');
+const { parseDiagnostics, checkDiagnostics, CheckQueue } = require('../src/diagnostics');
+const { moduleRoot } = require('../src/config');
 
 test('lexer carets, warnings, explicit columns and related instantiations', () => {
     const cwd = path.resolve('workspace');
@@ -95,4 +96,44 @@ test('synchronous launch failures are surfaced and pending timers cancel cleanly
     const pending = queue.schedule({ file: 'a.goose', cwd: '/one' }, 1000);
     queue.invalidate();
     assert.equal(await pending, false);
+});
+
+test('a failed check with no located error is an error on the checked file, without progress lines', () => {
+    const config = { file: path.resolve('lib.goose'), cwd: process.cwd(), compiler: 'goose', timeout: 1000 };
+    const error = Object.assign(new Error('Command failed'), { code: 1 });
+    assert.deepEqual(checkDiagnostics({ config, error, output: '\x1b[1mprogram needs exactly one global fn main()\x1b[0m\nparsed ok: 3 top-level declarations, 2 file(s)\n' }), [
+        { file: config.file, line: 0, severity: 'error', message: 'program needs exactly one global fn main()', related: [] }
+    ]);
+    assert.equal(checkDiagnostics({ config, error, output: 'parsed ok: 1 top-level declarations, 1 file(s)' })[0].message, 'Command failed');
+    const missing = checkDiagnostics({ config, error: Object.assign(new Error('spawn goose ENOENT'), { code: 'ENOENT' }), output: '' });
+    assert.match(missing[0].message, /compiler not found/);
+    assert.equal(checkDiagnostics({ config, error: Object.assign(new Error('killed'), { killed: true }) })[0].message, 'Goose check exceeded 1000 ms or was terminated.');
+});
+
+test('a located error or a successful check adds nothing', () => {
+    const config = { file: path.resolve('lib.goose'), cwd: process.cwd() };
+    const located = checkDiagnostics({ config, error: new Error('Command failed'), output: 'lib/part.goose:13: error: unknown type: Field\nparsed ok: 1' });
+    assert.deepEqual(located.map(item => [item.file, item.line]), [[path.resolve('lib', 'part.goose'), 12]]);
+    assert.deepEqual(checkDiagnostics({ config, error: null, output: 'parsed ok: 1\ntypechecked ok: 1' }), []);
+});
+
+test('two parts of one module share one check of its root', async () => {
+    const files = {
+        [path.resolve('/w/lib.goose')]: 'import .lib.a;\nimport .lib.b;\n',
+        [path.resolve('/w/lib/a.goose')]: '', [path.resolve('/w/lib/b.goose')]: ''
+    };
+    const read = file => { if (!(file in files)) throw new Error('ENOENT'); return files[file]; };
+    const runner = deferredRunner();
+    const queue = new CheckQueue(config => runner.run(config), () => {});
+    const first = queue.schedule({ file: moduleRoot('/w/lib/a.goose', read), cwd: '/w' }, 0);
+    await tick();
+    const second = queue.schedule({ file: moduleRoot('/w/lib/b.goose', read), cwd: '/w' }, 0);
+    await tick();
+    assert.equal(runner.calls.length, 2);
+    assert.equal(runner.calls[0].cancelled, true);
+    runner.calls[1].resolve({ output: 'root checked' });
+    assert.equal(await first, false);
+    assert.equal(await second, true);
+    assert.deepEqual([...queue.results.keys()], [path.resolve('/w/lib.goose')]);
+    queue.invalidate();
 });

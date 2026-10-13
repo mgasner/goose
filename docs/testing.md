@@ -70,6 +70,7 @@ Test fixtures are grouped by category; `run_tests.py` stays at the root of `test
 | `sqlite/` | The `sqlite` module: connections, every column type and NULL, failures and their codes, parameters at every argument count and as `Param` arrays, rows into structs, the statement cache, transactions nested and left early, threads sharing a WAL file, backups and images, and each kind of misuse aborting with its reason. Checked SQL: a schema and statements checked at compile time, rows into declared and generated structs, named parameters from structs, `Nullable` columns, schema files, migrations, the run-time failures of typed reads, drift, and one `sqlite_err_*` rejection fixture per diagnostic. |
 | `ui/` | The `ui` module: fonts, windows and layout, widgets, popups and menus, text editing, style, drawing and the input queries, charts, rendering and input through headless gfx, whether the keys and the mouse are the ui's, a runtime misuse, the layer's misuse messages, and the threading rejection. |
 | `errors/`, `errors_tc/` | Expected parser/resolver and semantic rejections. |
+| `errors_build/` | Programs `--check` accepts (with no warnings) but a build (`-o`) rejects: those without a global `fn main()`. A fixture's module parts live in a subdirectory of its name. |
 | `expected/` | Shared output and runtime-diagnostic expectations. |
 | `run_tests.py` | The Python test runner. |
 | `compiler_roots.cpp` | Root-set join laws, feedback on weakening, order-independent equality and the deliberate comparison projections; compiled and run in both native profiles. |

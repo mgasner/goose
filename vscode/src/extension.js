@@ -2,8 +2,8 @@
 
 const vscode = require('vscode');
 const path = require('node:path');
-const { settings, argumentsFor, stdlibDirectories, absolute } = require('./config');
-const { parseDiagnostics, runCompiler, CheckQueue } = require('./diagnostics');
+const { settings, folderOf, argumentsFor, stdlibDirectories, absolute } = require('./config');
+const { parseDiagnostics, checkDiagnostics, runCompiler, CheckQueue } = require('./diagnostics');
 const { declarations, imports, importCandidates } = require('./language');
 
 const isGoose = doc => doc.languageId === 'goose' && doc.uri.scheme === 'file';
@@ -34,22 +34,17 @@ function activate(context) {
         }
         for (const result of results.values()) {
             const { config, error, output: text } = result;
-            const parsed = parseDiagnostics(text, config.cwd);
+            const located = parseDiagnostics(text, config.cwd).some(item => item.severity === 'error');
+            const parsed = checkDiagnostics(result);
             if (!loggedResults.has(result)) {
                 loggedResults.add(result);
                 output.appendLine(`> ${config.compiler} ${argumentsFor('check', config).map(arg => JSON.stringify(arg)).join(' ')}`);
                 if (text.trim()) output.appendLine(text.trimEnd());
-                if (error && !parsed.some(item => item.severity === 'error')) output.appendLine(error.message);
+                if (error && !located) output.appendLine(error.message);
             }
-            if (error && !parsed.some(item => item.severity === 'error')) {
-                // No location (e.g. missing import or missing executable): still make
-                // the failure visible, but never invent a position in an import.
-                const message = error.code === 'ENOENT'
-                    ? `Goose compiler not found: ${config.compiler}. Set goose.compilerPath to the executable.`
-                    : error.killed ? `Goose check exceeded ${config.timeout} ms or was terminated.`
-                    : text.trim() || error.message;
-                parsed.push({ file: config.file, line: 0, severity: 'error', message, related: [] });
-                if (error.code === 'ENOENT' && reportedFailure !== message) {
+            if (error?.code === 'ENOENT') {
+                const message = parsed[parsed.length - 1].message;
+                if (reportedFailure !== message) {
                     reportedFailure = message;
                     void vscode.window.showWarningMessage(message);
                 }
@@ -77,7 +72,7 @@ function activate(context) {
     const queue = new CheckQueue(runCompiler, results => {
         void publish(results).catch(error => output.appendLine(`Diagnostics: ${error.message}`));
     });
-    const cwdOf = doc => settings(vscode, doc.uri).cwd;
+    const cwdOf = doc => folderOf(vscode, doc.uri).cwd;
     const dirtyIn = cwd => vscode.workspace.textDocuments.some(doc => isGoose(doc) && doc.isDirty && cwdOf(doc) === cwd);
 
     function check(doc) {
@@ -285,7 +280,7 @@ function activate(context) {
     );
     const watcher = vscode.workspace.createFileSystemWatcher('**/*.goose');
     const changedOnDisk = async uri => {
-        const cwd = settings(vscode, uri).cwd;
+        const cwd = folderOf(vscode, uri).cwd;
         // Filesystem notifications can arrive after a manual check of a just-
         // saved file. Do not cancel that check or erase its current results.
         let modified = Infinity;

@@ -527,7 +527,7 @@ int Main(int argc, char **argv) {
             fprintf(msgs, "roundtrip ok: %d bytes of dump\n", (int)dumped.size());
         }
         if (parseonly) return 0;
-        TypeCheckProgram(ast, library);
+        TypeCheckProgram(ast, library, nocgen);
         Optimizer opt(ast, optlevel);
         if (specs) {
             string s;

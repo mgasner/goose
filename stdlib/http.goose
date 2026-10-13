@@ -584,7 +584,12 @@ fn serve_on<F>(listener: i64, limits: Limits = Limits { .. }) -> bool {
                 break;
             }
             res = Response { .. };
-            F(req, res);
+            // Through references, so a block's untyped parameters bind the
+            // two by reference as a named handler's do, rather than copying
+            // req and refusing res, which is not fixed-size.
+            let rq: Request& = req;
+            let rs: Response& = res;
+            F(rq, rs);
             let head_only = req.method == "HEAD";
             let last = !req.keep_alive || res.close;
             write_head(out, res.status, date, res.content_type, res.body.len, last, res.headers);

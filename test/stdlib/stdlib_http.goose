@@ -140,6 +140,15 @@ thread_fn server(listener: i64) {
     http::serve_on(listener, http::Limits { max_body: 1 << 20, .. }, handle);
 }
 
+// The handler as a block: req and res bind by reference, as handle's do.
+thread_fn block_server(listener: i64) {
+    http::serve_on(listener) { req, res =>
+        res.body.append("block saw ");
+        res.body.append(req.path);
+        if req.path == "/gone" { res.status = 410; }
+    };
+}
+
 thread_fn quick_server(listener: i64) {
     http::serve_on(listener, http::Limits { idle_ms: 300, .. }, handle);
 }
@@ -254,9 +263,21 @@ fn live_tests() {
     raw(port, "HEAD /hello HTTP/1.1\r\nConnection: close\r\n\r\n");
 }
 
+fn block_tests() {
+    print("-- block handler");
+    let l = http::listen(0, "127.0.0.1");
+    let base = str("http://127.0.0.1:", http::listener_port(l));
+    thread_spawn(block_server, l);
+    var buf: u8[>..] = [];
+    var rep = http::Reply { .. };
+    print(http::get(str(base, "/hi"), buf, rep), " ", rep.status, " ", rep.body);
+    print(http::get(str(base, "/gone"), buf, rep), " ", rep.status, " ", rep.body);
+}
+
 fn main() {
     parse_tests();
     reply_tests();
     live_tests();
+    block_tests();
     idle_tests();
 }

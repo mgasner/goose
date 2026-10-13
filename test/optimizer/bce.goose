@@ -819,14 +819,27 @@ fn keep_cross_array(v: i64[:], w: i64[:]) -> i64 {
     return s;
 }
 
-// Facts are not collected from `i + 1 < len` (the sum may have wrapped
-// before the compare); spell it `i < len - 1` instead.
+// Facts are collected from `i + 1 < len` only where `i` is bounded already,
+// since the sum may have wrapped before the compare otherwise: here the
+// counter's own invariant `i <= len` bounds it.
 fn plus_one_limitation(s: i64[:]) -> i64 {
     var r = 0;
     var i = 0;
     while i + 1 < s.len {
-        r += s[i + 1];                        // bce:keep
+        r += s[i + 1];                        // bce:elide
         i++;
+    }
+    return r;
+}
+
+// A parameter has no inferred invariant, and nothing bounds `k` above.
+fn plus_one_unbounded(s: i64[:], k: i64) -> i64 {
+    var r = 0;
+    if k < 0 { return 0; }
+    var j = k;
+    while j + 1 < s.len {
+        r += s[j + 1];                        // bce:keep
+        j++;
     }
     return r;
 }
@@ -916,5 +929,6 @@ fn main() {
     let short = data2[0..3];
     print(keep_cross_array(short, data));     // 6
     print(plus_one_limitation(data));         // 35
+    print(plus_one_unbounded(data, kk));      // 30
     print(plus_one_provable(data));           // 35
 }

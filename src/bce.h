@@ -1761,8 +1761,22 @@ struct BCE {
             case T_GT:   le(rs, ls, -1); break;
             case T_GTEQ: le(rs, ls, 0); break;
             case T_EQ:   le(ls, rs, 0); le(rs, ls, 0); break;
-            default: break;   // != alone bounds nothing.
+            default:
+                // != alone bounds nothing, but over the integers it makes a
+                // bound the facts already prove strict: `i <= n` and
+                // `i != n` give `i < n`, the scan-then-test idiom. Only
+                // where a side is a length or a variable that indexes or
+                // bounds an array, which keeps the two queries off the
+                // many character tests a parser makes.
+                if (ls.diff || rs.diff || (!IndexRelevant(lt) && !IndexRelevant(rt))) break;
+                if (Query(lt.b, rt.b, SatSub(rt.off, lt.off))) le(ls, rs, -1);
+                else if (Query(rt.b, lt.b, SatSub(lt.off, rt.off))) le(rs, ls, -1);
+                break;
         }
+    }
+
+    bool IndexRelevant(const Term &t) {
+        return t.b.kind == BK_LEN || (t.b.kind == BK_VAR && relpids.count(varof[t.b.id]));
     }
 
     // `x - y` as its two terms, when the subtraction is the mathematical

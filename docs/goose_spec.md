@@ -3447,8 +3447,6 @@ the end, each with where its resolution lives.
     (`dist[out[k]]`, `bench/goose/graph_csr.goose`) keeps its check — see
     0e. Release-mode wrapping (§6.2) is deliberate and stays, so the
     analysis proves absence of wrap explicitly where it needs to.
-    `docs/design/compiler_weak_spots.md` has more, with reproductions:
-    `i == n` does not combine with `i <= n`.
 0c. **Pointee writes through optionals** — a narrowed optional writes
     through fine, but there is no way to write through an optional without
     narrowing; and rebinding to a plain reference first (`let r: T& = o;`)

@@ -227,6 +227,11 @@ inline int BuildExecutable(const string &rootfile, const string &cfile, const st
             if (exe.size() < 4 || exe.compare(exe.size() - 4, 4, ".exe") != 0) exe += ".exe";
         #endif
     }
+    if (!opts.dryrun) {
+        std::error_code ec;
+        auto exedirpath = filesystem::path(exe).parent_path();
+        if (!exedirpath.empty()) filesystem::create_directories(exedirpath, ec);
+    }
     if (!b.Link(cfile, objects, rsps, exe, builddir, cat(builddir, "/cc.log"))) return 1;
     if (!opts.dryrun) fprintf(msgs, "built %s\n", exe.c_str());
     return 0;

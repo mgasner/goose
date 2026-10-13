@@ -190,11 +190,21 @@ and a program links it statically.
 
 The functions the package's `extern fn`s name must be defined by that C (or
 by the C library); the runtime's own `gs_os_*` and friends belong to the
-standard library. A package's C is self-contained: two packages that must
-share C share a repository, as `gfx`, `audio` and `ui` do. A package whose
-functions keep one state for the process, or that may only be called from
-the main thread, says so in its sidecar, `main_thread_only = true;`, and a
-`thread_fn` calling it is then a compile error.
+standard library. Every `.goose` file under the package root counts as the
+package's, except in a directory below the root holding a sidecar of its
+own (an example program with its own C, say) and in the directories the
+sidecar lists as not the package's:
+
+```goose
+// mylib.build
+exclude = ["tools", "third_party/demo"];
+```
+
+A package's C is self-contained: two packages that must share C share a
+repository, as `gfx`, `audio` and `ui` do. A package whose functions keep
+one state for the process, or that may only be called from the main thread,
+says so in its sidecar, `main_thread_only = true;`, and a `thread_fn`
+calling it is then a compile error.
 
 ### Files a package needs at run time
 

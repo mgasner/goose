@@ -2099,6 +2099,9 @@ struct Package {
     vector<string> cdefines, cflags_cc, cflags_msvc, clibs;
     string cmake_target;
     vector<string> cmake_options;
+    // Directories whose files are none of its own (§4.7): absolute, forward
+    // slashes, trailing /.
+    vector<string> exclude;
     bool main_thread_only = false;
     string output;                          // A program's executable, relative to its root.
     vector<int> required;                   // The packages its files require (§4.3), by index.
@@ -2409,6 +2412,15 @@ struct Ast {
         if (!n) return nullptr;
         auto it = n->functionmap.find("main");
         return it != n->functionmap.end() && it->second.size() == 1 ? it->second[0] : nullptr;
+    }
+
+    // Whether the root file declares a main() in any namespace. Only the
+    // root's are registered, and a main anywhere but the global namespace is
+    // never the entry point, so a file declaring one is meant to be a program.
+    bool DeclaresMain() {
+        for (auto &[name, n] : namespaces)
+            if (n.functionmap.count("main")) return true;
+        return false;
     }
 
     void Dump(string &s) const;  // In dump.h.

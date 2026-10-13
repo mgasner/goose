@@ -4,6 +4,7 @@
 2.5
 1 1 8 64
 8 0 63 3 64
+64 0 63 64 0
 2 1
 true true true true
 true
@@ -30,6 +31,8 @@ true true false 3
 3 true
 2 false
 4 7 -1
+1 2 0 2 -1
+3 3 -1
 true true false
 4 16
 2 2 4
@@ -55,6 +58,7 @@ HELLO WORLD
 9
 32
     ff|-0042|00000101
+-007|ff
 3.14 -3 0.01
 -123 true
 0 false

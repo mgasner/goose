@@ -95,6 +95,59 @@ static int64_t gs_find_pair(sl_u8 s, const void *a, int64_t d, const void *b) {
     return gs_scan_pair(s.data, s.len, a, d, b);
 }
 
+/* std's popcount, clz and ctz (64 for zero): the instruction where the C
+   compiler has one, and counting under TinyCC. MSVC's popcount is an
+   instruction past x86-64's baseline, which /arch:AVX and up promise. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
+static int64_t gs_popcount(uint64_t x) {
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
+    return __builtin_popcountll(x);
+#elif defined(_MSC_VER) && defined(_M_X64) && defined(__AVX__)
+    return (int64_t)__popcnt64(x);
+#else
+    int64_t n = 0;
+    while (x) {
+        x &= x - 1;
+        n++;
+    }
+    return n;
+#endif
+}
+static int64_t gs_clz(uint64_t x) {
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
+    return x ? __builtin_clzll(x) : 64;
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
+    unsigned long i;
+    return _BitScanReverse64(&i, x) ? 63 - (int64_t)i : 64;
+#else
+    int64_t n = 0;
+    if (!x) return 64;
+    while (!(x >> 63)) {
+        x <<= 1;
+        n++;
+    }
+    return n;
+#endif
+}
+static int64_t gs_ctz(uint64_t x) {
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
+    return x ? __builtin_ctzll(x) : 64;
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
+    unsigned long i;
+    return _BitScanForward64(&i, x) ? (int64_t)i : 64;
+#else
+    int64_t n = 0;
+    if (!x) return 64;
+    while (!(x & 1)) {
+        x >>= 1;
+        n++;
+    }
+    return n;
+#endif
+}
+
 GS_API uint8_t gs_os_read_file(sl_u8 path, gs_rref out);
 GS_API uint8_t gs_os_write_file(sl_u8 path, sl_u8 data);
 GS_API uint8_t gs_os_write_file_atomic(sl_u8 path, sl_u8 data);

@@ -8,17 +8,26 @@ language server, runtime dependencies, or compiler changes are required.
 - Syntax highlighting for `.goose` files, including nested block comments,
   escaped strings and characters, raw `"""` strings across lines, decimal/hex
   floats, namespaces and builtins.
+- Highlighting for `goose` fenced code blocks in Markdown (``` or `~~~`), in the
+  editor and in the Markdown preview.
 - Bracket matching, auto-closing, indentation, comment toggling, folding and
   snippets (`main`, `fn`, `struct`, `enum`, `for`, `guard`, `match`, and more).
 - Compiler checks on open/save, error and warning underlines, and Problems
   entries. Use **F8 / Shift+F8** to jump between problems. Lexer errors use the
   compiler's caret; type errors highlight the source line. Instantiation chains
   appear as related locations in Problems.
+  While a Goose file is open, a status bar item shows the last check: **Goose**
+  with a check mark, **Goose: N errors** (opens Problems), or **Goose: Check
+  Failed** when the check failed without a source location (compiler not found,
+  timeout, or an unlocated message). A failure also adds a warning in Problems
+  on the checked file with no text underlined, and clicking the item opens the
+  Goose output with the full compiler output. **Run** next to it runs the file
+  with the JIT.
 - **Goose: Check Program**, **Goose: Run with JIT**, **Goose: Build
   Executable** (`goose build`: an executable beside the source, linked with
   the packages the program uses), **Goose: Generate C**, and
   **Goose: Show Compiler Output** in the Command Palette. The editor's play
-  button and **▶ Goose** status-bar button run the program in a task terminal,
+  button and **Run** status-bar button run the program in a task terminal,
   with stdin and clickable errors.
 - **Ctrl+Shift+B**, **F5**, and **Ctrl+F5** run with JIT while editing Goose
   (**Cmd+Shift+B** for build on macOS). **Goose: Run with JIT** is also available
@@ -75,8 +84,9 @@ for `goose`, `build/Release/goose`, `build/Debug/goose`, and `build/goose` (with
 `.exe` on Windows), then uses `goose` on PATH. For another location, set
 `goose.compilerPath` to the executable, without shell quotes or arguments.
 
-For a project with imported files, set the entry file so that checks and runs
-use the whole program:
+Checking accepts a file with no `fn main()`, so editing an imported file does
+not report a missing `main`. For a project with imported files, set the
+entry file so that checks and runs use the whole program:
 
 ```json
 {
@@ -93,12 +103,15 @@ when no folder is open. Settings can be configured per folder in a multi-root
 workspace. `goose.stdlibPath` supplies `--stdlib`; leave it empty to use Goose's
 usual lookup, including `GOOSE_STDLIB` and directories near the executable.
 
-Checks use `goose --check` and never run the program or generate C. They check
+Checks use `goose check` and never run the program or generate C. They check
 saved files, wait while any open Goose file in the same folder has unsaved
-changes, and clear stale results when sources change. Explicit commands save
-open Goose files in the same folder first. The compiler currently stops at the
-first error and typechecks instantiated functions; the extension preserves
-those limitations. Configuring the entry file is particularly useful for libraries.
+changes, and keep the last result, marked stale, until the next check completes.
+Changing Goose settings or workspace folders, or closing the files that use an
+entry file, clears its results instead.
+Explicit commands save open Goose files in the same folder first. The compiler
+currently stops at the first error and typechecks instantiated functions; the
+extension preserves those limitations. Configuring the entry file is particularly
+useful for libraries.
 
 **Run with JIT** uses `--jit` and needs a Goose build with TinyCC enabled.
 **Generate C** writes a `.c` file alongside the entry file, replacing an existing
@@ -116,7 +129,7 @@ The Goose shortcuts take precedence while a Goose editor has focus. To use
 your existing VS Code build/debug shortcuts instead, set
 `"goose.useRunKeybindings": false`. Existing `tasks.json` group/default choices
 are preserved. Buttons contributed by other extensions, such as CMake Tools,
-still control their own build systems; use the **▶ Goose** button for Goose.
+still control their own build systems; use the **Run** button for Goose.
 
 **Tasks: Run Task** offers tasks for the current Goose file (or configured entry,
 even when no Goose editor is active).

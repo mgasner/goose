@@ -24,14 +24,22 @@ static const char *gs_errmsgs[] = {
     "pop_n count negative or beyond the array's length",
 };
 
+/* Ends the process with `code`, its streams flushed: every runtime error
+   and exit() comes here. The first thread to call it ends the process
+   without the C library's teardown, which two threads running at once
+   crash in on Windows, and which nothing of the program needs; any later
+   caller waits for that. Under TinyCC the program runs inside the
+   compiler, where exit() on the main thread returns to it instead. */
+static GS_NORETURN void gs_end(int code);
+
 GS_API GS_NORETURN void gs_panic(const char *msg) {
     fprintf(stderr, "goose runtime error: %s\n", msg);
-    exit(1);
+    gs_end(1);
 }
 
 GS_API GS_NORETURN void gs_abort(int err, const char *file, int line) {
     fprintf(stderr, "goose runtime error: %s (%s:%d)\n", gs_errmsgs[err], file, line);
-    exit(1);
+    gs_end(1);
 }
 
 GS_API GS_NORETURN void gs_abort_msg(const uint8_t *msg, int64_t len, const char *file,
@@ -39,41 +47,40 @@ GS_API GS_NORETURN void gs_abort_msg(const uint8_t *msg, int64_t len, const char
     fputs("goose runtime error: ", stderr);
     fwrite(msg, 1, (size_t)len, stderr);
     fprintf(stderr, " (%s:%d)\n", file, line);
-    exit(1);
+    gs_end(1);
 }
 
 GS_API GS_NORETURN void gs_exit(int64_t code) {
-    fflush(stdout);
-    exit((int)code);
+    gs_end((int)code);
 }
 
 GS_API GS_NORETURN void gs_idxfail(int64_t i, int64_t n, const char *file, int line) {
     fprintf(stderr, "goose runtime error: index %lld out of bounds (length %lld) "
             "(%s:%d)\n", (long long)i, (long long)n, file, line);
-    exit(1);
+    gs_end(1);
 }
 
 GS_API GS_NORETURN void gs_divfail(const char *file, int line) {
     fprintf(stderr, "goose runtime error: division by zero (%s:%d)\n", file, line);
-    exit(1);
+    gs_end(1);
 }
 
 GS_API GS_NORETURN void gs_divovf(const char *file, int line) {
     fprintf(stderr, "goose runtime error: integer overflow in division (%s:%d)\n", file, line);
-    exit(1);
+    gs_end(1);
 }
 
 GS_API GS_NORETURN void gs_ovf(int64_t a, const char *op, int64_t b, const char *type,
                                const char *file, int line) {
     fprintf(stderr, "goose runtime error: integer overflow (debug): %lld %s %lld at %s "
             "(%s:%d)\n", (long long)a, op, (long long)b, type, file, line);
-    exit(1);
+    gs_end(1);
 }
 
 GS_API GS_NORETURN void gs_ovf_neg(int64_t a, const char *type, const char *file, int line) {
     fprintf(stderr, "goose runtime error: integer overflow (debug): -(%lld) at %s (%s:%d)\n",
             (long long)a, type, file, line);
-    exit(1);
+    gs_end(1);
 }
 
 /* The message of a failing `as` check, with the source value as text. */
@@ -81,7 +88,7 @@ static GS_NORETURN void gs_asfail(const char *why, const char *num, const char *
                                   const char *file, int line) {
     fprintf(stderr, "goose runtime error: as conversion %s (debug): %s as %s (%s:%d)\n",
             why, num, type, file, line);
-    exit(1);
+    gs_end(1);
 }
 
 GS_API GS_NORETURN void gs_asfail_i(const char *why, int64_t v, const char *type,
@@ -308,6 +315,15 @@ static void gs_release_region(const gs_region *r) {
         gs_panic("cannot release data stack address space");
 }
 
+/* Whether this is the first call of gs_end; and where the later ones wait. */
+static int gs_end_first(void) {
+    static volatile LONG ended;
+    return !InterlockedExchange(&ended, 1);
+}
+static GS_NORETURN void gs_park(void) {
+    for (;;) Sleep(INFINITE);
+}
+
 #else  /* posix */
 
 #include <sys/mman.h>
@@ -438,6 +454,11 @@ static uint8_t *gs_os_reserve(size_t usable, size_t size) {
         munmap(p, size);
         gs_panic("cannot protect data stack guard gap");
     }
+    /* Most stacks hold a few bytes, which a transparent huge page at the
+       start would commit 2 MB for. */
+    #ifdef MADV_NOHUGEPAGE
+        madvise(p, usable < (2u << 20) ? usable : (2u << 20), MADV_NOHUGEPAGE);
+    #endif
     return (uint8_t *)p;
 }
 
@@ -445,7 +466,29 @@ static void gs_release_region(const gs_region *r) {
     if (munmap(r->base, r->size)) gs_panic("cannot release data stack address space");
 }
 
+/* Whether this is the first call of gs_end; and where the later ones wait.
+   TinyCC names the memory orders in its stdatomic.h alone. */
+#ifndef __ATOMIC_SEQ_CST
+#define __ATOMIC_SEQ_CST 5
 #endif
+static int gs_end_first(void) {
+    static int ended;
+    return !__atomic_fetch_add(&ended, 1, __ATOMIC_SEQ_CST);
+}
+static GS_NORETURN void gs_park(void) {
+    for (;;) pause();
+}
+
+#endif
+
+static GS_NORETURN void gs_end(int code) {
+    if (!gs_end_first()) gs_park();
+    fflush(NULL);
+    #ifdef __TINYC__
+        if (gs_current_thread_id < 0) exit(code);
+    #endif
+    _Exit(code);
+}
 
 /* The smallest a region gets before a refusal is fatal. */
 #define GS_REGION_MIN (1u << 20)

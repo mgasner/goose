@@ -1892,6 +1892,16 @@ def main():
     r.section("driver verbs")
     r.show_task(driver_verbs)
 
+    def cli_paths():
+        from cli_paths import check_cli_paths
+        try:
+            check_cli_paths(exe, cc, gendir)
+            r.ok("command line paths: new -o directories, \".\" and \"..\" sources, rooted "
+                 "--include, unresolved imports")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("command line paths", str(e))
+    r.show_task(cli_paths)
+
     def runtime_cache():
         from runtime_cache import check_runtime_cache
         try:
@@ -1901,6 +1911,29 @@ def main():
             r.fail("runtime cache", str(e))
     if cc:
         r.show_task(runtime_cache)
+
+    def exit_race():
+        from exit_race import check_exit_race
+        try:
+            check_exit_race(exe, gendir)
+            r.ok("exit race: threads exiting at once end with their code")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("exit race", str(e))
+    if cc:
+        r.show_task(exit_race)
+
+    def huge_pages():
+        from huge_pages import check_huge_pages
+        try:
+            skipped = check_huge_pages(exe, gendir)
+            if skipped:
+                r.say(f"skip huge pages ({skipped})")
+            else:
+                r.ok("huge pages: data stack regions start without them")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("huge pages", str(e))
+    if cc:
+        r.show_task(huge_pages)
 
     def native_toolchain():
         from native_toolchain import check_native_toolchain
@@ -1915,6 +1948,20 @@ def main():
             r.fail("native toolchain", str(e))
     if cc:
         r.show_task(native_toolchain)
+
+    def native_rebuild():
+        from native_rebuild import check_native_rebuild
+        try:
+            skipped = check_native_rebuild(exe, gendir, jit=jit)
+            if skipped:
+                r.say(f"skip native rebuild ({skipped})")
+            else:
+                r.ok("native rebuild: edited C, new and excluded extern fns, CMake options, targets "
+                     "and C++")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("native rebuild", str(e))
+    if cc:
+        r.show_task(native_rebuild)
 
     show_goose_in_goose()
 

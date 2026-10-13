@@ -10,6 +10,9 @@ fn scalars() {
     print(lerp(0.0, 10.0, 0.25));                                                      // 2.5
     print(next_pow2(0), " ", next_pow2(1), " ", next_pow2(5), " ", next_pow2(64));     // 1 1 8 64
     print(popcount(255), " ", popcount(0), " ", clz(1), " ", ctz(8), " ", clz(0));      // 8 0 63 3 64
+    let top: u64 = 0x8000000000000000;
+    let ones: u64 = 0xffffffffffffffff;
+    print(popcount(ones), " ", clz(top), " ", ctz(top), " ", ctz(0), " ", clz(ones));  // 64 0 63 64 0
     var a = 1;
     var b = 2;
     swap(a, b);
@@ -132,6 +135,10 @@ fn searching() {
     let q, found2 = binary_search(sorted, 4);
     print(q, " ", found2);                                                     // 2 false
     print(find("hello world", "o w"), " ", rfind("hello world", "o"), " ", find("abc", "x"));   // 4 7 -1
+    print(find("aab", "ab"), " ", rfind("abab", "ab"), " ", find("ab", ""), " ", rfind("ab", ""),
+          " ", find("a", "ab"));                                               // 1 2 0 2 -1
+    let digits = [3, 1, 4, 1, 5, 9];
+    print(find(digits, [1, 5]), " ", rfind(digits, [1]), " ", find(digits, [9, 9]));   // 3 3 -1
     print(starts_with("hello", "he"), " ", ends_with("hello", "lo"), " ", starts_with("hi", "hello"));   // true true false
 }
 
@@ -223,6 +230,11 @@ fn strings() {
     o.push('|');
     format_uint(o, 5, 2, 8, '0');
     print(o);                                                                  //     ff|-0042|00000101
+    var small: u8[..16] = [];
+    format_int(small, -7, 10, 4, '0');
+    small.push('|');
+    format_uint(small, 255, 16, 0, ' ');
+    print(small);                                                              // -007|ff
     var f: u8[>..] = [];
     format_flt(f, 3.14159, 2);
     f.push(' ');

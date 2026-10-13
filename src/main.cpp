@@ -63,16 +63,18 @@ static bool FileExists(const string &path) {
     return f != nullptr;
 }
 
-// A path split on either separator, with "." and cancelled "x/.." dropped. An
-// absolute path keeps a leading empty component ("/a" -> {"", "a"}), so two
-// absolute paths share it and an absolute and a relative one never do.
+// A path split on either separator, with "." and cancelled "x/.." dropped. A
+// path with a leading separator keeps a leading empty component ("/a" ->
+// {"", "a"}), so two rooted paths share it and a rooted and a relative one
+// never do; "" and "./" are the relative {}.
 static vector<string> PathParts(const string &path) {
     vector<string> parts;
     string cur;
     for (size_t i = 0; i <= path.size(); i++) {
         auto c = i < path.size() ? path[i] : '/';
         if (c != '/' && c != '\\') { cur += c; continue; }
-        if (cur == "." || (cur.empty() && !parts.empty())) {}
+        if (i == 0 && i < path.size()) parts.push_back(cur);
+        else if (cur == "." || cur.empty()) {}
         else if (cur == ".." && !parts.empty() && parts.back() != "..") parts.pop_back();
         else parts.push_back(cur);
         cur.clear();
@@ -322,6 +324,31 @@ void ParseProgram(Ast &ast, const string &rootpath, const vector<string> &stdlib
                                 imppkg = stdlibpkg(dir);
                                 break;
                             }
+                        }
+                        // Not found: where it was looked for, the standard
+                        // library being the directories that hold std.goose.
+                        if (imppath == local) {
+                            auto name = imp.path;
+                            for (auto &c : name) if (c == '/') c = '.';
+                            auto msg = cat("cannot find the module ", name, ", looked for\n    ",
+                                           ForwardSlashes(AbsolutePath(local)));
+                            auto havestd = false;
+                            for (auto &dir : stdlibdirs)
+                                if (FileExists(cat(dir, "std.goose"))) {
+                                    havestd = true;
+                                    Append(msg, "\n    ",
+                                           ForwardSlashes(AbsolutePath(cat(dir, imp.path, ".goose"))));
+                                }
+                            if (!havestd) {
+                                Append(msg, "\nand found no standard library, looking in");
+                                set<string> shown;
+                                for (auto &dir : stdlibdirs) {
+                                    auto abs = ForwardSlashes(AbsolutePath(dir));
+                                    if (shown.insert(abs).second) Append(msg, "\n    ", abs);
+                                }
+                                Append(msg, "\nset --stdlib or GOOSE_STDLIB to its directory");
+                            }
+                            ImportError(filename, imp.line, msg);
                         }
                     }
                 }
@@ -874,7 +901,7 @@ int Main(int argc, char **argv) {
             fprintf(msgs, "roundtrip ok: %d bytes of dump\n", (int)dumped.size());
         }
         if (parseonly) return 0;
-        TypeCheckProgram(ast, library);
+        TypeCheckProgram(ast, library, nocgen);
         Optimizer opt(ast, optlevel);
         if (specs) {
             string s;
@@ -967,18 +994,14 @@ int Main(int argc, char **argv) {
         };
         if (!outfile.empty() && !nocgen) {
             auto out = assemble(!standalone);
-            auto f = fopen(outfile.c_str(), "wb");
-            if (!f) throw CompileError { cat("cannot write output file: ", outfile) };
-            fwrite(out.data(), 1, out.size(), f);
-            fclose(f);
+            if (!WriteFileMakingDirs(outfile, out))
+                throw CompileError { cat("cannot write output file: ", outfile) };
             fprintf(msgs, "wrote %s (%d bytes)\n", outfile.c_str(), (int)out.size());
         }
         if (!headername.empty()) {
             auto header = cg.ExportHeader();
-            auto f = fopen(headername.c_str(), "wb");
-            if (!f) throw CompileError { cat("cannot write export header: ", headername) };
-            fwrite(header.data(), 1, header.size(), f);
-            fclose(f);
+            if (!WriteFileMakingDirs(headername, header))
+                throw CompileError { cat("cannot write export header: ", headername) };
             fprintf(msgs, "wrote %s (%d bytes)\n", headername.c_str(), (int)header.size());
         }
         if (jit && !nocgen) {

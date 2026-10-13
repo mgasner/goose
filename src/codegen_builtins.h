@@ -838,8 +838,12 @@ inline vector<string> CodeGen::EmitThreadSpawn(Call *c, vector<Node *> &an) {
         }
         L("*", szp, " = ", Top(stk), " - (uint8_t *)(", szp, " + 1);");
     }
-    return { cat("gs_thread_spawn(", thunk, ", ", base, ", ", Top(stk), " - ", base,
-                 ")") };
+    // Emitted here, not returned as an expression: a spawn whose id is not
+    // used is a statement whose value is dropped, and must still happen.
+    auto id = T();
+    L("int64_t ", id, " = gs_thread_spawn(", thunk, ", ", base, ", ", Top(stk), " - ", base,
+      ");");
+    return { id };
 }
 
 // The worker's entry: unpacks the arguments, then gives the thread a fresh

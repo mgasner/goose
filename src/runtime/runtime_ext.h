@@ -5,8 +5,10 @@
    it uses here as codegen does (CodeGen::EmitCoreTypes, CT). An --include
    header follows this and may use what it defines. The generated program
    calls the OS primitives behind stdlib/os.goose (spec §7.10, defined in
-   runtime_os.h) and std's byte search directly from `extern "gs_..." fn`
-   declarations; no prototype is emitted for a function declared here. */
+   runtime_os.h), the sockets behind stdlib/http.goose (runtime_net.h) and
+   std's byte search directly from `extern "gs_..." fn` declarations; no
+   prototype is emitted for a function declared here, nor for one the TLS
+   section (runtime_tls.h) defines. */
 
 #ifdef GS_RUNTIME_OBJECT
 #pragma pack(push, 1)
@@ -172,3 +174,42 @@ GS_API int64_t gs_os_time_ns(void);
 GS_API int64_t gs_os_clock_ns(void);
 GS_API void gs_os_sleep_ms(int64_t ms);
 GS_API uint64_t gs_os_random_u64(void);
+GS_API int64_t gs_net_listen(sl_u8 host, int64_t port, int64_t backlog);
+GS_API int64_t gs_net_port(int64_t fd);
+GS_API int64_t gs_net_open(int64_t lfd, int64_t idle_ms);
+GS_API int64_t gs_net_wait(int64_t id, gs_rref buf);
+GS_API uint8_t gs_net_write(int64_t id, int64_t h, sl_u8 a, sl_u8 b);
+GS_API void gs_net_done(int64_t id, int64_t h, sl_u8 rest, int64_t need, uint8_t close_);
+GS_API int64_t gs_net_live(int64_t id);
+GS_API void gs_net_close(int64_t id);
+GS_API int64_t gs_net_connect(sl_u8 host, int64_t port, int64_t timeout_ms);
+GS_API uint8_t gs_net_send(int64_t fd, sl_u8 data);
+GS_API int64_t gs_net_recv(int64_t fd, gs_rref out, int64_t max);
+GS_API void gs_net_close_fd(int64_t fd);
+GS_API int64_t gs_net_date(sl_u8 out);
+
+/* TLS for the sockets above, through a table of the TLS layer's functions
+   (src/tls/tls_api.h has what each does). The runtime holds no TLS of its
+   own: a program built with the layer passes the table from the runtime's
+   TLS section (runtime_tls.h), and one built without it passes NULL, which
+   fails with an error saying so. */
+typedef struct gs_net_tls_ops {
+    void *(*client)(int fd, const char *host, const char *ca_file, int insecure, char *err,
+                    size_t errcap);
+    void *(*server)(const char *cert_file, const char *key_file, char *err, size_t errcap);
+    void (*server_free)(void *conf);
+    void *(*accept)(void *conf, int fd);
+    int (*handshake)(void *t);
+    int64_t (*read)(void *t, uint8_t *dst, int64_t max);
+    int64_t (*write)(void *t, const uint8_t *src, int64_t n);
+    int64_t (*pending)(void *t);
+    void (*free)(void *t);
+} gs_net_tls_ops;
+GS_API int64_t gs_net_tls_client(const gs_net_tls_ops *ops, int64_t fd, sl_u8 host, sl_u8 ca_file,
+                                 uint8_t insecure);
+GS_API uint8_t gs_net_tls_send(int64_t h, sl_u8 data);
+GS_API int64_t gs_net_tls_recv(int64_t h, gs_rref out, int64_t max);
+GS_API void gs_net_tls_close(int64_t h);
+GS_API int64_t gs_net_tls_error(sl_u8 out);
+GS_API int64_t gs_net_open_tls(const gs_net_tls_ops *ops, int64_t lfd, int64_t idle_ms,
+                               sl_u8 cert_file, sl_u8 key_file);

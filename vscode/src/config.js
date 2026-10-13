@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { imports } = require('./language');
 
 function expand(value, folder, file) {
     return value.replace(/\$\{workspaceFolder\}/g, () => folder)
@@ -25,11 +26,61 @@ function compilerPath(configured, folder) {
     return 'goose';
 }
 
-function settings(vscode, uri, definition = {}, taskFolder) {
+// Whether `root`, compiled as the program's root file, loads `target`: what it
+// imports, and what those import in turn, as ParseProgram in src/main.cpp
+// resolves them (`import .a.b;` from the importing file's directory, `import
+// a.b;` from the root's). Only files of the module's own directory
+// (`<dir>/<name>/` beside `<dir>/<name>.goose`) are followed.
+function loads(root, target, read) {
+    const moduleDir = root.slice(0, -'.goose'.length) + path.sep;
+    const queue = [root];
+    const seen = new Set(queue);
+    while (queue.length && seen.size < 512) {
+        const file = queue.shift();
+        let source;
+        try { source = read(file); } catch { continue; }
+        for (const item of imports(source)) {
+            const imported = path.join(item.relative ? path.dirname(file) : path.dirname(root), ...item.parts) + '.goose';
+            if (imported === target) return true;
+            if (imported.startsWith(moduleDir) && !seen.has(imported)) {
+                seen.add(imported);
+                queue.push(imported);
+            }
+        }
+    }
+    return false;
+}
+
+// A file of a module split across several, `<dir>/<name>/<part>.goose`, does
+// not check alone: it uses what the other parts declare. Its module's root
+// file, `<dir>/<name>.goose`, imports the parts and stands for it, and the
+// compiler checks a root without `fn main()`. A root that is itself a part of
+// a module one directory up stands for that one's root in turn.
+function moduleRoot(file, read = name => fs.readFileSync(name, 'utf8')) {
+    let current = path.resolve(file);
+    for (let depth = 0; depth < 32; depth++) {
+        const dir = path.dirname(current);
+        if (path.dirname(dir) === dir) break;
+        const root = `${dir}.goose`;
+        if (!loads(root, current, read)) break;
+        current = root;
+    }
+    return current;
+}
+
+function folderOf(vscode, uri, taskFolder) {
     const workspaceFolder = taskFolder || vscode.workspace.getWorkspaceFolder(uri);
-    const cwd = workspaceFolder ? workspaceFolder.uri.fsPath : path.dirname(uri.fsPath);
+    return { workspaceFolder, cwd: workspaceFolder ? workspaceFolder.uri.fsPath : path.dirname(uri.fsPath) };
+}
+
+function settings(vscode, uri, definition = {}, taskFolder, read) {
+    const { workspaceFolder, cwd } = folderOf(vscode, uri, taskFolder);
     const config = vscode.workspace.getConfiguration('goose', taskFolder?.uri || uri);
-    const file = absolute(definition.file || config.get('entryFile', '') || uri.fsPath, cwd, uri.fsPath);
+    const explicit = definition.file || config.get('entryFile', '');
+    let file = absolute(explicit || uri.fsPath, cwd, uri.fsPath);
+    // Checking the open file of a module checks the module (moduleRoot).
+    // Running or generating C keeps to the file asked for.
+    if (!explicit && (definition.action || 'check') === 'check') file = moduleRoot(file, read);
     return {
         workspaceFolder, cwd, file,
         compiler: compilerPath(config.get('compilerPath', ''), cwd),
@@ -74,4 +125,4 @@ function stdlibDirectories(config, env = process.env) {
     return [...new Set(dirs)];
 }
 
-module.exports = { absolute, compilerPath, settings, argumentsFor, stdlibDirectories };
+module.exports = { absolute, compilerPath, folderOf, moduleRoot, settings, argumentsFor, stdlibDirectories };

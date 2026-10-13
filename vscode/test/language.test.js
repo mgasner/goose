@@ -5,7 +5,7 @@ const test = require('node:test');
 const path = require('node:path');
 const fs = require('node:fs');
 const { declarations, imports, importCandidates } = require('../src/language');
-const { argumentsFor, compilerPath, stdlibDirectories } = require('../src/config');
+const { argumentsFor, compilerPath, moduleRoot, stdlibDirectories } = require('../src/config');
 
 test('outline ignores comments, strings, function types and local bindings', () => {
     const source = `/* fn hidden() { /* struct Hidden {} */ } */
@@ -108,4 +108,40 @@ test('all repository Goose sources can be scanned with valid ranges', () => {
     }
     for (const dir of ['test', 'samples', 'stdlib']) visit(path.join(root, dir));
     assert.ok(files > 100);
+});
+
+test('a module part checks through the root file that imports it', () => {
+    const root = path.resolve('project');
+    const files = {
+        'lib.goose': 'namespace lib;\n// import .lib.hidden;\nimport .lib /* parts */ . base;\nimport lib.api;\n',
+        'lib/base.goose': 'namespace lib;\nimport .sibling;\n',
+        'lib/sibling.goose': '', 'lib/api.goose': '', 'lib/hidden.goose': '', 'lib/deep/x.goose': '',
+        'lib/deep.goose': 'import .deep.x;\n',
+        'app.goose': 'import .app.part;\n', 'app/part.goose': '', 'app/other.goose': '',
+        'top.goose': 'import .top.mid;\n', 'top/mid.goose': 'import .mid.leaf;\n', 'top/mid/leaf.goose': ''
+    };
+    const read = file => {
+        const key = path.relative(root, file).split(path.sep).join('/');
+        if (!(key in files)) throw new Error(`ENOENT ${file}`);
+        return files[key];
+    };
+    const at = file => path.join(root, ...file.split('/'));
+    const resolve = file => path.relative(root, moduleRoot(at(file), read)).split(path.sep).join('/');
+    assert.equal(resolve('lib/base.goose'), 'lib.goose');      // import .lib.base;
+    assert.equal(resolve('lib/api.goose'), 'lib.goose');       // import lib.api; from the root's directory
+    assert.equal(resolve('lib/sibling.goose'), 'lib.goose');   // through another part
+    assert.equal(resolve('lib/hidden.goose'), 'lib/hidden.goose');  // only named in a comment
+    assert.equal(resolve('lib/deep/x.goose'), 'lib/deep.goose');   // lib/deep.goose is not imported by lib.goose
+    assert.equal(resolve('app/other.goose'), 'app/other.goose');
+    assert.equal(resolve('top/mid/leaf.goose'), 'top.goose'); // nested module directories
+    assert.equal(resolve('app.goose'), 'app.goose');
+    assert.equal(resolve('missing/file.goose'), 'missing/file.goose');
+});
+
+test('the repository graphql module parts resolve to stdlib/graphql.goose', () => {
+    const root = path.resolve(__dirname, '../..');
+    for (const part of fs.readdirSync(path.join(root, 'stdlib', 'graphql'))) {
+        assert.equal(moduleRoot(path.join(root, 'stdlib', 'graphql', part)), path.join(root, 'stdlib', 'graphql.goose'), part);
+    }
+    assert.equal(moduleRoot(path.join(root, 'stdlib', 'graphql.goose')), path.join(root, 'stdlib', 'graphql.goose'));
 });

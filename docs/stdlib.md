@@ -9,11 +9,14 @@
 - [vec](#vec)
 - [math](#math)
 - [os](#os)
+- [http](#http)
 - [binary](#binary)
 - [base64](#base64)
 - [csv](#csv)
 - [json](#json)
 - [regex](#regex)
+- [inference](#inference)
+- [agent](#agent)
 - [graphql](#graphql)
 - [gfx](#gfx)
 - [audio](#audio)
@@ -23,10 +26,10 @@
 
 </details>
 
-The standard library has seventeen modules under `stdlib/` and in
-packages: `std`, `dictionary`, `vec`, `math`, `os`, `binary`, `base64`,
-`csv`, `json`, `regex`, `graphql`, `audio`, `gfx`, `physics`, `ui`,
-`sqlite`, and `exception`. Import each module by name,
+The standard library has twenty modules under `stdlib/` and in packages:
+`std`, `dictionary`, `vec`, `math`, `os`, `http`, `binary`, `base64`, `csv`,
+`json`, `regex`, `inference`, `agent`, `graphql`, `audio`, `gfx`, `physics`,
+`ui`, `sqlite`, and `exception`. Import each module by name,
 for example `import std;`. The compiler locates the library in its source
 tree; use `--stdlib <dir>` or `GOOSE_STDLIB` to select another location.
 Everything is written in Goose except the C behind `os`
@@ -96,8 +99,9 @@ The library uses these conventions:
   but its temporary array cannot hold copies of self-relative ones (spec
   §3.9).
 * The `std`, `dictionary`, `vec`, `math`, and `os` names are global;
-  `binary`, `base64`, `csv`, `json`, `regex`, `graphql`, `audio`, `gfx`,
-  `physics`, `ui`, `sqlite` and `exception` use their own namespaces. A local named `fill` or `count`
+  `http`, `binary`, `base64`, `csv`, `json`, `regex`, `inference`, `agent`,
+  `graphql`, `audio`, `gfx`, `physics`, `ui`, `sqlite` and `exception` use
+  their own namespaces. A local named `fill` or `count`
   shadows the corresponding global function, causing an error at a call; a
   global variable of such a name does not, since a call names the functions
   past it (spec §11.1).
@@ -635,8 +639,54 @@ it is not promised writable. User-supplied paths, outputs and saves can
 continue to use ordinary file operations and their chosen locations.
 
 `exit(code)` and `abort(msg)` are builtins, since the checker knows they
-diverge. Subprocesses and networking are not in v1; they arrive as
-`extern fn`s when a program needs them.
+diverge. Subprocesses are not in v1; networking is the `http` module's.
+
+## http
+
+`import http;` is an HTTP/1.1 server and client (`stdlib/http.goose`), on
+the sockets in `src/runtime/runtime_net.h`, for macOS, Linux and the BSDs.
+[`http.md`](http.md) is the guide; [`design/http.md`](design/http.md) is the
+design; `bench/http/` measures it against nginx and libuv.
+
+```goose
+fn serve<F>(port: i64, host: const u8[:] = "0.0.0.0", limits: Limits = Limits { .. }) -> bool
+fn serve_on<F>(listener: i64, limits: Limits = Limits { .. }) -> bool   // F(req: Request&, res: Response&)
+fn serve_tls<F>(port: i64, cert_file: const u8[:], key_file: const u8[:],
+                host: const u8[:] = "0.0.0.0", limits: Limits = Limits { .. }) -> bool
+fn serve_tls_on<F>(listener: i64, cert_file: const u8[:], key_file: const u8[:],
+                   limits: Limits = Limits { .. }) -> bool
+fn tls_available() -> bool                fn tls_error(out: u8[>..]&)   // why TLS last failed
+fn listen(port: i64, host: const u8[:] = "0.0.0.0") -> i64    fn listener_port(listener: i64) -> i64
+fn header(req: Request&, name: const u8[:]) -> const u8[:], bool
+fn query_param(req: Request&, name: const u8[:]) -> const u8[:], bool
+fn decode(out: u8[>..]&, s: const u8[:], plus: bool = false) -> bool
+fn set_header(res: Response&, name: const u8[:], value: const u8[:]) -> bool
+fn parse(s: u8[:], req: Request&, limits: Limits) -> i64, i64     // (n, 0), (0, need), (-status, 0)
+fn fetch(c: Client&, method: const u8[:], url: const u8[:], buf: u8[>..]&, rep: Reply&,
+         body: const u8[:] = "", headers: const u8[:] = "") -> bool
+fn get(url: const u8[:], buf: u8[>..]&, rep: Reply&) -> bool
+fn post(url: const u8[:], body: const u8[:], content_type: const u8[:], buf: u8[>..]&, rep: Reply&) -> bool
+fn close(c: Client&)
+```
+
+Each worker calls `serve`, which runs an event loop of its own over the
+connections it accepts; workers share nothing. A handler fills in
+`res.status`, `res.content_type`, `res.body` and extra headers, and the
+server frames the response. Keep-alive, pipelining, chunked request bodies
+and `Expect: 100-continue` are handled, and malformed or oversized requests
+are refused.
+
+URLs may be `http://` or `https://`. HTTPS runs on Mbed TLS, an optional
+part of the build (`python scripts/fetch_mbedtls.py`, then configure). The
+client verifies the server's certificate against the system's CAs, or the
+PEM bundle in `Client.ca_file`, and checks that it names the host, which it
+also sends as SNI. It speaks TLS 1.2 and 1.3. `Client.insecure_skip_verify`
+turns all of that off, for tests only. `serve_tls` serves HTTPS with a PEM
+certificate chain and key, loaded by each worker for itself. A JIT run has
+TLS when the compiler does; C built with `-o` links what `goose --tls-link
+cc` names, compiled in the same command. Without TLS a program still
+builds and runs, and `https://` and `serve_tls` fail, with `c.error` or
+`tls_error` saying why. [`http.md`](http.md) §3 has the details.
 
 ## binary
 
@@ -791,135 +841,29 @@ for row in rows {
 
 ## json
 
-JSON as RFC 8259 defines it, three ways: a writer that appends values to a
-builder, a parser that builds a document tree, and a reader that maps the
-text straight onto the caller's own types, the way a serde derive does.
-`import json;` puts them in namespace `json`.
-
-### Writing
-
-```goose
-fn format_string(out: u8[>..]&, s: u8[:])    // quoted, with " \ and control characters escaped
-fn format_key(out: u8[>..]&, key: u8[:])     // a quoted key and its colon: "key":
-fn format_number(out: u8[>..]&, v: f64)      // the shortest form that reads back as v
-fn format_int(out: u8[>..]&, v: i64)
-fn format_bool(out: u8[>..]&, b: bool)
-```
-
-The caller writes the brackets and the commas between values. A string's
-bytes from 0x80 up go out as they are, so UTF-8 text stays UTF-8.
-`format_number` writes the fewest significant digits that read back as `v`
-exactly, laid out as serde_json lays them out (`1.0`, `0.1`, `1e-7`,
-`1.5e300`, `0.30000000000000004`), and `null` for NaN and the infinities,
-which JSON has no numbers for.
+`import json;` reads and writes JSON, in Goose (`stdlib/json/`): a writer,
+a document parser that checks the whole text into a flat tape, and a
+cursor that indexes the text and parses values only when they are read.
+Doubles are written shortest round trip and read correctly rounded.
+[`json.md`](json.md) is the guide and reference; [`design/json.md`](design/json.md)
+is the design.
 
 ```goose
-out.push('{');
-json::format_key(out, "name");
-json::format_string(out, player.name);
-out.push(',');
-json::format_key(out, "pos");
-out.push('[');
-json::format_number(out, player.x);
-out.push(',');
-json::format_number(out, player.y);
-out.append("]}");
+fn writer<A>(out: A&) -> Writer<A>                   // w.object() { … }, w.array() { … }, w.key(k),
+fn pretty_writer<A>(out: A&, indent: i64) -> Writer<A>   // w.string/int/uint/float/boolean/none/raw(v), w.field(k, v)
+fn parse(text: const u8[:]) -> Doc                   // d.ok(), d.error { at, message }, d.root() -> Value
+fn cursor(text: const u8[:]) -> Cursor               // c.ok(), c.error, c.root() -> Lazy
+fn write_string<A>(out: A&, s: const u8[:])
+fn write_int<A>(out: A&, v: i64)    fn write_uint<A>(out: A&, v: u64)    fn write_float<A>(out: A&, x: f64)
+fn parse_float(s: const u8[:]) -> f64, bool
 ```
 
-### The document tree
-
-```goose
-struct Node { next: Node&<u32>?, first: Node&<u32>?, key: const u8[:], val: Value }
-enum Value { Null, Bool { v: bool }, Int { v: i64 }, Num { v: f64 }, Str { s: const u8[:] },
-             Arr { count: i64 }, Obj { count: i64 } }
-fn parse(text: u8[:], doc: Node[>..]&, decoded: u8[>..]&) -> Node?, u8[>..]
-                                             // the root, or null and the error
-fn member(n: Node?, key: u8[:]) -> Node?     // the first member named key; null if none
-fn each<F>(n: Node&)                         // F(child) for each element or member, in order
-fn as_f64(n: Node?) -> f64, bool             // an Int or a Num
-fn as_i64(n: Node?) -> i64, bool             // an Int
-fn as_bool(n: Node?) -> bool, bool
-fn as_string(n: Node?) -> const u8[:], bool
-```
-
-`parse` pushes a node for every value onto `doc`, in text order: a link to
-its next sibling, a link to its first child (a container's), its key (empty
-in an array) and its value. Keys and strings are slices of `text`, or, where
-they held escapes, of the text they decode to, which goes onto `decoded`;
-nothing else is copied. A number without a fraction or an exponent that fits
-an `i64` is an `Int`, any other a `Num`, correctly rounded, and infinite
-where it is too large for an `f64`. Escapes decode to UTF-8, a surrogate
-pair to one code point and a lone surrogate to the three bytes of its own;
-strings are not checked to be UTF-8. On malformed text `parse` returns null
-and a message naming the byte at which it found the text malformed, `json:
-expected ',' or '}' at byte 41`, having pushed the nodes before it. The
-parse is one loop with the open containers on a stack of its own, so any
-depth of nesting parses. `member` and the accessors take a null node, so
-lookups chain; duplicate keys stay in the tree, and `member` finds the first.
-
-```goose
-var doc: json::Node[>..] = [];
-var decoded: u8[>..] = [];
-let root, err = json::parse(text, doc, decoded);
-guard root else { abort(err); }
-let w, ok = json::as_i64(json::member(json::member(root, "window"), "width"));
-let items = json::member(root, "items");
-if items {
-    json::each(items) { item =>
-        let name, named = json::as_string(json::member(item, "name"));
-        if named { print(name); }
-    };
-}
-```
-
-### Reading into your own types
-
-```goose
-struct Reader { text: const u8[:], pos: i64, error: const u8[:], error_at: i64 }
-fn reader(text: const u8[:]) -> Reader
-fn each_member<F>(r: Reader&)                // F(key) for each member of the object at the cursor
-fn each_element<F>(r: Reader&)               // F() for each element of the array at the cursor
-fn read_number(r: Reader&) -> f64
-fn read_int(r: Reader&) -> i64               // no fraction or exponent, and fits an i64
-fn read_bool(r: Reader&) -> bool
-fn read_string(r: Reader&, scratch: u8[>..]&) -> const u8[:]
-fn skip(r: Reader&)                          // passes over a value of any kind, checking it
-fn peek(r: Reader&) -> u8                    // the next byte past white space; 0 at the end
-fn finish(r: Reader&) -> bool                // no error, and nothing but white space left
-fn message(r: Reader&) -> u8[>..]            // "json: <what> at byte <n>"
-```
-
-The reader parses as it goes and builds nothing: each block reads the value
-it is handed with the function for the type it expects, and passes over
-what it has no use for with `skip`. `read_string` returns a slice of the
-text, or of `scratch` for a string that held escapes. Keys are handed over
-as written, escapes and all, so a key spelled with an escape never equals a
-plain one. Errors are sticky: a read that meets text it does not expect
-records what it expected and where, and moves the cursor to the end, so
-every read after it fails as well and every loop ends. The caller checks
-once, with `finish`, which also rejects anything but white space after the
-value. A `null` where a value is optional is a `peek(r) == 'n'` and a
-`skip`.
-
-```goose
-struct Item { id: i64, price: f64 }
-
-fn read_items(text: u8[:]) -> Item[>..] {
-    var r = json::reader(text);
-    var items: Item[>..] = [];
-    json::each_element(r) {
-        var it = Item { id: 0, price: 0.0 };
-        json::each_member(r) { key =>
-            if key == "id" { it.id = json::read_int(r); }
-            else if key == "price" { it.price = json::read_number(r); }
-            else { json::skip(r); }
-        };
-        items.push(it);
-    };
-    if !json::finish(r) { abort(json::message(r)); }
-    return items;
-}
-```
+A `Value` (of a document) and a `Lazy` (of a cursor) read the same way:
+`v.get(key)`, `v.at(i)`, `v.each() { x => … }`, `v.members() { k, x => … }`,
+`v.count()`, `v.kind()`, and `v.int()`/`float()`/`string()`/`boolean()`, with
+`try_` forms that also say whether the value was one. A lookup that finds
+nothing gives a missing value, which reads as defaults, so chains need no
+checks along the way.
 
 ## regex
 
@@ -1001,6 +945,51 @@ regex::format_replaced(out, field, template) { caps =>
     if value { value } else { "" }
 };
 ```
+
+## inference
+
+`import inference;` sends conversations to model provider APIs over `http`
+and `json` (`stdlib/inference/`): the Anthropic Messages API, OpenAI-compatible
+Chat Completions, and providers a program declares itself.
+[`inference.md`](inference.md) is the guide; [`design/inference.md`](design/inference.md)
+is the design. Hosted APIs are `https://`, which needs a program with TLS
+(`goose --tls-link`, see `http` above); local servers take an `http://` base URL.
+
+```goose
+fn anthropic(api_key: const u8[:], base_url: const u8[:] = "https://api.anthropic.com") -> Client<Anthropic>
+fn openai(api_key: const u8[:], base_url: const u8[:] = "https://api.openai.com") -> Client<OpenAI>
+fn send<P>(c: Client<P>&, p: Params, conv: Item..[>..]&, res: Response&) -> bool   // appends the reply
+fn user(conv: Item..[>..]&, text: const u8[:])
+fn last_text(conv: Item..[>..]&) -> u8[>..]
+fn each_call<F>(conv: Item..[>..]&)                  // F(id, name, input) for the last reply's tool calls
+```
+
+A conversation is an `Item..[>..]` of role markers and blocks (`Text`,
+`ToolCall`, `ToolResult`, `Opaque`); blocks from the provider keep their exact
+JSON and are sent back unchanged. `send` retries 408, 409, 429, 5xx and
+connection failures. A provider is a type with global overloads of
+`inference_path`, `inference_headers`, `inference_encode` and
+`inference_decode` (and optionally `inference_error`).
+
+## agent
+
+`import agent;` is a tool-using loop over `inference` (`stdlib/agent.goose`),
+described in [`inference.md`](inference.md) §5.
+
+```goose
+fn run<P, H, T>(c: inference::Client<P>&, p: inference::Params, conv: inference::Item..[>..]&,
+                limits: Limits) -> Run        // called run(c, p, conv, limits, hook, tools)
+// tools(call: Call, out: u8[>..]&) -> bool    hook(e: Event) -> bool
+fn no_hook(e: Event) -> bool    fn print_hook(e: Event) -> bool    fn stop_name(stop: i64) -> const u8[:]
+```
+
+Calls to tools not in `p.tools`, and inputs that are not objects or lack a
+required property, get error results without reaching `tools`. A hook can
+stop the run before a request or after a reply, and deny a call. A run stops
+when the model is done, at `max_turns` or `max_output_tokens`, on a reply cut
+off at `max_tokens` (without running its calls), a refusal, an error, or a
+hook; the conversation can always be continued by another run.
+
 ## graphql
 
 `import graphql;` is a GraphQL server engine, written in Goose
@@ -1038,7 +1027,11 @@ finds them from the program's own code. Requests run a level of objects at a
 time: the batch hook `fn batch(objs: Obj[:], sel: graphql::Selection&)` is
 called once per object type per level, before that level's resolvers, and
 `sel.has(name)` says which fields they will be asked for, so a backend sees
-one call per type per level.
+one call per type per level. A resolver that only knows what to load once it
+runs gives `r.later(graphql::Loader(load), key, graphql::Then(give))`: after
+the level's resolvers, each loader runs once with all its keys, then each
+`give(key, s: graphql::Slot&)` gives the value (spec §8.3 has the stored
+calls these are).
 
 ## gfx
 

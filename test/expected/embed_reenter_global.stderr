@@ -1,0 +1,1 @@
+goose runtime error: exported function shrink re-entered from C while outer is running

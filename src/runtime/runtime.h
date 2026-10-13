@@ -9,9 +9,9 @@
    macros, the configuration, the helpers that must inline (arithmetic,
    checks, varints), the data stack state the emitted code reads, and
    declarations of the rest. That rest (runtime_impl.h,
-   runtime_threads.h, and runtime_os.h after runtime_ext.h) needs the
-   platform's headers, which no program's unit includes, and is built one
-   of two ways:
+   runtime_threads.h, and runtime_os.h and runtime_net.h after
+   runtime_ext.h) needs the platform's headers, which no program's unit
+   includes, and is built one of two ways:
 
    - Standalone (`goose --standalone`, and every JIT run): one translation
      unit holds it all, and everything the runtime defines is static.
@@ -106,6 +106,15 @@
 #define GS_INLINE inline
 #endif
 
+/* The free slots of a limited array a construction leaves uninitialized
+   (goose_spec.md 4.2). MSVC 19.44-19.51 miscompiles reads through a copy
+   of a partially written struct (Appendix E), so there they are zeroed. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#define GS_UNWRITTEN(p, n) memset((p), 0, (size_t)(n))
+#else
+#define GS_UNWRITTEN(p, n) ((void)0)
+#endif
+
 #if GS_NEED_THREADS
 #ifdef _MSC_VER
 #define GS_TLS __declspec(thread)
@@ -114,6 +123,15 @@
 #endif
 #else
 #define GS_TLS
+#endif
+
+/* Thread-local whether or not the program has workers: a library's C host
+   may call it from threads of its own, which the export guards (§7.11)
+   tell apart from the one that ran goose_init. */
+#ifdef _MSC_VER
+#define GS_THREAD_LOCAL __declspec(thread)
+#else
+#define GS_THREAD_LOCAL __thread
 #endif
 
 /* The linkage of everything the runtime defines outside this file. */

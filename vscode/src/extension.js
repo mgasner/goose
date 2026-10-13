@@ -2,7 +2,7 @@
 
 const vscode = require('vscode');
 const path = require('node:path');
-const { settings, argumentsFor, stdlibDirectories, absolute } = require('./config');
+const { settings, folderOf, argumentsFor, stdlibDirectories, absolute } = require('./config');
 const { parseDiagnostics, failureMessage, runCompiler, CheckQueue } = require('./diagnostics');
 const { declarations, imports, importCandidates } = require('./language');
 
@@ -142,7 +142,7 @@ function activate(context) {
     const queue = new CheckQueue(runCompiler, results => {
         void publish(results).catch(error => output.appendLine(`Diagnostics: ${error.message}`));
     });
-    const cwdOf = doc => settings(vscode, doc.uri).cwd;
+    const cwdOf = doc => folderOf(vscode, doc.uri).cwd;
     const dirtyIn = cwd => vscode.workspace.textDocuments.some(doc => isGoose(doc) && doc.isDirty && cwdOf(doc) === cwd);
 
     function check(doc) {
@@ -359,7 +359,7 @@ function activate(context) {
     );
     const watcher = vscode.workspace.createFileSystemWatcher('**/*.goose');
     const changedOnDisk = async uri => {
-        const cwd = settings(vscode, uri).cwd;
+        const cwd = folderOf(vscode, uri).cwd;
         // Filesystem notifications can arrive after a manual check of a just-
         // saved file. Do not cancel that check or erase its current results.
         let modified = Infinity;

@@ -2267,7 +2267,8 @@ Function values capture enclosing locals per §7.5, and cannot escape:
 storing them, returning them, or putting them in data is a compile error.
 Every call is direct and inlinable; HOFs compile to hardcoded loops
 (Lobster-style guarantee). There are no closures-as-objects and no runtime
-function pointers in v1.
+function pointers in v1. A call is stored as data
+through a deferred type (§8.3), which needs neither.
 
 A plain `return` inside a function value returns from the **lexically
 enclosing named function**, not from the HOF that calls the value — so a
@@ -2677,7 +2678,9 @@ C must preserve the types and lifetimes of borrowed storage, must not
 retain a borrowed argument beyond the call, and may only append to a
 builder. The compiler assumes an extern may write through its arguments
 but does not mutate unrelated Goose globals; C code is responsible for
-honoring those obligations.
+honoring those obligations. C cannot break the last by calling back into the
+program: an exported function called while Goose is in an extern call aborts
+(§7.11).
 
 ### 7.11 Exporting Goose functions to C
 
@@ -2710,11 +2713,29 @@ and a source without a Goose `fn main()` is accepted. The header declares
 function. It initializes the runtime and the globals and then runs the Goose
 `fn main()`, if there is one, so `main` is where a library keeps its own
 start-up code; exported functions may be called from it. A second call does
-nothing. Initialization is idempotent on the initializing thread; exported
-calls and mutable Goose globals are not thread-safe and must remain on that
-thread. `--header` requires generated C output and at least one export, and
+nothing. `--header` requires generated C output and at least one export, and
 writes declarations and the required packed C type definitions for the
 exported API.
+
+The program belongs to the thread that started it: the one that called
+`goose_init`, or for a program with its own `main`, the one running it. Its
+data stacks and globals are that thread's, so the wrapper checks each call:
+
+* A call on any other thread aborts: `exported function f called on a thread
+  other than the one that ran goose_init`.
+* A call while Goose code is running on that thread aborts: `exported
+  function f re-entered from C while g is running`, where `g` is the export
+  running, or `goose_init` (or `main`) while the program's `fn main()` and its
+  globals' initializers run. Such a call can only come from C that Goose
+  called, through an `extern fn` (§7.10), and would start on the data stacks
+  of the call it interrupts and change globals that call assumes unchanged.
+* A call before `goose_init` aborts: `goose_init must be called before
+  exported functions`.
+
+An export calling another from Goose is an ordinary Goose call, not a call
+through the wrapper, and none of this applies to it. Exported calls in
+sequence from the program's thread, with C calls out of Goose between them,
+are what the boundary supports.
 
 An exported C symbol is emitted as written, as an `extern` one is, and must be a
 C identifier that is not a C keyword and that the program does not otherwise
@@ -2876,6 +2897,70 @@ let a = area(s);     // s: Shape — dispatches on the tag, like a match
 
 This is the language's "virtual function" idiom, without vtables or
 inheritance, and it keeps the closed-world exhaustiveness guarantee.
+
+### 8.3 Deferred calls
+
+A **deferred type** is a call stored as data: a function and the leading
+arguments it will be called with, kept in a variable, an array, a field or a
+queue, and called later with the rest.
+
+```goose
+deferred Job(now: i64) -> bool;          // what a stored call is called with, and returns
+
+fn resize(img: i64, width: i32, now: i64) -> bool { ... }
+fn expire(key: u8[], now: i64) -> bool { ... }
+
+var jobs: Job..[>..] = [];
+jobs.push(Job(resize, 17, 640));         // stores img = 17, width = 640
+jobs.push(Job(expire, "session:42"));    // stores key
+for j in jobs { if !j(clock()) { ... } } // calls resize or expire
+```
+
+* `deferred Name(params) -> rets;` is a top-level declaration, nominal like
+  `struct` and `enum`. Its parameters are the **call-time signature**: every
+  parameter has a type, none has a default, and any type a parameter may
+  have is allowed (references, slices and builders are passed at the call,
+  never stored). Results are as for `fn` (§7.1, §7.3). A deferred type is
+  not generic.
+* **Construction** `D(f, a1, ..., an)` names a function and its first `n`
+  arguments, which are stored. `f` is a top-level `fn` or `extern fn`: not
+  a nested function (its free variables live in a frame, §7.5), not a
+  `thread_fn`, not generic, every parameter typed. Its parameters after the
+  `n` stored ones must be exactly `D`'s, `var` included, and its results
+  exactly `D`'s. Where `f` names overloads, exactly one may fit. The stored
+  arguments are checked as a construction's fields are (§4.2), and every
+  one is written: `f`'s defaults are not used. A stored parameter is
+  **flat** (§1.1) and not resizable, so a deferred type is always flat.
+* **Invocation** `d(args)` calls the function `d` holds with its stored
+  arguments, then `args`. The callee may be any value of the type: a
+  variable, an element, a field (`b.on_press(3)`, fields first, §7.1), a
+  call's result. It is tag dispatch (§8.2) in every respect: the arguments
+  are evaluated before the call, a nonfixed result is built at the call's
+  destination (§4.3), the result's roots and the call's effects are those
+  of every function the type stores, and `return ... from` passes through
+  it (§7.9). A variable-mode value in storage gives the function its stored
+  arguments where they lie; a variable-size one is copied into the
+  function's by-value parameter, as a direct call would copy it.
+* **Membership is the program's.** The functions a deferred type stores are
+  every one some construction anywhere in the program names, in any module,
+  so a library can declare a type that the program importing it fills. The
+  set is decided from the source before checking: a construction in a
+  function never called still counts.
+* A deferred type is an ADT (§3.5) for everything else: modes, placement,
+  copying, equality (`==` compares the function and the stored arguments)
+  and printing (`resize { 17, 640 }`). Fixed mode is open to it only while
+  every stored argument of every member is fixed-size. Its calls have no
+  variant names to write: it cannot be `match`ed, and `D.f` names nothing.
+* **The empty call.** `D.empty` is a value of every deferred type, and its
+  zero value (§4.2): `default<D>()` (fixed mode), a missed `qpoll<D>()`
+  (§11.2). Invoking it aborts, "invoked an empty D" (§9.3). Test for it with
+  `d == D.empty`.
+* A function that can reach an invocation of a deferred type storing it is
+  in a call cycle through that invocation (§7.8): it is declared `recursive
+  fn`, and the cycle's rules apply at the invocation.
+* `from_bytes` has no verifier for a type containing a deferred type: the
+  bytes would choose the function, and the numbering of the stored
+  functions changes as a program does.
 
 ---
 
@@ -3060,6 +3145,7 @@ Aborts (message + exit; not catchable):
   conversions that change the value (§6.3; conversions to a float
   excepted);
 * division by zero (always);
+* invoking the empty call of a deferred type (§8.3);
 * `assert` failures, and the program's own `abort(msg)` (`msg` any `u8`
   array or slice; printed as `goose runtime error: <msg>`);
 * guard-page hits (stack budget exceeded) — safe abort, never corruption;
@@ -3525,6 +3611,10 @@ the caller's own facts about `src` intact.
   thus double as an importable library: give it `fn main_x() { ... }` plus a
   `fn main() { main_x(); }` wrapper, and importers call `main_x` directly. A
   namespaced file does the same with `fn ::main() { ns::main_x(); }`.
+  A program built without a `main` is an error (except with `--header`,
+  §7.11). `goose --check` builds nothing and accepts a root file without
+  one, such as a library's root file that imports its parts: its
+  non-generic functions are then checked as ones no call reaches are.
 
 ### 11.2 Concurrency
 
@@ -3787,14 +3877,11 @@ the end, each with where its resolution lives.
     cannot represent, so post-loop bounds rest on the inferred invariants
     instead; LLVM meets the same wall and works around it by duplicating
     blocks so the conditions never merge, which is available here too. A
-    value loaded from an array has no known range, so indirect indexing
+    64-bit value loaded from an array has no known range (a narrower one
+    has its type's, as a variable does), so indirect indexing
     (`dist[out[k]]`, `bench/goose/graph_csr.goose`) keeps its check — see
     0e. Release-mode wrapping (§6.2) is deliberate and stays, so the
     analysis proves absence of wrap explicitly where it needs to.
-    `docs/design/compiler_weak_spots.md` has more, with reproductions: a
-    counter that also takes one larger (guarded) step loses its invariants
-    in every loop that uses it; a `u8` loaded as an inner index (`T[s[i]]`)
-    gets no range from its type; `i == n` does not combine with `i <= n`.
 0c. **Pointee writes through optionals** — a narrowed optional writes
     through fine, but there is no way to write through an optional without
     narrowing; and rebinding to a plain reference first (`let r: T& = o;`)
@@ -4035,12 +4122,15 @@ unmapped gap after each region turns runaway growth into a safe abort.
 ```
 program     := namespace? topdecl*             // imports may precede namespace
 namespace   := "namespace" ident ";"
-topdecl     := import | struct | enum | typealias | fndecl | globaldecl
+topdecl     := import | struct | enum | deferred | typealias | fndecl | globaldecl
 import      := "import" "."? ident ("." ident)* ";" | "import" ident "from" strlit ";"
 declname    := ident | ident "::" ident | "::" ident   // the namespace, else the file's
 qname       := ident | ident "::" ident | "::" ident   // a declaration reference
 struct      := "struct" declname generics? "{" fieldlist "}"
 enum        := "enum" declname generics? "{" variant ("," variant)* ","? "}"
+deferred    := "deferred" declname "(" dparams? ")" ("->" rettypes)? ";"
+dparams     := dparam ("," dparam)* ","?
+dparam      := "var"? ident ":" type
 variant     := ident ( "{" fieldlist "}" )?
 fieldlist   := field ("," field)* ","?
 field       := ("let" | "const")? ident ":" type ("=" expr)? | "pad" intlit?
@@ -4190,8 +4280,10 @@ compiler's own description, pass by pass and analysis by analysis, is
   on a scratch stack at `qput` and unpacked at the receiver's destination.
 * **C locals at function scope.** Every aggregate-typed C local (a struct,
   array, slice or header) is declared at the top of its C function rather
-  than in the block that uses it, and a literal temporary with unused
-  limited-array slots is zero-initialized. Both work around MSVC 19.44–19.51,
+  than in the block that uses it, and under MSVC the free slots a
+  construction leaves in a limited array (§4.2) are zeroed (`GS_UNWRITTEN`;
+  a literal temporary that does not build field by field is zeroed whole
+  everywhere). Both work around MSVC 19.44–19.51,
   which at any optimization level miscompiles a read through a copy of a
   struct holding the address of a block-scoped local (a slice of a fixed
   array declared in a loop body, passed to an inlined callee), and exploits

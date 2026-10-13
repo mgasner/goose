@@ -9,6 +9,8 @@ abort (nonzero exit) after printing their expected stdout. Each nonblank line
 in expected/<name>.stderr must occur in stderr, so an unrelated crash cannot
 satisfy an expected abort. Compiler error fixtures require `// error:`
 diagnostic substrings in their source and the compiler's normal error exit.
+`// c-has: regex` and `// c-lacks: regex` lines are matched against a
+fixture's -O2 C, for code generation its output cannot show.
 `// warning:` substrings declare the warnings a fixture's typecheck prints,
 one warning line each, in any order; a positive fixture without them must
 print none. A first-line `runtime-debug` marker adds a targeted
@@ -24,8 +26,9 @@ the backend refuses outright is counted as a skip, not a failure.
 
 The audio/ tests use the SDL3 PCM mixer without a device, the gfx/ tests
 use the SDL3 graphics module, the physics/ tests the Box3D
-physics module, the sqlite/ tests the SQLite module and the ui/ tests the
-Nuklear ui module. They always parse,
+physics module, the sqlite/ tests the SQLite module, the ui/ tests the
+Nuklear ui module and the tls/ tests the http module's https:// over
+Mbed TLS (the compiler's own layer, not a package). They always parse,
 typecheck and generate C; they build and run where the compiler has the
 native layers they use built in -- their category's, and any other they
 import, as a ui test drawing through gfx does -- built by `goose build`,
@@ -39,6 +42,9 @@ each of their repositories); the sqlite package, which lives in this tree
 Profiles keep the CI coverage deliberate: baseline compares Goose/native C
 -O0 and -O2 plus the targeted debug-runtime runs; sanitize uses Goose -O2 and
 Clang -O1 with ASan/UBSan on Linux, including the samples and C runtime tests.
+The embed/ cases are C hosts: each case's lib.goose is built with --standalone
+--header, linked with its host.c, and run at -O0 and -O2, the host's output
+compared as that of a fixture named embed_<case>.
 The goose_in_goose/ compiler is one multi-file bootstrap fixture: build three
 native generations, require identical stage-2/stage-3 C, and run a self-check
 of the stage-2 compiler, which stands for both, beside stage 3's build.
@@ -159,6 +165,13 @@ def error_markers(path):
 
 def warning_markers(path):
     return re.findall(r"^// warning: (.+)$", path.read_text(encoding="utf-8"), re.MULTILINE)
+
+
+def c_markers(path):
+    """`// c-has: regex` and `// c-lacks: regex` lines: what the fixture's -O2
+    C must and must not match, for code generation the program's output
+    cannot show."""
+    return re.findall(r"^// c-(has|lacks): (.+)$", path.read_text(encoding="utf-8"), re.MULTILINE)
 
 
 def unmatched_warnings(markers, warnings):
@@ -760,6 +773,21 @@ class Runner:
                     args.append("--jit")
                 with self.gpu(modules):
                     gen[ol] = self.goose(*args, f)
+            markers = c_markers(f)
+            if markers and "2" in levels:
+                self.check_c(f, cfiles["2"], markers)
+
+    def check_c(self, f, cfile, markers):
+        """Matches the fixture's c-has/c-lacks markers against its -O2 C."""
+        if not cfile.is_file():
+            return   # The cgen failure is reported with the program's runs.
+        text = cfile.read_text(encoding="utf-8")
+        bad = [f"c-{kind}: {pat}" for kind, pat in markers
+               if bool(re.search(pat, text, re.MULTILINE)) != (kind == "has")]
+        if bad:
+            self.fail(f"generated C {f.name}", "\n".join(bad))
+        else:
+            self.ok(f"generated C {f.name}")
 
     def build_options(self, key):
         """How a fixture's C is built: at a level ("0", "2"), its dump's
@@ -1359,9 +1387,11 @@ def main():
     # Which native modules (by a fixture's category directory and what it
     # imports) have their package compiled into the compiler: a fixture using
     # one that is not only generates C, so that the suite never has the
-    # compiler fetch and build a package.
+    # compiler fetch and build a package. The tls/ fixtures' layer is the
+    # compiler's own (src/tls.h), not a package's.
     builtin = tc.builtin_modules(exe)
     native = {m: m in builtin for m in tc.NATIVE_MODULES}
+    native["tls"] = tc.have_tls(exe)
     print(f"profile: {args.profile}; C backend: {cc.desc if cc else 'none'}; "
           f"JIT backend: {'TinyCC' if jit else 'none'}; " +
           "; ".join(f"{m}: {'built in' if have else 'not built in'}" for m, have in native.items()))
@@ -1379,7 +1409,7 @@ def main():
     # One level of category directories; nested syntax helpers and the modules
     # of the goose_in_goose bootstrap are exercised through their entry points.
     tests = [f for f in sorted(HERE.glob("*/*.goose"))
-             if f.parent.name not in ("errors", "errors_tc", "goose_in_goose") and f.name != "lexer_tokens.goose"]
+             if f.parent.name not in ("errors", "errors_tc", "errors_build", "goose_in_goose") and f.name != "lexer_tokens.goose"]
     if len({f.stem for f in tests}) != len(tests):
         ap.error("fixture names must be unique across categories (shared expected/ and build outputs)")
     # A gfx, physics or ui fixture with error markers is a rejection test,
@@ -1719,7 +1749,7 @@ def main():
     def native_skips():
         skipped = [name for f in tests for name in fixtures[f].result().nativeskips]
         if skipped:
-            r.say(f"skip running {len(set(skipped))} audio, gfx, physics or ui test(s) (no "
+            r.say(f"skip running {len(set(skipped))} audio, gfx, physics, sqlite, ui or tls test(s) (no "
                   f"layer for them, or no GPU device): " + ", ".join(sorted(set(skipped))))
 
     r.section("generated C, built and run at " + " and ".join(f"-O{ol}" for ol in r.levels))
@@ -1772,6 +1802,35 @@ def main():
                 if out is not None and r.check_stdout(name, name, out):
                     r.ok(f"runtime {name}")
         r.show_task(runtime_lifecycle)
+
+        # A C host linked against a --header library (§7.11), at each level:
+        # embed/<case>/lib.goose built with --standalone --header, beside the
+        # case's host.c, its expected output that of the host, as embed_<case>.
+        # The library's own fn main() runs inside goose_init.
+        def embed(case, ol):
+            name, label = f"embed_{case.name}", f"embed -O{ol} {case.name}"
+            outdir = gendir / "embed" / f"{case.name}-O{ol}"
+            outdir.mkdir(parents=True, exist_ok=True)
+            cfile, hfile = outdir / "lib.c", outdir / "lib.h"
+            efile = outdir / f"host{tc.EXE_SUFFIX}"
+            code, out, err = r.goose(f"-O{ol}", "--standalone", "--header", hfile, "-o", cfile,
+                                     case / "lib.goose")
+            if code != 0:
+                r.fail(f"cgen {label}", out + err)
+                return
+            ok, log = cc.compile([cfile, case / "host.c"], efile,
+                                 opt=int(ol) if args.profile == "baseline" else 1,
+                                 extra=[*extra, f"-I{outdir}", f"-I{HERE / 'embed'}"],
+                                 strict_decls=True, log=outdir / "cc.log")
+            if not ok:
+                r.fail(f"cc {label}", "\n".join(log.splitlines()[:8]))
+                return
+            out = r.run_expected([efile], name, label)
+            if out is not None and r.check_stdout(name, label, out):
+                r.ok(label)
+        for case in sorted(p for p in (HERE / "embed").iterdir() if p.is_dir()):
+            for ol in r.levels:
+                r.show_task(embed, case, ol)
 
         # The same coverage test through clang, release and debug. A compiler
         # that accepts more C than the standard does is not what checks the
@@ -2059,6 +2118,25 @@ def main():
     r.section("typecheck errors (errors_tc/ and native modules' rejection tests)")
     for f in tc_errors:
         r.show_later(tc_error, f)
+
+    # Build error tests: programs a check accepts, since it builds nothing,
+    # and a build rejects (no fn main(), which only an entry point needs). The
+    # check must print no warnings; the build writes C, so it needs no C
+    # compiler. Their modules' parts live in subdirectories.
+    build_errors = sorted((HERE / "errors_build").glob("*.goose"))
+    build_checks = r.goose_each(["--check"], build_errors)
+    build_runs = r.goose_each(["-o", gendir / "errors_build_%.c"], build_errors)
+
+    def build_error(f):
+        code, out, err = r.screened(f, build_checks[f]())
+        if code != 0:
+            r.fail(f"build-error-checks {f.name} (exit {code})", out + err)
+        elif r.check_warnings(f, out, err):
+            code, out, err = r.screened(f, build_runs[f]())
+            if r.check_error(f, "expected-build-error", code, out, err):
+                r.ok(f"build-error {f.name}")
+    for f in build_errors:
+        r.show_later(build_error, f)
 
     r.section("long call chains and guard runs")
     for future in deep:

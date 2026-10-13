@@ -1,0 +1,4 @@
+main: square(7) = 49
+sum_squares(4) = 14
+square(3) = 9
+calls_made = 6

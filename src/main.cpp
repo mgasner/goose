@@ -11,8 +11,10 @@
 #include "parser.h"
 #include "sqlite_check.h"
 #include "resolve.h"
+#include "deferred.h"
 #include "builtins.h"
 #include "gfx.h"
+#include "tls.h"
 #include "typecheck.h"
 #include "typecheck_types.h"
 #include "typecheck_exprs.h"
@@ -439,7 +441,8 @@ void DumpTokens(const string &path) {
 // The runtime C sources embedded into the compiler (runtime_inline.h), in the
 // order a standalone program holds them (runtime.h has how they divide).
 static const char *runtimefiles[] = { "runtime.h", "runtime_impl.h", "runtime_threads.h",
-                                      "runtime_ext.h", "runtime_os.h" };
+                                      "runtime_ext.h", "runtime_os.h", "runtime_net.h",
+                                      "runtime_tls.h" };
 
 static string RuntimeSections(std::initializer_list<const char *> names) {
     string s;
@@ -473,7 +476,7 @@ string RuntimeObjectSource() {
                "#define GS_SEPARATE_RUNTIME 1\n#define GS_RUNTIME_OBJECT 1\n"
                "#define GS_NEED_THREADS 1\n#define GS_RUNTIME_VERSION ", RuntimeVersion(),
                "\n\n", RuntimeSections({ "runtime.h", "runtime_impl.h", "runtime_threads.h",
-                                          "runtime_ext.h", "runtime_os.h" }));
+                                          "runtime_ext.h", "runtime_os.h", "runtime_net.h" }));
 }
 
 // Locates the src/runtime/ directory (only needed by --gen-runtime-header):
@@ -707,6 +710,18 @@ int Main(int argc, char **argv) {
         // Hidden: what a shader compiles to, without a program around it.
         else if (arg == "--compile-shader" && i + 1 < argc) shaderfile = argv[++i];
         else if (arg == "--shader-source" && i + 1 < argc) shadersource = argv[++i];
+        // `--tls-link cc`: the TLS layer under the http module's https://,
+        // which is the compiler's own (tls.h), not a blessed package.
+        else if (arg == "--tls-link" && i + 1 < argc) {
+            try {
+                auto path = TlsLinkFile(DirOf(exe), argv[++i]);
+                printf("%s\n", path.c_str());
+            } catch (CompileError &e) {
+                fprintf(stderr, "%s\n", e.msg.c_str());
+                return 1;
+            }
+            return 0;
+        }
         // `--<name>-link msvc|cc`: the response file of a blessed package
         // compiled into this compiler (builtin.h).
         else if (arg.size() > 7 && arg.rfind("--", 0) == 0 &&
@@ -820,7 +835,7 @@ int Main(int argc, char **argv) {
                         "[--stdlib dir] file.goose [-- program args...] | "
                         "--multi-test [options] file.goose... | --emit-runtime runtime.c | "
                         "--gen-runtime-header | "
-                        "--<package>-link msvc|cc\n");
+                        "--<package>-link msvc|cc | --tls-link cc\n");
         fprintf(stderr, "without -o the program is compiled and run in this process by TinyCC.\n");
         fprintf(stderr, "the .c that -o writes links with the runtime that --emit-runtime "
                         "writes, compiled once;\n--standalone writes one that holds the "
@@ -865,6 +880,7 @@ int Main(int argc, char **argv) {
     // its packages, for the native parts the program needs (native.h).
     unique_ptr<Ast> astp;
     vector<int> nativepkgs;
+    bool usestls = false;
     auto compile = [&]() -> int {
         if (tokens) {
             DumpTokens(filename);
@@ -910,6 +926,7 @@ int Main(int argc, char **argv) {
             fprintf(msgs, "roundtrip ok: %d bytes of dump\n", (int)dumped.size());
         }
         if (parseonly) return 0;
+        CollectDeferredMembers(ast);
         TypeCheckProgram(ast, library, nocgen);
         Optimizer opt(ast, optlevel);
         if (specs) {
@@ -958,9 +975,12 @@ int Main(int argc, char **argv) {
                 if (FileExists(inc)) inc = RelativeTo(inc, DirOf(outfile));
         // The extern-support runtime is written against the generated types,
         // so it goes in after them rather than up front.
-        string_view runtime_ext_text;
+        // The TLS section (runtime_tls.h) defines functions the program
+        // calls as well, so it counts as declaring them.
+        string runtime_ext_text;
         for (auto &rf : runtime_files)
-            if (string_view(rf.name) == "runtime_ext.h") runtime_ext_text = rf.text;
+            if (string_view(rf.name) == "runtime_ext.h" || string_view(rf.name) == "runtime_tls.h")
+                runtime_ext_text += rf.text;
         auto stackcfg = StackConfigOf(cdefines);
         CodeGen cg(ast, runtime_ext_text, includes, norfcheck, library, stackcfg.maxstacks);
         if (stacks) cg.StackReport(msgs, stackcfg);
@@ -970,11 +990,15 @@ int Main(int argc, char **argv) {
         // each before the packages it requires, which is the order a
         // linker resolves their archives in.
         nativepkgs = NativePackagesUsed(ast, cg.usedexterns);
+        // And whether it reaches the TLS layer (runtime_tls.h), which is
+        // the compiler's own rather than a package's: a JIT run takes its
+        // functions, a build links it, when the compiler has it.
+        usestls = cg.usestls && have_tls;
         // Assemble: compiler-set feature defines, the embedded runtime, then
         // the generated program. A program built with a separate runtime
         // holds what runtime.h has of it and the extern support's
         // declarations; a standalone one, as a JIT run builds, all of it.
-        auto assemble = [&](bool separate) {
+        auto assemble = [&](bool separate, bool jitrun) {
             string out = cat("/* Generated by the Goose compiler from ", filename,
                              ". Do not edit.\n"
                              "   Names from the program carry a _g suffix, which keeps them clear of\n"
@@ -993,16 +1017,22 @@ int Main(int argc, char **argv) {
                 Append(out, "#define ", eq == string::npos ? d : d.substr(0, eq), " ",
                        eq == string::npos ? string("1") : d.substr(eq + 1), "\n");
             }
+            // A JIT run hands the program this compiler's own TLS layer; C
+            // written out gets it from `goose --tls-link`, which defines
+            // this too.
+            if (jitrun && cg.usestls && have_tls) out += "#define GS_TLS_LINKED 1\n";
+            auto tls = cg.usestls ? RuntimeSections({ "runtime_tls.h" }) : string();
             if (separate)
                 Append(out, RuntimeSections({ "runtime.h" }), cg.head,
-                       RuntimeSections({ "runtime_ext.h" }), cg.result);
+                       RuntimeSections({ "runtime_ext.h" }), tls, cg.result);
             else
                 Append(out, RuntimeSections({ "runtime.h", "runtime_impl.h", "runtime_threads.h" }),
-                       cg.head, RuntimeSections({ "runtime_ext.h", "runtime_os.h" }), cg.result);
+                       cg.head, RuntimeSections({ "runtime_ext.h", "runtime_os.h", "runtime_net.h" }),
+                       tls, cg.result);
             return out;
         };
         if (!outfile.empty() && !nocgen) {
-            auto out = assemble(!standalone);
+            auto out = assemble(!standalone, false);
             if (!WriteFileMakingDirs(outfile, out))
                 throw CompileError { cat("cannot write output file: ", outfile) };
             fprintf(msgs, "wrote %s (%d bytes)\n", outfile.c_str(), (int)out.size());
@@ -1020,7 +1050,7 @@ int Main(int argc, char **argv) {
                 throw CompileError { "JIT mode does not support threads yet (TinyCC cannot "
                                      "place thread-local storage in an in-memory run); "
                                      "compile with -o and a C compiler instead" };
-            program = assemble(false);
+            program = assemble(false, true);
         }
         return 0;
     };
@@ -1065,6 +1095,7 @@ int Main(int argc, char **argv) {
         program.clear();
         astp.reset();
         nativepkgs.clear();
+        usestls = false;
         try {
             // The compile has a thread of its own. The program a JIT run
             // starts runs back on this one, the main thread, which a window
@@ -1092,6 +1123,7 @@ int Main(int argc, char **argv) {
                     if (!BuildNativePart(*astp, pkg, filename, b, false, nb)) return 1;
                     rsps.push_back(nb.rsp);
                 }
+                if (usestls) rsps.push_back(TlsLinkFile(DirOf(exe), tc.style));
                 return BuildExecutable(filename, outfile, builddir, tc, buildopts, DirOf(exe),
                                        msgs, rsps, astp->packages[0].output);
             }
@@ -1120,6 +1152,7 @@ int Main(int argc, char **argv) {
                     return 1;
                 }
             }
+            if (usestls) AddTlsSymbols(symbols);
             // The program shares this process, so its exit code becomes ours
             // and whatever it wrote is already on the same streams.
             fflush(msgs);

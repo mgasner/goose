@@ -640,6 +640,24 @@ inline void CodeGen::BindLocal(VarDef *d, Node *init, bool forlocal) {
         GenConstruct(init, stk, t);
         return;
     }
+    // A struct or array literal builds in the new variable itself, which
+    // nothing reads before it is bound, rather than in a temporary copied
+    // over (§4.3); a limited array's free slots stay uninitialized (§4.2).
+    auto sl = Is<StructLit>(init);
+    auto al = Is<ArrayLit>(init);
+    if ((sl && InPlaceStruct(t) && TEq(sl->exprtype, t) && !HasRelRef(t)) ||
+        (al && InPlaceArray(al, t) && !HasRelRef(t))) {
+        if (LargeFixedOnStack(t)) {
+            FixedLocal(t, name, "", forlocal);
+            vnames[d] = name;
+        } else {
+            L(CT(t), " ", name, ";");
+        }
+        auto ok = FieldInitAt(init, name, t, true);
+        assert(ok);
+        (void)ok;
+        return;
+    }
     if (LargeFixedOnStack(t)) {
         FixedLocal(t, name, "", forlocal);
         vnames[d] = name;

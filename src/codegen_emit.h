@@ -824,6 +824,49 @@ inline void CodeGen::InitGlobalStack(VarDef *d) {
     }
 }
 
+// The export guards (§7.11). An exported wrapper runs only on the thread
+// that started the program and only when no other export, and no fn main(),
+// is running on it: a callback from C into Goose while Goose is in an
+// `extern` call would start on the caller's stacks and under its bounds
+// facts. gs_export_guard.thread marks the starting thread; .active names
+// what is running, which doubles as the depth (it never gets past one).
+// A library's host may have threads the program does not know about, so
+// there the marks are always thread-local. A program with its own main has
+// no threads but its workers, and needs them thread-local only with those,
+// which also keeps TinyCC (no TLS in an in-memory run) able to build it.
+inline void CodeGen::EmitExportGuards() {
+    hasexports = false;
+    for (auto sf : ast.functions) hasexports |= sf->isexport;
+    if (!hasexports) return;
+    auto tls = library ? "GS_THREAD_LOCAL" : "GS_TLS";
+    // One object, so that a wrapper finds both marks with one thread-local
+    // address (a call on some targets).
+    Append(data, "static ", tls,
+           " struct { int thread; const char *active; } gs_export_guard;\n"
+           "static GS_NORETURN GS_NOINLINE void gs_export_misuse(const char *name) {\n"
+           "    if (!gs_program_initialized && !gs_export_guard.active)\n"
+           "        gs_panic(\"goose_init must be called before exported functions\");\n"
+           "    if (!gs_export_guard.thread)\n"
+           "        fprintf(stderr, \"goose runtime error: exported function %s called on \"\n"
+           "                \"a thread other than the one that ran goose_init\\n\", name);\n"
+           "    else\n"
+           "        fprintf(stderr, \"goose runtime error: exported function %s re-entered \"\n"
+           "                \"from C while %s is running\\n\", name, gs_export_guard.active);\n"
+           "    exit(1);\n"
+           "}\n");
+}
+
+// What the thread starting the program sets around it, with the exports'
+// guards: `name` is what a re-entering export's message says is running.
+inline string CodeGen::ExportGuardEnter(const char *name) {
+    if (!hasexports) return "";
+    return cat("    gs_export_guard.thread = 1;\n    gs_export_guard.active = \"", name, "\";\n");
+}
+
+inline string CodeGen::ExportGuardLeave() {
+    return hasexports ? string("    gs_export_guard.active = 0;\n") : string();
+}
+
 inline void CodeGen::EmitProgramInit() {
     Append(data, "static int gs_program_initialized;\n");
     // Every function is emitted by now, so the counts are final: the main
@@ -840,6 +883,7 @@ inline void CodeGen::EmitProgramInit() {
         EmitThreadThunk(sp, stacks);
         workerregions = std::max(workerregions, stacks + thunkregions[sp]);
     }
+    EmitExportGuards();
     Append(code, "static void gs_program_init(int argc, char **argv) {\n"
                  "    if (gs_program_initialized) return;\n"
                  "    gs_rt_init(argc, argv, ", mainstacks, ", ", mainstacks + globalregions,
@@ -853,11 +897,15 @@ inline void CodeGen::EmitProgramInit() {
     Append(code, "    gs_program_initialized = 1;\n}\n\n");
     // A C host starts the program here: its globals, then fn main() if there
     // is one, which may call the exports and can hold the host's own setup.
+    // Its thread is the one the exports may be called on, and while it runs
+    // (main and the globals' initializers included) a call into one is a
+    // re-entry.
     if (library)
         Append(code, "void goose_init(int argc, char **argv) {\n"
-                     "    if (gs_program_initialized) return;\n"
+                     "    if (gs_program_initialized) return;\n",
+                     ExportGuardEnter("goose_init"),
                      "    gs_program_init(argc, argv);\n",
-                     MainCall(), "}\n\n");
+                     MainCall(), ExportGuardLeave(), "}\n\n");
 }
 
 // The statement that runs fn main(), or nothing for a library without one.
@@ -892,21 +940,27 @@ inline void CodeGen::EmitExports() {
         auto ret = sp->rets.empty() ? string("void")
                    : returnslice ? string("const uint8_t *") : CT(sp->rets[0]);
         Append(exportprotos, ret, " ", sf->cname, "(", params, ");\n");
+        // One branch covers a call before goose_init, from another thread
+        // and from C while Goose is running (EmitExportGuards); the cold
+        // path tells them apart. An abort never comes back through here, so
+        // only the normal return clears the mark.
         Append(code, ret, " ", sf->cname, "(", params, ") {\n"
-                     "    if (!gs_program_initialized)\n"
-                     "        gs_panic(\"goose_init must be called before exported functions\");\n");
+                     "    if (!gs_export_guard.thread || gs_export_guard.active)\n"
+                     "        gs_export_misuse(\"", sf->cname, "\");\n");
+        auto enter = cat("    gs_export_guard.active = \"", sf->cname, "\";\n");
+        auto leave = ExportGuardLeave();
+        auto value = Unique("gs_export_result");
         if (returnslice) {
-            auto value = Unique("gs_export_result");
             Append(code, "    if (!", outlen,
-                   ") gs_panic(\"exported slice length pointer is null\");\n");
-            Append(code, "    ", CT(sp->rets[0]), " ", value, " = ", si.cname, "(", args,
-                   ");\n"
+                   ") gs_panic(\"exported slice length pointer is null\");\n", enter,
+                   "    ", CT(sp->rets[0]), " ", value, " = ", si.cname, "(", args, ");\n", leave,
                    "    *", outlen, " = ", value, ".len;\n"
                    "    return (const uint8_t *)", value, ".data;\n");
         } else if (sp->rets.empty()) {
-            Append(code, "    ", si.cname, "(", args, ");\n");
+            Append(code, enter, "    ", si.cname, "(", args, ");\n", leave);
         } else {
-            Append(code, "    return ", si.cname, "(", args, ");\n");
+            Append(code, enter, "    ", CT(sp->rets[0]), " ", value, " = ", si.cname, "(", args,
+                   ");\n", leave, "    return ", value, ";\n");
         }
         Append(code, "}\n\n");
     }
@@ -926,8 +980,9 @@ inline string CodeGen::ExportHeader() {
 }
 
 inline void CodeGen::EmitMain() {
-    Append(code, "int main(int argc, char **argv) {\n    gs_program_init(argc, argv);\n",
-           MainCall(), "    gs_rt_stats();\n    return 0;\n}\n");
+    Append(code, "int main(int argc, char **argv) {\n", ExportGuardEnter("main"),
+           "    gs_program_init(argc, argv);\n", MainCall(), ExportGuardLeave(),
+           "    gs_rt_stats();\n    return 0;\n}\n");
 }
 
 }  // namespace goose

@@ -1,0 +1,28 @@
+0: scaled { 3 } -> 30
+1: offset { 1, 2 } -> 13
+2: Tick.zero -> 0
+3: empty
+ok 11
+42
+true false false
+resize { 17, 640 }
+resize 17 to 640 at 0
+expire { "session:42" }
+expire session:42 at 10
+Job.empty
+expire x at 1
+false
+expire x at 2
+resize 3 to 4 at 5
+false true
+9 true
+103 false
+*****
+97=6 len=3 
+task 1 at 100
+task 2 at 100
+task 3 schedules 13
+task 13 at 100
+failed: 1, ran: 5
+true false
+5

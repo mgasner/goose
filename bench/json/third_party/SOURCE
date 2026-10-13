@@ -1,0 +1,11 @@
+Third-party code and data for bench/json, unmodified.
+
+yyjson.c, yyjson.h, LICENSE
+  https://github.com/ibireme/yyjson, src/ at master, version 0.13.0
+  (YYJSON_VERSION_STRING), fetched 2026-10-09. MIT license (LICENSE).
+  The baseline: compiled with baselines/yyjson_bench.c.
+
+JSONTestSuite/
+  https://github.com/nst/JSONTestSuite, test_parsing/ at master, fetched
+  2026-10-09. MIT license (JSONTestSuite/LICENSE). y_ files must be
+  accepted, n_ files rejected; i_ files may go either way.

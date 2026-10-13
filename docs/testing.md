@@ -88,6 +88,7 @@ Test fixtures are grouped by category; `run_tests.py` stays at the root of `test
 | `runtime/` | Runtime diagnostics, reusable slot and slice pool operations and array size checks. |
 | `storage/` | Relative references, pools and serialization. |
 | `threads/` | Workers, queues, shared globals and the native runtime lifecycle test. |
+| `embed/` | C hosts of a `--header` library (spec §7.11): each `embed/<case>/` holds `lib.goose` and `host.c`, built with `--standalone --header`, linked by the system C compiler (with `embed/host_thread.h` for a thread of the host's own) and run at -O0 and -O2, its expectations those of a fixture `embed_<case>` in `expected/`. Calls in sequence, an export calling another from Goose, `goose_init` twice and before it, and the aborts for a callback from C into an export (from another export or from `fn main()`) and for a call from a thread other than `goose_init`'s, with and without workers. Not run through TinyCC, which `--header` excludes. |
 | `stdlib/` | Standard-library modules. |
 | `goose_in_goose/` | A Goose-written compiler used as one multi-file bootstrap regression: build and run three generations, check a C fixed point and repeated self-checks of the stage-2 compiler, and compare JIT/native self-compilation. |
 | `gfx/` | The `gfx` graphics module: headless rendering, textures, compute, frames and input, a runtime misuse, shaders from files and from the program; shader and threading rejections (fixtures with `// error:` markers). The programs hold their shaders; the shader files beside them are for the file form of `embed_shader` and `--compile-shader`. `gfx/window/` is the windowed showcase, not part of the suite. |
@@ -95,6 +96,7 @@ Test fixtures are grouped by category; `run_tests.py` stays at the root of `test
 | `sqlite/` | The `sqlite` module: connections, every column type and NULL, failures and their codes, parameters at every argument count and as `Param` arrays, rows into structs, the statement cache, transactions nested and left early, threads sharing a WAL file, backups and images, and each kind of misuse aborting with its reason. Checked SQL: a schema and statements checked at compile time, rows into declared and generated structs, named parameters from structs, `Nullable` columns, schema files, migrations, the run-time failures of typed reads, drift, and one `sqlite_err_*` rejection fixture per diagnostic. |
 | `ui/` | The `ui` module: fonts, windows and layout, widgets, popups and menus, text editing, style, drawing and the input queries, charts, rendering and input through headless gfx, whether the keys and the mouse are the ui's, a runtime misuse, the layer's misuse messages, and the threading rejection. |
 | `errors/`, `errors_tc/` | Expected parser/resolver and semantic rejections. |
+| `errors_build/` | Programs `--check` accepts (with no warnings) but a build (`-o`) rejects: those without a global `fn main()`. A fixture's module parts live in a subdirectory of its name. |
 | `expected/` | Shared output and runtime-diagnostic expectations. |
 | `run_tests.py` | The Python test runner. |
 | `compiler_roots.cpp` | Root-set join laws, feedback on weakening, order-independent equality and the deliberate comparison projections; compiled and run in both native profiles. |
@@ -173,6 +175,15 @@ generate C. When the compiler was configured with the package
 is deterministic across platforms and worker counts, so they print physics
 results, rounded, and compare them exactly. Between them they call every
 function of the layer.
+
+The `tls/` tests exercise HTTPS in the http module (`docs/design/http.md`)
+in the same way. Its TLS layer is the compiler's own, not a package's: when
+the compiler has it from `third_party/mbedtls` (`scripts/fetch_mbedtls.py`),
+`goose build` links it (`goose --tls-link cc` names the response file, which
+also defines `GS_TLS_LINKED`). Otherwise they only generate C and are
+skipped. They run servers and clients on loopback, on threads, so they do
+not run through TinyCC. Their certificates are test-only ones in
+`tls/certs/`.
 
 The `ui/` tests exercise the ui module of the gfx package (its `docs/ui.md`) in the
 same way, linking `goose --ui-link` and, for the one that renders through

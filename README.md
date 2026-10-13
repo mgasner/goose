@@ -53,6 +53,13 @@ language's type and lifetime rules make this memory model safe to use.
 * **Threads that share nothing.** A worker is compiled as a separate program
   with its own memory, and flat values cross typed queues as a `memcpy`. Data
   races, locks, atomics and memory orderings do not exist in the language.
+* **Stored calls without function pointers.** `deferred Job(now: i64);`
+  declares a call to keep for later: `Job(resize, 17, 640)` stores a
+  function and its first arguments, and `j(now)` makes the call. The
+  compiler collects every function a program stores, across modules, into
+  an enum, so a stored call is a tag byte and its arguments (9 bytes for
+  one `u64`, where a `std::function` is 32), and calling it is a tag
+  dispatch, not an indirect call ([benchmarks](bench/deferred/results.md)).
 * **Generics and higher-order functions with no overhead.** An untyped
   parameter is generic. Function values are compile-time entities, so
   `xs.filter() { it > 0 }` compiles to the loop it looks like and builds its
@@ -421,6 +428,13 @@ Linux, SDL needs the X11 or Wayland development packages
 ([`third_party/SDL/docs/README-linux.md`](https://github.com/libsdl-org/SDL/blob/main/docs/README-linux.md));
 without them the build leaves the `gfx` module out and says what to install.
 
+HTTPS in the `http` module is built on Mbed TLS, which is fetched rather than
+being a submodule: `python scripts/fetch_mbedtls.py` downloads the pinned
+release and checks its hash, and the next configure builds it in
+([`third_party/mbedtls/README.md`](third_party/mbedtls/README.md)). Without
+it, or with `-DGOOSE_TLS=OFF`, `https://` fails with an error saying TLS is
+not built in.
+
 The runner scripts prefer `build/Release`, then `build/RelWithDebInfo`, then
 `build`, then `build/Debug`. Pass `--exe` to select a specific compiler; use an
 explicit Debug executable when testing with compiler assertions enabled.
@@ -458,7 +472,8 @@ run. Intermediates go under `~/.goose` (`GOOSE_HOME`), the runtime object
 compiled once per C compiler. Useful flags of both forms: `-O0`/`-O1`/`-O2`
 set the inlining level (a build defaults to `-O2`, a run to `-O1`),
 `--bce-lines` reports the bounds checks kept per line, and `-DGS_DEBUG=1` is
-what `--debug` defines. Every resizable value lives on a data stack of 2 GB
+what `--debug` defines. `goose check` (or `--check`) needs no `fn main()`, so
+a library's root file checks on its own. Every resizable value lives on a data stack of 2 GB
 of reserved address space, committed as it is used: `--stack-reserve 16G`
 changes that for a program, `--stacks` reports how many data stacks the
 program and each of its workers can take and the cap that puts on
@@ -492,8 +507,10 @@ instead, and builds on its own. A program using `audio`, `gfx`, `physics` or
 `ui` also links that module's layer, which `goose --audio-link msvc|cc`,
 `--gfx-link`, `--physics-link` and `--ui-link` name in a response file (`cc
 cube.c goose_runtime.o -o cube @$(goose --gfx-link cc)`, a ui program's
-before the gfx one it draws through). `goose build --dry-run` prints all of
-this for the program at hand.
+before the gfx one it draws through), and a program using `https://` links
+the TLS layer `goose --tls-link cc` names, which also turns TLS on in the
+program's C. `goose build --dry-run` prints all of this for the program at
+hand.
 
 A program using `audio` plays procedural mono/stereo PCM through SDL3 without
 opening a graphics window. See the [audio reference](docs/stdlib.md#audio).

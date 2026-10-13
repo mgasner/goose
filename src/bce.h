@@ -205,6 +205,7 @@ struct BCE {
     static constexpr int64_t OFFCAP = int64_t(1) << 32;
     static constexpr int64_t CCAP = int64_t(1) << 60;
     static constexpr size_t MAXFACTS = 200;
+    static constexpr int MAXROUNDS = 8;   // Invariant-recording passes per body.
 
     // Saturating adds: INF is an absorbing "unprovable" sentinel, positive
     // overflow saturates to it (weakens, never strengthens, a <= bound), and
@@ -533,6 +534,11 @@ struct BCE {
     map<VarDef *, vector<int>> lelen;
     map<VarDef *, int> mono;   // +1 nondecreasing / -1 nonincreasing, wrap-free.
 
+    // While recording: the variables whose assumed invariants some query or
+    // fact used.
+    set<VarDef *> axused;
+    void NoteAxiom(VarDef *v) { if (mode == M_RECORD) axused.insert(v); }
+
     bool Reach(VarDef *v) {
         return v && (v->isglobal || v->captured || addrof.count(v) != 0);
     }
@@ -637,8 +643,10 @@ struct BCE {
             for (size_t i = 0; i < nodes.size(); i++) {
                 if (nodes[i].kind != BK_VAR) continue;
                 auto it = lelen.find(varof[nodes[i].id]);
-                if (it != lelen.end())
+                if (it != lelen.end()) {
+                    NoteAxiom(it->first);
                     for (auto pid : it->second) add(LenBase(pid));
+                }
             }
         auto idx = [&](const Base &b) {
             for (size_t i = 0; i < nodes.size(); i++) if (nodes[i] == b) return (int)i;
@@ -668,7 +676,10 @@ struct BCE {
                     edges.push_back({ 0, (int)i, -lo });
                     edges.push_back({ (int)i, 0, hi });
                 }
-                if (ge0.count(v)) edges.push_back({ 0, (int)i, 0 });
+                if (ge0.count(v)) {
+                    NoteAxiom(v);
+                    edges.push_back({ 0, (int)i, 0 });
+                }
                 auto it = lelen.find(v);
                 if (it != lelen.end())
                     for (auto pid : it->second) {
@@ -788,8 +799,13 @@ struct BCE {
         auto lo = minus ? li.lo - ri.hi : li.lo + ri.lo;
         auto hi = minus ? li.hi - ri.lo : li.hi + ri.hi;
         if (lo < -CCAP || hi > CCAP) return {};
-        return IvalTerm(OpType(b), lo, hi);
+        auto r = IvalTerm(OpType(b), lo, hi);
+        if (r.ok && minus) exactdiffs.insert(r.b.id);
+        return r;
     }
+    // The interval terms above of a subtraction: the machine computed the
+    // mathematical difference (DiffOf).
+    set<int> exactdiffs;
 
     // ------------------------------------------------------------------
     // Term extraction: a machine integer expression as base + offset. Offset
@@ -848,6 +864,8 @@ struct BCE {
         if (auto b = Is<Binary>(n); b && (b->op == T_DIV || b->op == T_SHR))
             return Derived(n, [&] { return QuotTerm(b); });
         if (auto ac = Is<AsCast>(n)) return Derived(n, [&] { return CastTerm(ac); });
+        if (auto d = Is<Dot>(n); Is<Index>(n) || (d && d->IsField()))
+            return Derived(n, [&] { return LoadTerm(n); });
         // A spliced-in call body (or a bare block) is its value expression.
         if (auto ib = Is<InlineBlock>(n)) return BlockValueTerm(ib->body, ib->sf);
         if (auto bl = Is<Block>(n)) return BlockValueTerm(bl, nullptr);
@@ -1018,6 +1036,19 @@ struct BCE {
             if (!rt.ok || !CmpAdmissible(rt) || !Query(Zero(), rt.b, SatSub(rt.off, 1))) return;
         }
         b->nonneg = true;
+    }
+
+    // An element or field loaded from memory holds a value of its type, so
+    // one narrower than 64 bits lies in the type's range (§3.1) as a
+    // variable of that type does (the storage-range axiom): `T[s[i]]`
+    // against a `T[256]` needs no guard for a `u8` s. A wider one says
+    // nothing (TODO 0f).
+    Term LoadTerm(Node *n) {
+        if (mode == M_KILLS) return {};
+        auto t = n->exprtype;
+        if (!t || t->kind != TY_INT || IntBits(t->intstorage) >= 64) return {};
+        auto [lo, hi] = IntRange(t->intstorage);
+        return IvalTerm(t, lo, hi);
     }
 
     // A numeric cast whose value is inside the target's range is the
@@ -1735,6 +1766,7 @@ struct BCE {
             st.ge0 = st.ge0 && Query(Zero(), VarBase(v), c);          // v >= -c.
             if (!nowrap) st.le.clear();
         }
+        Unassume(v, st);
     }
 
     void RecordSet(VarDef *v, const Term &t, bool isdecl) {
@@ -1746,6 +1778,19 @@ struct BCE {
         for (auto pit = st.le.begin(); pit != st.le.end();)
             if (t.ok && Query(t.b, LenBase(*pit), SatSub(0, t.off))) ++pit;
             else pit = st.le.erase(pit);
+        Unassume(v, st);
+    }
+
+    // A candidate a write has just failed stops being assumed for the rest
+    // of the walk, so the writes after it that copy it fail in the same
+    // walk rather than one walk later. The walk is still only conclusive
+    // if what failed was never used (RunSpec).
+    void Unassume(VarDef *v, const Cand &st) {
+        if (!st.ge0) ge0.erase(v);
+        auto it = lelen.find(v);
+        if (it == lelen.end()) return;
+        if (st.le.empty()) lelen.erase(it);
+        else it->second = st.le;
     }
 
     // Which way a plain assignment moves v, measured against v's value just
@@ -1760,13 +1805,19 @@ struct BCE {
     }
 
     // Re-assert granted axioms as stored facts so a shift transports them.
+    // While recording, the granted set is the inductive hypothesis.
     void Materialize(VarDef *v) {
-        if (mode != M_JUDGE) return;
+        if (mode == M_KILLS) return;
         auto vb = VarBase(v);
-        if (ge0.count(v)) AddFactB(Zero(), vb, 0);
+        if (ge0.count(v)) {
+            NoteAxiom(v);
+            AddFactB(Zero(), vb, 0);
+        }
         auto it = lelen.find(v);
-        if (it != lelen.end())
+        if (it != lelen.end()) {
+            NoteAxiom(v);
             for (auto pid : it->second) AddFactB(vb, LenBase(pid), 0);
+        }
     }
 
     // Whether base + off is the value computed at storage s, rather than one
@@ -2131,17 +2182,67 @@ struct BCE {
                 default:     op = T_EQ; break;
             }
         }
-        auto le = [&](const Term &x, const Term &y, int64_t d) {   // x <= y + d.
-            AddFactB(x.b, y.b, SatAdd(SatSub(y.off, x.off), d));
+        // A side is a term, or the difference of two when it is `x - y`
+        // against a constant, which is still a difference constraint:
+        // `n - i < 2` is `n <= i + 1`.
+        struct Side { Term p, m; bool diff = false; };
+        Side ls { lt }, rs { rt };
+        if (rt.b.kind == BK_ZERO) DiffOf(b->left, lt, ls);
+        if (lt.b.kind == BK_ZERO) DiffOf(b->right, rt, rs);
+        auto le = [&](const Side &x, const Side &y, int64_t d) {   // x <= y + d.
+            if (!x.diff && !y.diff) {
+                AddFactB(x.p.b, y.p.b, SatAdd(SatSub(y.p.off, x.p.off), d));
+            } else if (x.diff) {
+                // xp - xm <= c + d, so xp <= xm + (c + d + xm.off - xp.off).
+                auto k = SatAdd(SatAdd(y.p.off, d), SatSub(x.m.off, x.p.off));
+                if (k != INF) AddFactB(x.p.b, x.m.b, k);
+            } else {
+                // c <= yp - ym + d, so ym <= yp + (yp.off - ym.off + d - c).
+                auto k = SatSub(SatAdd(SatSub(y.p.off, y.m.off), d), x.p.off);
+                if (k != INF) AddFactB(y.m.b, y.p.b, k);
+            }
         };
         switch (op) {
-            case T_LT:   le(lt, rt, -1); break;
-            case T_LTEQ: le(lt, rt, 0); break;
-            case T_GT:   le(rt, lt, -1); break;
-            case T_GTEQ: le(rt, lt, 0); break;
-            case T_EQ:   le(lt, rt, 0); le(rt, lt, 0); break;
-            default: break;   // != alone bounds nothing.
+            case T_LT:   le(ls, rs, -1); break;
+            case T_LTEQ: le(ls, rs, 0); break;
+            case T_GT:   le(rs, ls, -1); break;
+            case T_GTEQ: le(rs, ls, 0); break;
+            case T_EQ:   le(ls, rs, 0); le(rs, ls, 0); break;
+            default:
+                // != alone bounds nothing, but over the integers it makes a
+                // bound the facts already prove strict: `i <= n` and
+                // `i != n` give `i < n`, the scan-then-test idiom. Only
+                // where a side is a length or a variable that indexes or
+                // bounds an array, which keeps the two queries off the
+                // many character tests a parser makes.
+                if (ls.diff || rs.diff || (!IndexRelevant(lt) && !IndexRelevant(rt))) break;
+                if (Query(lt.b, rt.b, SatSub(rt.off, lt.off))) le(ls, rs, -1);
+                else if (Query(rt.b, lt.b, SatSub(lt.off, rt.off))) le(rs, ls, -1);
+                break;
         }
+    }
+
+    bool IndexRelevant(const Term &t) {
+        return t.b.kind == BK_LEN || (t.b.kind == BK_VAR && relpids.count(varof[t.b.id]));
+    }
+
+    // `x - y` as its two terms, when the subtraction is the mathematical
+    // one. TermOf gave `whole`, the interval term of two moving operands,
+    // only where each operand's value is bounded inside the fact range (so
+    // no offset in it wrapped at i64) and the difference of those bounds
+    // fits the operation's own width (§6.2, IvalSumTerm), and the operand
+    // terms are still the ones it was derived from (Derived).
+    template<typename S> bool DiffOf(Node *n, const Term &whole, S &side) {
+        auto b = Is<Binary>(n);
+        if (!b || b->op != T_MINUS || !whole.ok || whole.b.kind != BK_TMP ||
+            !exactdiffs.count(whole.b.id))
+            return false;
+        auto x = TermOf(b->left), y = TermOf(b->right);
+        if (!x.ok || !y.ok || y.b.kind == BK_ZERO) return false;
+        side.p = x;
+        side.m = y;
+        side.diff = true;
+        return true;
     }
 
     // ------------------------------------------------------------------
@@ -2542,11 +2643,60 @@ struct BCE {
                 }
         }
         if (!cands.empty()) {
-            mode = M_RECORD;
-            flow = Flow {};
-            SeedEntryFacts(sp);
-            derived.clear();
-            Walk(sp->body);
+            // Ordinary induction over the body's writes, as for globals
+            // (ValidateGlobalInvariants): every candidate invariant is
+            // assumed while each write is checked, the declaration being the
+            // base case and every other write the step. A write that fails
+            // drops its candidate, which may have supported another one's
+            // step, so the pass repeats under the smaller hypothesis until a
+            // whole walk drops nothing: only then was every write checked
+            // against exactly the set that is granted. That is what lets a
+            // guarded larger step (`if i + 2 > n { return 0; } i += 2;`)
+            // keep `i <= len`: the guard compares without wrapping only
+            // because `i` is already bounded.
+            // Past MAXROUNDS, a last pass assumes nothing, so whatever
+            // it keeps was checked without any hypothesis.
+            auto globalge0 = ge0;
+            auto hyp = cands;
+            auto stable = false;
+            for (auto round = 0; round <= MAXROUNDS && !stable; round++) {
+                auto assume = round < MAXROUNDS;
+                ge0 = globalge0;
+                lelen.clear();
+                if (assume)
+                    for (auto &[v, c] : hyp) {
+                        if (c.ge0) ge0.insert(v);
+                        if (!c.le.empty()) lelen[v] = c.le;
+                    }
+                cands = hyp;
+                for (auto &[v, c] : cands) {
+                    c.declseen = false;
+                    c.wrapfree = true;
+                }
+                mode = M_RECORD;
+                flow = Flow {};
+                SeedEntryFacts(sp);
+                derived.clear();
+                axused.clear();
+                Walk(sp->body);
+                // A dropped invariant no query or fact used left the walk
+                // just as it would have been without it, so the walk also
+                // checked the smaller set.
+                stable = true;
+                for (auto &[v, c] : cands) {
+                    // A declaration the walk never reached is no base case.
+                    if (!c.declseen) {
+                        c.ge0 = false;
+                        c.le.clear();
+                    }
+                    auto &h = hyp[v];
+                    if (assume && (c.ge0 != h.ge0 || c.le != h.le) && axused.count(v))
+                        stable = false;
+                }
+                hyp = cands;
+            }
+            ge0 = globalge0;
+            lelen.clear();
             for (auto &[v, c] : cands) {
                 if (!c.declseen) continue;
                 if (c.ge0) ge0.insert(v);
@@ -2680,32 +2830,43 @@ struct BCE {
             for (auto v : addrof) gaddr.insert(v);
         }
         for (auto &[v, ok] : gge0) if (gaddr.count(v)) ok = false;
-        for (auto sp : ast.fnspecs) {
-            if (!sp->live || !sp->body) continue;
-            // Every write that can drop a candidate notes the global in the
-            // body's effect summary, so a body whose summary names none of
-            // the live candidates has nothing to check.
-            auto &writes = effects[sp].intvars;
-            auto any = false, here = false;
-            for (auto &[v, ok] : gge0)
-                if (ok) {
-                    any = true;
-                    here = here || writes.count(v);
+        // A body checked before a candidate was dropped may have leaned on
+        // it (`x = y` with `y >= 0` assumed, then `y = -5` elsewhere), so the
+        // sweep repeats until one drops nothing: every write is then checked
+        // against exactly the set granted. Each repeat drops a candidate, so
+        // this ends.
+        for (auto dropped = true; dropped;) {
+            dropped = false;
+            for (auto sp : ast.fnspecs) {
+                if (!sp->live || !sp->body) continue;
+                // Every write that can drop a candidate notes the global in
+                // the body's effect summary, so a body whose summary names
+                // none of the live candidates has nothing to check.
+                auto &writes = effects[sp].intvars;
+                auto any = false, here = false;
+                for (auto &[v, ok] : gge0)
+                    if (ok) {
+                        any = true;
+                        here = here || writes.count(v);
+                    }
+                if (!any) break;
+                if (!here) continue;
+                SetupSpec(sp);
+                for (auto &[v, ok] : gge0)
+                    if (ok) {
+                        cands[v].declseen = true;
+                        ge0.insert(v);   // The inductive hypothesis.
+                    }
+                mode = M_RECORD;
+                flow = Flow {};
+                Walk(sp->body);
+                for (auto &[v, ok] : gge0) {
+                    auto it = cands.find(v);
+                    if (ok && it != cands.end() && !it->second.ge0) {
+                        ok = false;
+                        dropped = true;
+                    }
                 }
-            if (!any) return;
-            if (!here) continue;
-            SetupSpec(sp);
-            for (auto &[v, ok] : gge0)
-                if (ok) {
-                    cands[v].declseen = true;
-                    ge0.insert(v);   // The inductive hypothesis.
-                }
-            mode = M_RECORD;
-            flow = Flow {};
-            Walk(sp->body);
-            for (auto &[v, ok] : gge0) {
-                auto it = cands.find(v);
-                if (it != cands.end() && !it->second.ge0) ok = false;
             }
         }
         ge0.clear();
@@ -3355,8 +3516,10 @@ inline bool ForLoop::BceWalk(BCE &b) {
     auto exitf = b.flow;
     if (iv) {
         auto vb = b.VarBase(iv);
-        if (lot.ok) b.AddFactB(lot.b, vb, BCE::SatSub(0, lot.off));
-        if (hit.ok) b.AddFactB(vb, hit.b, BCE::SatSub(hit.off, 1));
+        if (lot.ok && b.CmpAdmissible(lot))
+            b.AddFactB(lot.b, vb, BCE::SatSub(0, lot.off));
+        if (hit.ok && b.CmpAdmissible(hit))
+            b.AddFactB(vb, hit.b, BCE::SatSub(hit.off, 1));
         for (auto &[v, c] : stepped) b.AddFactB(b.VarBase(v), vb, c);
     }
     if ((iterkind == IK_RANGE || iterkind == IK_COUNT) && idxdef)
@@ -3368,7 +3531,10 @@ inline bool ForLoop::BceWalk(BCE &b) {
         BCE::Term iters;
         if (iterkind == IK_COUNT) {
             iters = hit;
-        } else if (lot.ok && hit.ok) {
+        } else if (lot.ok && hit.ok && b.CmpAdmissible(lot) && b.CmpAdmissible(hit)) {
+            // The count is hi - lo of the values the machine computed, which
+            // are the terms' only when neither bound wrapped (`k..k + 3` runs
+            // no iterations where `k + 3` does).
             if (lot.b == hit.b)
                 iters = BCE::Term { true, BCE::Zero(), BCE::SatSub(hit.off, lot.off) };
             else if (lot.b.kind == BCE::BK_ZERO)

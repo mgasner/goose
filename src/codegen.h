@@ -107,7 +107,12 @@ struct CodeGen {
     string code;        // Function bodies, size/eq helpers, thunks, main.
     string exportprotos;
     bool usesthreads = false;
+    // Whether the program calls the runtime's TLS section (runtime_tls.h),
+    // which the driver then splices in.
+    bool usestls = false;
     bool library = false;
+    // Whether any function is exported, which brings in the export guards.
+    bool hasexports = false;
     // Measurement only, and unsound: emit the whole `return ... from`
     // machinery but none of the post-call discriminant checks, so a program
     // that never takes a long-distance return still prints the right answer
@@ -1006,7 +1011,12 @@ struct CodeGen {
     void FixedLitAt(Node *n, const string &dst);
     void FixedLitAtLv(Node *n, const string &base, bool inroot);
     void FixedArrayLitAt(ArrayLit *al, const string &base, bool inroot);
-    void StructLitAt(StructLit *sl, const string &base, bool inroot);
+    void StructLitAt(StructLit *sl, const string &base, bool inroot, bool fresh = false);
+    bool InPlaceStruct(TypeExpr *t);
+    bool InPlaceArray(ArrayLit *al, TypeExpr *t);
+    bool FieldInitAt(Node *init, const string &path, TypeExpr *ft, bool inroot);
+    void DefaultAt(const string &lv, TypeExpr *t);
+    void UnwrittenSlots(const string &lv, TypeExpr *t, int64_t count);
     void EmitValStoreTag(const string &stk, IntStorage ts, const string &x);
     void GenArrayLit(ArrayLit *al, const string &stk, const string &lenlv = "",
                      TypeExpr *as = nullptr);
@@ -1293,6 +1303,9 @@ struct CodeGen {
     void EmitGlobalInit();
     string GlobalLenLv(VarDef *d);
     void InitGlobalStack(VarDef *d);
+    void EmitExportGuards();
+    string ExportGuardEnter(const char *name);
+    string ExportGuardLeave();
     void EmitProgramInit();
     void EmitExports();
     string MainCall();
@@ -1366,6 +1379,7 @@ struct CodeGen {
             CT(ast.SliceOf(ast.inttypes[IS_U8], Line {}));
         }
         for (auto sp : usedexterns) {
+            if (sp->sf->cname.rfind("gs_tls_", 0) == 0) usestls = true;
             if (runtime_ext_text.find(cat(" ", sp->sf->cname, "(")) != string_view::npos) continue;
             externs += ExternProto(sp);
         }

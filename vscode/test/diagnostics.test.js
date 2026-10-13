@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const path = require('node:path');
 const { parseDiagnostics, failureMessage, CheckQueue } = require('../src/diagnostics');
+const { moduleRoot } = require('../src/config');
 
 test('lexer carets, warnings, explicit columns and related instantiations', () => {
     const cwd = path.resolve('workspace');
@@ -150,4 +151,25 @@ test('unlocated failures drop the compiler progress lines', () => {
     assert.equal(failureMessage('parsed ok: 1 top-level declarations, 1 file(s)\n'), '');
     assert.equal(failureMessage('cannot open file: x.goose\n'), 'cannot open file: x.goose');
     assert.equal(failureMessage('typechecked ok: 1 specialization(s)\nbce: elided 0/0 index and 0/0 slice checks\nwrote a.c (12 bytes)\nbroken'), 'broken');
+});
+
+test('two parts of one module share one check of its root', async () => {
+    const files = {
+        [path.resolve('/w/lib.goose')]: 'import .lib.a;\nimport .lib.b;\n',
+        [path.resolve('/w/lib/a.goose')]: '', [path.resolve('/w/lib/b.goose')]: ''
+    };
+    const read = file => { if (!(file in files)) throw new Error('ENOENT'); return files[file]; };
+    const runner = deferredRunner();
+    const queue = new CheckQueue(config => runner.run(config), () => {});
+    const first = queue.schedule({ file: moduleRoot('/w/lib/a.goose', read), cwd: '/w' }, 0);
+    await tick();
+    const second = queue.schedule({ file: moduleRoot('/w/lib/b.goose', read), cwd: '/w' }, 0);
+    await tick();
+    assert.equal(runner.calls.length, 2);
+    assert.equal(runner.calls[0].cancelled, true);
+    runner.calls[1].resolve({ output: 'root checked' });
+    assert.equal(await first, false);
+    assert.equal(await second, true);
+    assert.deepEqual([...queue.results.keys()], [path.resolve('/w/lib.goose')]);
+    queue.invalidate();
 });

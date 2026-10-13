@@ -63,6 +63,7 @@ single translation unit, included in the order the driver lists them.
 |---|---|---|---|
 | Parse | `lexer.h`, `parser.h`, `ParseProgram` in `main.cpp` | source files, following `import` | the `Ast`: nodes, type expressions, symbols per namespace, globals in initialization order |
 | Resolve | `resolve.h` (`ResolveTypeNames`) | type names as written | struct/enum/generic kinds, aliases substituted away |
+| Deferred members | `deferred.h` (`CollectDeferredMembers`) | the resolved `Ast` | each deferred type's variants, one per stored function, and their constructors and case functions; constructions rewritten into constructor calls (§3.12) |
 | Typecheck | `typecheck*.h` (`TypeCheckProgram`) | the `Ast` | one `FnSpec` per specialization with a cloned, annotated body; `StructInst`/`EnumInst`; `VarDef`s; the store record; every diagnostic of §3--§11; the shader blobs `embed_shader` compiles (`gfx.h`, `shaderc.c`) |
 | Optimize | `optimize.h`, `optimize_basecase.h`, `optimize_tre.h`, `optimize_loops.h` (`Optimizer`) | live specializations | bodies rewritten in place (inlined, folded, loops), liveness and use counts, loop shapes (`ForLoop::stripk`, `sumred`, `While::countdown`) |
 | BCE | `bce.h` (`BCE::RunAll`) | live specializations | `Index::nobc`, `SliceExpr::nobc`, `ForLoop::fixedlen` and `lenbound`, per-loop `hoistrefs` and `hoistfields` |
@@ -139,7 +140,7 @@ the slow steps (a line each, and on a terminal a live line below).
 | `--tokens`, `--dump`, `--parse` | stop after lexing, after parsing (dump is parse-level: no resolution), after resolution |
 | `--roundtrip` | after resolution, parse the dump as a program of its own and require it to dump to the same text (`CheckRoundtrip`), then go on to whatever else was asked for |
 | `--dump-file f.goose` | also write the dump to a file, and go on |
-| `--check` | stop after typecheck, optimization and BCE; no C is written |
+| `--check` | stop after typecheck, optimization and BCE; no C is written. Builds nothing, so it needs no `fn main()`: a library's root file, which imports its parts, checks on its own, its non-generic functions checked as those no call reaches are (`CheckUnreached`). A build without `main` still fails |
 | `-O0`, `-O1` (default), `-O2` | inlining thresholds (§4); folding and propagation run at every level; base-case inlining and tail-recursion elimination need `-O1` or above |
 | `--specs` | print every live specialization's optimized body |
 | `--stacks` | print the data stack count of the main program and of each worker, the regions they come to, the thread cap that gives `hardware_threads()`, and every function's share (`codegen_stacks.h`); with `--check` it runs the backend for the counts and writes nothing |
@@ -151,6 +152,7 @@ the slow steps (a line each, and on a terminal a live line below).
 | `-o out.c`, `--jit`, `--header`, `-D`, `--include`, `--stdlib`, `--` | output file, in-process run, a C API header for the exports (which builds the C without a `main`, for a C host), a define written into the generated C, a user header, the stdlib directory, program arguments |
 | `--<name>-link msvc\|cc` | print the response file of link inputs a program using the blessed package imported as `name` (`gfx`, `audio`, `ui`, `physics`, `sqlite`) needs, when the package is compiled into this compiler (`builtin.h`, `BuiltinLinkFile`) |
 | `--sqlite-types` | print a row struct for every checked SQL statement the program declares, and stop (`sqlite_check.h`, `docs/design/sqlite_checked.md`) |
+| `--tls-link cc` | the same for TLS under the `http` module's `https://` (`tls.h`, `TlsLinkFile`); the file also defines `GS_TLS_LINKED`, which turns on the runtime's TLS section (`runtime_tls.h`), so compile and link in one command |
 | `--multi-test a.goose b.goose ...` | compile each file in turn with the other flags, as a process of its own on it would (an `Ast` and a compile thread each, which is all the state a compile has), each file's output on both streams ending in a line `==== goose --multi-test: exit <code> <file>`; an `-o` names each file's C with `%` for its name. It runs no programs and writes no dump files. The test runner's batches of compiler runs (`docs/testing.md`) |
 | `--compile-shader f [--shader-source msl\|hlsl]` | hidden: what a shader compiles to, without a program around it |
 
@@ -2458,6 +2460,42 @@ error; the result's provenance is the merge of the arms' (deeper root,
 exact only when the same, writable only if all are). The cases get every
 argument written: a call that would dispatch only by leaving parameters to
 their defaults is an error.
+
+**Deferred calls** (`deferred.h`, spec §8.3, `design/deferred_calls.md`).
+A deferred type is an `SEnum` marked `isdeferred`, with its call-time
+`dparams` and `drets` and one variant at parse time, `empty`. The
+membership pass runs after resolution, which has already rejected any
+written variant of one (`ResolveTypeNames`), and before checking. It scans
+`Ast::allnodes` in parse order for a `Call` whose callee names a deferred
+type, resolves its first argument to the one function that can be stored
+with that many stored arguments (`Unfit`, comparing types by their resolved
+text), and adds one variant per (type, function), whose fields are the
+stored parameters (`SVariant::member`). For each type it then writes the
+case functions `deferred__D__call` and `deferred__D__callref`, one per
+variant, taking it by value and by reference, whose body calls the member
+with the payload's fields and the call-time parameters (non-scalar fields
+through `copy`, §4.1) or, for `empty`, aborts; and per member a
+constructor `deferred__D__new__f` from the stored parameters to a `D`
+built as a variant literal. The construction becomes a call of the
+constructor. Every generated function names its type (`deferredof`) and
+member (`dmember`); calls the pass resolved itself carry the target
+(`Call::pinned`), which `CheckNamedCall` takes over the name's overload
+set. `CheckUnreached` skips them. The checker's setup gives the
+constructors a fixed-mode result where every payload is fixed-size
+(`isdctor`), so constructions meet fixed-mode storage, `==` included, as a
+variant literal would. An invocation is recognized where a call's callee
+is a value (`CheckInvocation`): a variable (`CheckNamedCall`), a field
+(`CheckUfcsCall`, fields first) or any other expression (`CheckCall`). It
+becomes a call of the by-reference set when the callee is variable-mode
+storage, else of the by-value set, with the callee first, which resolves by
+tag dispatch like any case function call; nothing past the checker knows
+it was one. A back edge through a case function reports the member it
+calls (`ValidateCycle`). `BuildVariant` rejects a non-flat or resizable
+stored parameter at the member's declaration, `ValidateType` names a
+member storing a variable-size value where fixed mode is used,
+`VerifiableElem` refuses a deferred type to `from_bytes`, and `CheckMatch`
+and `CheckVariantConst` refuse a match and a variant name other than
+`empty`.
 
 **Nested functions** (`DeclareLocalFn`, §7.5): checking a declaration
 records a `DeclSite` for the function, under the environment declaring it

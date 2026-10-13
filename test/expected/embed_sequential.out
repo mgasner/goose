@@ -1,0 +1,11 @@
+  note: 1 element(s)
+add(1) = 0
+  note: 2 element(s)
+add(2) = 1
+  note: 3 element(s)
+add(3) = 4
+count = 6
+hello from goose
+  note: 4 element(s)
+after reset: add(4) = 6
+count = 4

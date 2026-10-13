@@ -1973,6 +1973,8 @@ struct TypeCheck {
     Val CheckNamedCall(Call *c, Ident *id, TypeExpr *expected);
     vector<SFunction *> LookupLocalFns(string_view name, FnSpec *&env);
     FnValBind LocalFnValue(const vector<SFunction *> &fns, FnSpec *env);
+    SEnum *DeferredOf(TypeExpr *t);
+    Val CheckInvocation(Call *c, Node *callee, const Val &cv, TypeExpr *expected);
     Val CheckUfcsCall(Call *c, Dot *d, TypeExpr *expected);
     Val ResolveCall(Call *c, vector<SFunction *> &cands, FnSpec *env, string_view name, Val *preval,
                     Node *&prenode, bool entryreach, bool *nomatch = nullptr,
@@ -2562,6 +2564,11 @@ struct TypeCheck {
             if (st->generics.empty()) GetStructInst(ast.StructOf(st, {}, st->line));
         for (auto en : ast.enums)
             if (en->generics.empty()) GetEnumInst(ast.EnumOf(en, {}, true, en->line));
+        // A deferred type whose every stored argument is fixed-size is built
+        // fixed-mode by its constructors, as a variant literal would be at a
+        // fixed-mode destination; otherwise variable mode is its only mode.
+        for (auto sf : ast.functions)
+            if (sf->isdctor) sf->rets[0]->enu->varmode = !GetEnumInst(sf->rets[0])->allfixed;
         // And the sizes in every function's signature, for its parameters' and
         // type parameters' names, and in every generic type's fields.
         for (auto sf : ast.functions) SignatureNames(sf->params, sf->rets, sf->generics);
@@ -2688,13 +2695,18 @@ struct TypeCheck {
     // pass, so the body may store it in the pool's relative links; the
     // parameters given one share its class, as a call's would.
     void CheckUnreached(SFunction *sf) {
-        if (!sf->specs.empty() || sf->isthread || sf->isnested) return;
+        if (!sf->specs.empty() || sf->isthread || sf->isnested || sf->deferredof) return;
         if (!sf->generics.empty()) return;
         for (auto &p : sf->params) if (!p.type) return;
         set<string_view> names = { sf->name };
         auto foreign = false;
         if (sf->body) ScanForeignFrom(sf->body, names, foreign);
         if (foreign) return;
+        // Nor one that calls into a `return ... from` it does not enclose
+        // (a writer helper that returns from the `guarded` its caller runs it
+        // under): checked from here, that is an error only the call path
+        // standing in for the real ones would make.
+        if (ReachesForeignFrom(sf)) return;
         auto spec = ast.NewFnSpec();
         spec->sf = sf;
         vector<Val> args(sf->params.size());
@@ -2807,6 +2819,67 @@ struct TypeCheck {
             walk(sp->body);
         };
         rec(entry);
+    }
+
+    // Per top-level function, the `return ... from` targets that some call
+    // path from it reaches with no function of that name on the path. Calls
+    // are followed by name alone, before any resolution, to every function
+    // of that leaf name in any namespace, and a function named anywhere in a
+    // body (called or passed as a value) counts as called: more paths than
+    // the real ones, so more functions left unchecked, never fewer.
+    map<SFunction *, set<string_view>> foreignfrom;
+    bool foreignfromdone = false;
+
+    static string_view LeafName(string_view name) {
+        auto at = name.rfind("::");
+        return at == string_view::npos ? name : name.substr(at + 2);
+    }
+
+    bool ReachesForeignFrom(SFunction *sf) {
+        if (!foreignfromdone) {
+            foreignfromdone = true;
+            unordered_map<string_view, vector<SFunction *>> byname;
+            for (auto f : ast.functions)
+                if (!f->isnested) byname[f->name].push_back(f);
+            struct Uses { set<string_view> own; vector<SFunction *> callees; };
+            map<SFunction *, Uses> uses;
+            for (auto f : ast.functions) {
+                if (f->isnested || !f->body) continue;
+                auto &u = uses[f];
+                auto &targets = foreignfrom[f];
+                u.own.insert(f->name);
+                set<string_view> called;
+                function<void(Node *)> walk = [&](Node *n) {
+                    if (!n) return;
+                    if (auto r = Is<Return>(n)) {
+                        if (!r->from.empty()) targets.insert(LeafName(r->from));
+                    } else if (auto id = Is<Ident>(n)) {
+                        called.insert(LeafName(id->name));
+                    } else if (auto d = Is<Dot>(n)) {
+                        called.insert(LeafName(d->name));
+                    } else if (auto fd = Is<FnDecl>(n)) {
+                        u.own.insert(fd->sf->name);
+                        walk(fd->sf->body);
+                        return;
+                    }
+                    n->Children(walk);
+                };
+                walk(f->body);
+                for (auto t : u.own) targets.erase(t);
+                for (auto c : called)
+                    if (auto it = byname.find(c); it != byname.end())
+                        for (auto g : it->second) u.callees.push_back(g);
+            }
+            for (auto changed = true; changed;) {
+                changed = false;
+                for (auto &[f, u] : uses)
+                    for (auto g : u.callees)
+                        for (auto t : foreignfrom[g])
+                            if (!u.own.count(t) && foreignfrom[f].insert(t).second) changed = true;
+            }
+        }
+        auto it = foreignfrom.find(sf);
+        return it != foreignfrom.end() && !it->second.empty();
     }
 
     // Does the body contain `return ... from f` for an f not declared within?

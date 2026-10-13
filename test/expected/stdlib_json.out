@@ -1,115 +1,97 @@
-"plain" "q\"b\\s/ \n\r\t \u0001\u001f\x7f caf\xc3\xa9" "k\"ey":-9223372036854775808 9223372036854775807 true false
-0.0 -0.0 1.0 -2.0 0.5 123.25 0.1 0.3333333333333333 0.6666666666666666 100.0 1e-7 1.5e300 0.001 0.0001 0.00001 1e-6 1000000000000000.0 1e16 1.2345678901234568e17 1e21 1e22 1e23 9007199254740992.0 9007199254740992.0 4.35 5e-324 2.2250738585072014e-308 1.7976931348623157e308 -1.7976931348623157e308 0.30000000000000004 null null null
-{"a":[1,-2,3.5,-0.0,100.0,true,false,null,"s",{},[]],"nested":{"x":{"y":{"z":"deep"}}},"esc":"\xc3\xa9\xf0\x9f\x98\x80\"\\/\b\f\n\r\t","lone":"\xed\xa0\x80!","key":7,"big":9223372036854775807,"small":-9223372036854775808,"over":9.223372036854776e18,"long":1.2345678901234567e19,"e":0.01,"dup":1,"dup":2}
-27 nodes, 21 bytes decoded
-deep true true true 7 true 1 true 9223372036854775807 true -9223372036854775808 true 0 false 9.223372036854776e18 true
-[true true false false][true true false false][true false false false][true false false false][true false false false][false false true false][false false true false][false false false false][false false false true][false false false false][false false false false]
-0.0 false false false true
-root object of 12 members
+-- writer
+{"id":7,"name":"tab\there \"quoted\" back\\slash \u0001","ratio":0.1,"ok":true,"tags":["a","é",null,18446744073709551615],"empty":{},"raw":[1,2]}
+{
+  "a": 1,
+  "b": [
+    -2,
+    [],
+    {
+      "c": false
+    }
+  ]
+}
+-- floats out
 0
--12
-"s"
-true
+-0
+1
+-1.5
+0.1
+0.30000000000000004
+123456789.125
+1e+21
+100000000000000000000
+1.5e-7
+0.000001
+5e-324
+1.7976931348623157e+308
+2.2250738585072014e-308
+9007199254740992
 null
-{}
+null
+-- numbers in
+0 -> kind 3 int 0 true uint 0 true float 0
+-0 -> kind 3 int 0 true uint 0 true float 0
+42 -> kind 3 int 42 true uint 42 true float 42
+-9223372036854775808 -> kind 3 int -9223372036854775808 true uint 0 false float -9223372036854776000
+9223372036854775807 -> kind 3 int 9223372036854775807 true uint 9223372036854775807 true float 9223372036854776000
+9223372036854775808 -> kind 4 int 0 false uint 9223372036854775808 true float 9223372036854776000
+18446744073709551616 -> kind 5 int 0 false uint 0 false float 18446744073709552000
+1.5 -> kind 5 int 0 false uint 0 false float 1.5
+1e400 -> kind 5 int 0 false uint 0 false float null
+-1e-400 -> kind 5 int 0 true uint 0 false float -0
+2.4703282292062328e-324 -> kind 5 int 0 false uint 0 false float 5e-324
+0.1000000000000000055511151231257827021181583404541015625 -> kind 5 int 0 false uint 0 false float 0.1
+1.00000000000000011102230246251565404236316680908203125 -> kind 5 int 1 true uint 0 false float 1
+123456789012345678901234567890e-10 -> kind 5 int 0 false uint 0 false float 12345678901234567000
+01 -> error: unexpected text after the value
+1. -> error: invalid number
+- -> error: invalid number
+.5 -> error: unexpected character
+1e -> error: invalid number
++1 -> error: unexpected character
+-- documents
+ok true, 27 entries
+count 2, users 2, dup 1
+  Ada 36 langs 2 nick null false missing false
+  Alan 41 langs 0 nick null true missing false
+emoji bytes 4, second user Alan
+past the end false, wrong kind 0 false
+  member users kind 7
+  member count kind 3
+  member emoji kind 6
+  member dup kind 3
+  member dup kind 3
+{"users":[{"name":"Ada","age":36,"langs":["en","fr"]},{"name":"Alan","age":41,"nick":null}],"count":2,"emoji":"😀","dup":1,"dup":2}
 []
-[[],{},[[]]]
-7
-40001 true
- => json: unexpected end of input at byte 0
-   => json: unexpected end of input at byte 2
-[ => json: unexpected end of input at byte 1
-[1, => json: unexpected end of input at byte 3
-[1,] => json: expected a value at byte 3
-[1 2] => json: expected ',' or ']' at byte 3
-{"a"} => json: expected ':' at byte 4
-{"a":} => json: expected a value at byte 5
-{,} => json: expected a key at byte 1
-{"a":1,} => json: expected a key at byte 7
-{"a" 1} => json: expected ':' at byte 5
-{1:2} => json: expected a key at byte 1
-["a": 1] => json: expected ',' or ']' at byte 4
-tru => json: expected a value at byte 0
-nul => json: expected a value at byte 0
-nulll => json: trailing input at byte 4
-01 => json: bad number at byte 0
-1. => json: bad number at byte 0
-1e => json: bad number at byte 0
-- => json: bad number at byte 0
-.5 => json: expected a value at byte 0
-+1 => json: expected a value at byte 0
-"abc => json: bad string at byte 0
-"a\nb" => json: bad string at byte 0
-"\x" => json: bad string at byte 4
-"\u12G4" => json: bad string at byte 8
-"\u12" => json: bad string at byte 6
-[1]] => json: trailing input at byte 3
-{}x => json: trailing input at byte 2
-[1} => json: expected ',' or ']' at byte 2
-{"a":[} => json: expected a value at byte 6
-] => json: expected a value at byte 0
-\xef\xbb\xbf{} => json: expected a value at byte 0
-0.1 => 0.1
-0.2 => 0.2
-0.3 => 0.3
-1e23 => 1e23
-8.98846567431158e307 => 8.98846567431158e307
-2.2250738585072011e-308 => 2.225073858507201e-308
-2.2250738585072012e-308 => 2.2250738585072014e-308
-2.2250738585072014e-308 => 2.2250738585072014e-308
-4.9406564584124654e-324 => 5e-324
-2.4703282292062327e-324 => 0.0
-2.4703282292062328e-324 => 5e-324
-1e-324 => 0.0
-3e-324 => 5e-324
-1.7976931348623157e308 => 1.7976931348623157e308
-1.7976931348623158e308 => 1.7976931348623157e308
-1.7976931348623159e308 => null
-1e400 => null
--1e400 => null
-1e-400 => 0.0
-9007199254740993.0 => 9007199254740992.0
-9007199254740995.0 => 9007199254740996.0
-1.00000000000000011102230246251565404236316680908203125 => 1.0
-1.00000000000000011102230246251565404236316680908203125000000001 => 1.0000000000000002
-1.00000000000000011102230246251565404236316680908203124999999999 => 1.0
-123456789012345678901234567890 => 1.2345678901234568e29
-0.000000000000000000000000000000000000001234 => 1.234e-39
-7.2057594037927933e16 => 7.205759403792794e16
-3.0540412816658963e-16 => 3.054041281665896e-16
-1448997445238699.0 => 1448997445238699.0
--1e-7 => -1e-7
-100000000000000000000000.0 => 1e23
-0e10 => 0.0
--0.0 => -0.0
-0.0e-999 => 0.0
-1E+2 => 100.0
-10000000000000000000000000000000000000000000000000000000000000000000000e-70 => 1.0
-0.00000000000000000000000000000000000000000000000000000000000000000000001e70 => 0.1
-4.4501477170144023e-308 => 4.4501477170144023e-308
-4.4501477170144022e-308 => 4.4501477170144023e-308
-1.2345678901234567e-300 => 1.2345678901234568e-300
-6.631236846766476e-316 => 6.63123685e-316
-3.9999999999999999999999999999999999999999 => 4.0
-0 random doubles that did not read back
-ok
-1 one 9.5 2 true
--2 two 1000.0 0 false
-0  0.0 0 false
-{"items": [{"id": 1.5}]} => json: expected an integer at byte 18
-{"items": [{"id": 1e2}]} => json: expected an integer at byte 18
-{"items": [{"ok": 1}]} => json: expected true or false at byte 18
-{"items": [{"name": 5}]} => json: expected a string at byte 20
-{"items": [{"price": "x"}]} => json: expected a number at byte 21
-{"items": [{"id": 1}]} x => json: trailing input at byte 23
-{"items": [{"id": 1},]} => json: expected '{' at byte 21
-{"items": {}} => json: expected '[' at byte 10
-[] => json: expected '{' at byte 0
-{"skip": [1, 2} => json: expected ',' or ']' at byte 14
-{"skip": {"a" 1}} => json: expected ':' at byte 14
-{"skip": tru} => json: expected a value at byte 9
-{"skip": "\q"} => json: bad string at byte 9
-{"items": [{"name": "\u00"}]} => json: bad escape at byte 20
-{"skip": [1, } => json: expected a value at byte 13
-{"items": [{"id": 9223372036854775808}]} => json: expected an integer at byte 18
-42 true 0
+"\b\f\n\r\t/\u0000"
+-- errors
+error at 0: unexpected end of input
+error at 3: unexpected character
+error at 5: expected ':'
+error at 7: expected a string key
+error at 3: expected ',' or ']'
+error at 1: unterminated string
+error at 1: invalid escape
+error at 7: unpaired surrogate
+error at 1: control character in string
+error at 3: unexpected text after the value
+error at 0: invalid literal
+error at 0: invalid literal
+error at 1: expected a string key
+error at 1: invalid UTF-8
+error at 1: invalid UTF-8
+error at 5: unexpected end of input
+error at 0: unexpected character
+[[[1]]]
+error at 3: nesting too deep
+-- cursor
+ok true, count 2, first name Ada, second Alan, age 41.0
+raw ["en", "fr"] emoji bytes 4
+  Ada has 3 members
+  Alan has 3 members
+[1]] -> unexpected text after the value
+[][] -> unexpected text after the value
+{"a":1}} -> unexpected text after the value
+"open -> unterminated string
+[1]   -> ok
+bad literal kind 15, others 1 3

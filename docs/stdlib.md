@@ -417,6 +417,11 @@ design; `bench/http/` measures it against nginx and libuv.
 ```goose
 fn serve<F>(port: i64, host: const u8[:] = "0.0.0.0", limits: Limits = Limits { .. }) -> bool
 fn serve_on<F>(listener: i64, limits: Limits = Limits { .. }) -> bool   // F(req: Request&, res: Response&)
+fn serve_tls<F>(port: i64, cert_file: const u8[:], key_file: const u8[:],
+                host: const u8[:] = "0.0.0.0", limits: Limits = Limits { .. }) -> bool
+fn serve_tls_on<F>(listener: i64, cert_file: const u8[:], key_file: const u8[:],
+                   limits: Limits = Limits { .. }) -> bool
+fn tls_available() -> bool                fn tls_error(out: u8[>..]&)   // why TLS last failed
 fn listen(port: i64, host: const u8[:] = "0.0.0.0") -> i64    fn listener_port(listener: i64) -> i64
 fn header(req: Request&, name: const u8[:]) -> const u8[:], bool
 fn query_param(req: Request&, name: const u8[:]) -> const u8[:], bool
@@ -435,7 +440,19 @@ connections it accepts; workers share nothing. A handler fills in
 `res.status`, `res.content_type`, `res.body` and extra headers, and the
 server frames the response. Keep-alive, pipelining, chunked request bodies
 and `Expect: 100-continue` are handled, and malformed or oversized requests
-are refused. There is no TLS.
+are refused.
+
+URLs may be `http://` or `https://`. HTTPS runs on Mbed TLS, an optional
+part of the build (`python scripts/fetch_mbedtls.py`, then configure). The
+client verifies the server's certificate against the system's CAs, or the
+PEM bundle in `Client.ca_file`, and checks that it names the host, which it
+also sends as SNI. It speaks TLS 1.2 and 1.3. `Client.insecure_skip_verify`
+turns all of that off, for tests only. `serve_tls` serves HTTPS with a PEM
+certificate chain and key, loaded by each worker for itself. A JIT run has
+TLS when the compiler does; C built with `-o` links what `goose --tls-link
+cc` names, compiled in the same command. Without TLS a program still
+builds and runs, and `https://` and `serve_tls` fail, with `c.error` or
+`tls_error` saying why. [`http.md`](http.md) §3 has the details.
 
 ## binary
 

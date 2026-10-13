@@ -62,7 +62,7 @@ jobs:
         run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DGOOSE_BUILTIN_LIBS=all
 
       - name: Build
-        run: cmake --build build --config Debug
+        run: cmake --build build --config Debug --parallel
 
       - name: Test
         run: python test/run_tests.py --exe build/${{ runner.os == 'Windows' && 'Debug/goose.exe' || 'goose' }} --profile baseline --cc native --require-clang

@@ -148,6 +148,13 @@ def sqlite_link(exe, cc):
     return native_link(exe, cc, "sqlite")
 
 
+def tls_link(exe, cc):
+    """TLS for the http module's https:// (cmake/tls.cmake): its response
+    file also defines GS_TLS_LINKED, which turns the TLS section of the
+    program's C on. Not built for MSVC."""
+    return [] if cc.style == "msvc" else native_link(exe, cc, "tls")
+
+
 # The stdlib modules with a native layer, and the pattern of a program's own
 # import of one: the layers it links. The ui module draws through gfx, so a
 # program showing its ui imports both.
@@ -181,6 +188,8 @@ def native_unavailable(module, err):
         return UI_UNAVAILABLE in err
     if module == "sqlite":
         return SQLITE_UNAVAILABLE in err
+    if module == "tls":
+        return False   # a program without TLS still runs; its https:// fails
     return PHYSICS_UNAVAILABLE in err
 
 

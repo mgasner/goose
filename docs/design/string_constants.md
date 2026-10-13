@@ -1,5 +1,18 @@
 # String constants, writability, and threads
 
+<details>
+<summary>Table of contents</summary>
+
+- [1. What could be written before the fix](#1-what-could-be-written-before-the-fix)
+- [2. The options](#2-the-options)
+- [3. Compatibility and cost summary](#3-compatibility-and-cost-summary)
+- [4. Recommendation](#4-recommendation)
+- [5. Measurements](#5-measurements)
+- [6. Globals were C statics](#6-globals-were-c-statics)
+- [7. Side findings](#7-side-findings)
+
+</details>
+
 Before the changes described here, static data consisted of string literals
 and `let` globals that workers could read. Storing a reference and reading it
 back could make read-only data writable, a behavior called *laundering* in

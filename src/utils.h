@@ -18,12 +18,30 @@ inline void CatOne(string &s, double v) {
     // The spellings Goose programs print (§3.7), whatever the C library's.
     if (v != v) { s += "nan"; return; }
     if (std::isinf(v)) { s += v > 0 ? "inf" : "-inf"; return; }
-    // %.17g roundtrips, but prefer the shortest form that still does.
+    // The runtime's text (gs_fmt_f64): the fewest significant digits that
+    // read back as v and the nearest of those, which to_chars finds as well,
+    // laid out as %g lays them out at a precision of max(15, digits): in
+    // exponent form below 1e-4 or from that power of ten up, else
+    // positionally, with .0 on a whole number.
     char buf[32];
-    snprintf(buf, sizeof(buf), "%.15g", v);
-    if (strtod(buf, nullptr) != v) snprintf(buf, sizeof(buf), "%.17g", v);
-    s += buf;
-    if (!strpbrk(buf, ".e")) s += ".0";
+    *to_chars(buf, buf + sizeof buf - 1, v, chars_format::scientific).ptr = 0;
+    auto e = strchr(buf, 'e');
+    string dig;
+    for (auto p = buf; p != e; p++)
+        if (*p != '-' && *p != '.') dig += *p;
+    int n = (int)dig.size(), x = atoi(e + 1);
+    if (x < -4 || x >= max(n, 15)) { s += buf; return; }
+    if (buf[0] == '-') s += '-';
+    if (x < 0) {
+        s += "0.";
+        s.append(-x - 1, '0');
+        s += dig;
+        return;
+    }
+    s += dig.substr(0, x + 1);
+    if (n < x + 1) s.append(x + 1 - n, '0');
+    s += '.';
+    s += n > x + 1 ? dig.substr(x + 1) : "0";
 }
 
 template<typename... Ts> void Append(string &s, const Ts &...args) {
@@ -72,41 +90,19 @@ inline bool LoadFile(const string &path, string &dest) {
     return read == (size_t)len;
 }
 
-// The stdlib modules with a native layer a program calls into, which a JIT
-// run hands it from the compiler's own copies of them.
-struct NativeLayers {
-    bool audio = false;
-    bool gfx = false;
-    bool physics = false;
-    bool sqlite = false;
-    bool ui = false;
-};
+// A path's file name without its directory and extension.
+inline string PathStem(const string &path) {
+    auto base = path.substr(path.find_last_of("/\\") + 1);
+    auto dot = base.find_last_of('.');
+    return dot == string::npos ? base : base.substr(0, dot);
+}
 
-// The response file of link inputs a program built from the generated C
-// needs for a stdlib module with a native layer (gfx, physics, ui), which CMake
-// writes: `style` is "msvc" for cl and clang-cl, "cc" for gcc and clang.
-// Looked for in the directory `env` names, for a moved build tree, then in
-// `<module>/` next to the compiler binary, for an installed one, then where
-// CMake wrote it (`built`).
-inline string NativeLinkFile(const string &flag, bool have, const char *missing,
-                             const string &module, const char *env, const char *built,
-                             const string &exedir, const string &style) {
-    if (style != "msvc" && style != "cc")
-        throw CompileError { cat(flag, " takes msvc or cc, not ", style) };
-    if (!have) throw CompileError { missing };
-    auto name = cat("link-", style, ".rsp");
-    vector<string> dirs;
-    if (auto dir = getenv(env)) dirs.push_back(dir);
-    dirs.push_back(cat(exedir, module));
-    if (built) dirs.push_back(built);
-    for (auto &dir : dirs) {
-        auto path = cat(dir, "/", name);
-        if (auto f = fopen(path.c_str(), "rb")) {
-            fclose(f);
-            return path;
-        }
-    }
-    throw CompileError { cat("cannot find ", name, " (set ", env, " to its directory)") };
+// A Goose source file, without the UTF-8 byte-order mark many Windows
+// editors write at its start (spec §2).
+inline bool LoadSource(const string &path, string &dest) {
+    if (!LoadFile(path, dest)) return false;
+    if (dest.compare(0, 3, "\xEF\xBB\xBF") == 0) dest.erase(0, 3);
+    return true;
 }
 
 }  // namespace goose

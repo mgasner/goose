@@ -246,10 +246,14 @@ inline bool TypeCheck::RefMayPointInto(VarDef *v, VarDef *root, bool growonly, T
 // classread) may point into, or lead to, what a shrink of the grow-only
 // array at root frees, of type `bound` where root only bounds it: where the
 // activation's own stores into that storage say (HolderMayPointInto), the
-// stores its callers made there being theirs to judge (NoteLiveViews).
-inline bool TypeCheck::ClassReadMayPointInto(VarDef *cls, VarDef *root, TypeExpr *bound) {
+// stores its callers made there being theirs to judge (NoteLiveViews). What
+// a rendering walks in place (`inplace`) follows a reference to a whole
+// resizable value into it.
+inline bool TypeCheck::ClassReadMayPointInto(VarDef *cls, VarDef *root, TypeExpr *bound,
+                                             bool inplace) {
     auto arrtype = bound ? bound : root->type ? LoadType(root->type) : nullptr;
     Line where;
+    PathsScope ps(*this, inplace);
     return HolderMayPointInto(cls, root, arrtype, LiveEventBase(cls), &where);
 }
 
@@ -315,9 +319,15 @@ inline bool TypeCheck::HeldRefsMayPointInto(VarDef *v, const Prov &p, TypeExpr *
     vector<TypeExpr *> pointees;
     if (growonly) ReachedThroughRefs(sub, pointees);
     else RefPointees(sub, pointees);
+    // Those are all the references the pointee leads to, so a view derived
+    // from one lies in a slot of one of those types too. A reference to a
+    // whole resizable value is the path to it, which no array's elements
+    // hold (§3.3): it is left valid by the shrink, and leads into the array
+    // only through the views derived from it (but where pathslive).
     auto freed = false;
     for (auto pt : pointees)
-        freed = freed || ShrinkMayFree(root, bound, growonly, pt, byteview && IsU8(pt));
+        freed = freed || ((pathslive || ClassOf(pt) != SC_RESIZABLE) &&
+                          ShrinkMayFree(root, bound, growonly, pt, byteview && IsU8(pt)));
     if (!freed) return false;
     if (v && !v->refrootknown) return !UnboundIsBottom() && Depth(v) >= Depth(root);
     for (auto &a : p.alts) {
@@ -329,7 +339,12 @@ inline bool TypeCheck::HeldRefsMayPointInto(VarDef *v, const Prov &p, TypeExpr *
             if (ClassReadMayPointInto(r, root, bound)) return true;
             continue;
         }
-        if (r == root) return true;
+        auto holder = growonly && (slice || sub->kind != TY_SLICE) && r && !r->isglobal &&
+                      a.exact && (r->type || IsClassRoot(r)) && !slot && !(v && v->isvar);
+        // A reference to the storage that shrinks, the path to the array
+        // included, leads to what the stores into that storage put there,
+        // which its record says as for any other holder.
+        if (r == root && (!holder || slice || bound)) return true;
         if (growonly && (slice || sub->kind != TY_SLICE)) {
             // A global holder, or static data, holds views of globals only,
             // and a shrink of a global judges what every global holds
@@ -340,7 +355,7 @@ inline bool TypeCheck::HeldRefsMayPointInto(VarDef *v, const Prov &p, TypeExpr *
             // caller's array whose elements a slice views -- of what the
             // activation stored there: what the callers did they judge,
             // from the pair NoteLiveViews keeps (LiveShrink::contents).
-            if (a.exact && (r->type || IsClassRoot(r)) && !slot && !(v && v->isvar)) {
+            if (holder) {
                 auto arrtype = bound ? bound : root->type ? LoadType(root->type) : nullptr;
                 Line where;
                 if (HolderMayPointInto(r, root, arrtype, LiveEventBase(r), &where)) return true;
@@ -658,8 +673,8 @@ inline void TypeCheck::DefaultScopeName(string_view name, Node *at, bool fnonly)
         if (!fnonly)
             for (auto [v, i] : fr.defaultsite->vars)
                 if (v->name == name) error(cat(name, ", a local where ", sf->name, " is declared"));
-        for (auto [f, env] : fr.defaultsite->fns)
-            if (f->name == name) error(cat(name, ", a nested function"));
+        for (auto &o : fr.defaultsite->fns)
+            if (o.sf->name == name) error(cat(name, ", a nested function"));
     }
     for (auto o = sf->outer; o; o = o->outer)
         if (typeparam(o)) return;
@@ -675,8 +690,10 @@ inline bool TypeCheck::ScopeEnded(const DeclSite &d) {
 // called and specialized per caller (§7.5). Its body names what is in scope
 // here, whatever the call, as do the sizes in its signature, checked here, and
 // may call every function declared in the blocks around it, so that nested
-// functions call each other in either order (the latest declared at or before
-// this point wins, then the first after it).
+// functions call each other in either order. The functions of a name in the
+// innermost block declaring one are its overload set, where of several with
+// the same parameter types the latest declared at or before this point
+// wins, then the first after it (LookupLocalFns).
 inline void TypeCheck::DeclareLocalFn(FnDecl *fd) {
     for (auto &p : fd->sf->params)
         if (p.type) ConstNamesIn(p.type);
@@ -700,14 +717,17 @@ inline void TypeCheck::DeclareLocalFn(FnDecl *fd) {
     });
     for (auto bp = blockpos.rbegin(); bp != blockpos.rend() && bp->scopeidx >= fr.scopebase; ++bp) {
         auto &stmts = bp->block->stmts;
+        auto serial = scopes[bp->scopeidx].serial;
         auto at = std::min((int)bp->idx, (int)stmts.size() - 1);
         for (auto i = at; i >= 0; i--)
-            if (auto d = Is<FnDecl>(stmts[i])) site.fns.push_back({ d->sf, fr.lexspec });
+            if (auto d = Is<FnDecl>(stmts[i]))
+                site.fns.push_back({ d->sf, fr.lexspec, serial, i });
         for (auto i = at + 1; i < (int)stmts.size(); i++)
-            if (auto d = Is<FnDecl>(stmts[i])) site.fns.push_back({ d->sf, fr.lexspec });
+            if (auto d = Is<FnDecl>(stmts[i]))
+                site.fns.push_back({ d->sf, fr.lexspec, serial, i });
     }
-    ForOuterFns(top, [&](SFunction *sf, FnSpec *env) {
-        site.fns.push_back({ sf, env });
+    ForOuterFns(top, [&](const OuterFn &o) {
+        site.fns.push_back(o);
         return false;
     });
     declsiteof[{ fr.lexspec, fd->sf }] = &site;
@@ -780,13 +800,13 @@ inline FnSpec *TypeCheck::NamedSpec(FnSpec *env) {
     return env;
 }
 
-inline SFunction *TypeCheck::LookupLocalFn(string_view name) {
+inline bool TypeCheck::LookupLocalFn(string_view name) {
     FnSpec *env;
-    return LookupLocalFnEnv(name, env);
+    return !LookupLocalFns(name, env).empty();
 }
 
-inline vector<int> TypeCheck::NamedFrames(int fi, FnSpec *spec) {
-    vector<int> chain;
+inline small_vector<int, 8> TypeCheck::NamedFrames(int fi, FnSpec *spec) {
+    small_vector<int, 8> chain;
     auto add = [&](int k) {
         for (; k >= 0; k = frames[k].lexframe) {
             if (find(chain.begin(), chain.end(), k) != chain.end()) break;
@@ -814,7 +834,8 @@ inline TypeCheck::FlowState TypeCheck::SaveFlow() {
     });
     // Globals' narrowing participates too (assignment in branches).
     for (auto g : ast.globals)
-        for (auto v : g->defs) f.globals.push_back({ v, v->narrowed });
+        for (auto v : g->defs)
+            if (v->narrowed) f.globals.push_back({ v, v->narrowed });
     f.reachable = reachable;
     return f;
 }
@@ -826,6 +847,8 @@ inline void TypeCheck::RestoreFlow(const FlowState &f) {
         e.var->maybeassigned = e.state.maybeassigned;
         e.var->narrowed = e.state.narrowed;
     }
+    for (auto g : ast.globals)
+        for (auto v : g->defs) v->narrowed = nullptr;
     for (auto [v, narrowed] : f.globals) v->narrowed = narrowed;
     reachable = f.reachable;
 }
@@ -851,11 +874,14 @@ inline TypeCheck::FlowState TypeCheck::JoinFlow(const FlowState &a, const FlowSt
                     (a.reachable && aa.maybeassigned) || (b.reachable && bb.maybeassigned),
                     narrow(aa.narrowed, bb.narrowed) };
     }
-    assert(a.globals.size() == b.globals.size() && a.globals.size() == joined.globals.size());
-    for (size_t i = 0; i < a.globals.size(); i++) {
-        assert(a.globals[i].first == b.globals[i].first &&
-               a.globals[i].first == joined.globals[i].first);
-        joined.globals[i].second = narrow(a.globals[i].second, b.globals[i].second);
+    // A global stays narrowed where every reachable side narrowed it.
+    if (!a.reachable) joined.globals = b.globals;
+    else if (!b.reachable) joined.globals = a.globals;
+    else {
+        joined.globals.clear();
+        for (auto &g : a.globals)
+            for (auto &h : b.globals)
+                if (h.first == g.first) joined.globals.push_back(g);
     }
     joined.reachable = a.reachable || b.reachable;
     return joined;
@@ -1158,7 +1184,7 @@ inline Val TypeCheck::TempCopy(Val v) {
     if (!v.holderset && HoldsPlainRef(v.type)) {
         // What the source holds is bounded by its storage, as a container
         // read's is (ContainerRead).
-        v.contents = Bounds(v);
+        v.contents = HeldAt(v);
         v.holderfrom = HolderSource(v);
         v.holderset = true;
     }
@@ -1473,6 +1499,8 @@ inline Val TypeCheck::CheckMatch(MatchExpr *m, TypeExpr *expected, bool wantvalu
                                             " ", arm.pat.binder));
                     binder->type = ast.RefTo(vt, m->line);
                     BindProv(binder, sv);
+                    ReadBack held;
+                    if (TempContents(sv, held)) NoRelRefTempRead(m->scrutinee, enumtype, vt);
                 } else {
                     if (HasRelRefT(vt))
                         Error(arm.body, cat("payload of ", found->name, " contains "
@@ -1489,11 +1517,9 @@ inline Val TypeCheck::CheckMatch(MatchExpr *m, TypeExpr *expected, bool wantvalu
                         // the match makes.
                         ReadBack contents;
                         auto intemp = TempContents(sv, contents);
-                        Roots held = intemp ? contents.roots : sv.AsRoots();
-                        if (!intemp) {
-                            held.Weaken();
+                        Roots held = intemp ? contents.roots : HeldAt(sv, true);
+                        if (!intemp)
                             for (auto &a : held.alts) a.slotread = true;
-                        }
                         auto saved = fitnode;
                         fitnode = m;
                         RecordStore(binder, held, sv.byteview, nullptr,
@@ -1864,6 +1890,7 @@ inline void TypeCheck::CheckFor(ForLoop *x) {
                              "loop's binder is for an integer range or count"));
             auto elem = t->kind == TY_ARRAY ? t->arr->sub : t->sub;
             elemtype = elem;
+            if (intemp) NoRelRefTempRead(x->iter, t, elem);
             x->iterkind = t->kind == TY_ARRAY ? IK_ARRAY : IK_SLICE;
             // Non-fixed elements bind by reference either way (§4.1).
             if (x->byref && ClassOf(elem) != SC_FIXED) {
@@ -1908,21 +1935,22 @@ inline void TypeCheck::CheckFor(ForLoop *x) {
                  "the loop's binder gives the values their type");
     // A slice element bound by value, or a reference one however it is
     // bound, was read out of the array: it is as writable as its slot says
-    // (§9.5), and where a slice or a relative reference points follows the
-    // read-back rule, not the array's own root.
-    if (IsRefOrSlice(bindtype) && elemtype && (!byref || elemtype->kind == TY_REF)) {
-        if ((elemtype->kind == TY_REF && elemtype->ref->lenstorage >= 0) ||
-            elemtype->kind == TY_SLICE) {
+    // (§9.5), and where it points follows the read-back rule, not the
+    // array's own root. The read-back is made in each pass of the loop, so
+    // what a holder of the activation's holds is what the passes before
+    // stored there too, which the elements later iterations read may be.
+    auto readback = IsRefOrSlice(bindtype) && elemtype && (!byref || elemtype->kind == TY_REF);
+    if (readback) iterprov.writable = SlotLoadWritable(elemtype, iterprov.writable);
+    auto seqprov = iterprov;
+    auto head = SaveFlow();
+    auto sc = CheckLoopPasses(x, head, [&] {
+        if (readback) {
             auto slotread = SlotReadable(elemtype);
-            auto rb = ReadBackRoot(elemtype, iterprov, iterprov.byteview,
-                                   intemp ? &contents : nullptr, slotread);
+            auto rb = ReadBackRoot(elemtype, seqprov, seqprov.byteview,
+                                   intemp ? &contents : nullptr, slotread, true);
             iterprov.TakeAlts(rb);
             for (auto &a : iterprov.alts) a.slotread = slotread;
         }
-        iterprov.writable = SlotLoadWritable(elemtype, iterprov.writable);
-    }
-    auto head = SaveFlow();
-    auto sc = CheckLoopPasses(x, head, [&] {
         auto vd = NewVar(x->var, bindtype, x->line, false, x->vdef);
         vd->assigned = vd->maybeassigned = true;
         vd->copybind = (x->iterkind == IK_ARRAY || x->iterkind == IK_SLICE) && !byref;
@@ -1931,11 +1959,9 @@ inline void TypeCheck::CheckFor(ForLoop *x) {
             // its source the one container it lies in, as a holder read out
             // of an element's are (ContainerRead); the copy is a store the
             // loop makes.
-            Roots held = intemp ? contents.roots : iterprov.AsRoots();
-            if (!intemp) {
-                held.Weaken();
+            Roots held = intemp ? contents.roots : HeldAt(iterprov, true);
+            if (!intemp)
                 for (auto &a : held.alts) a.slotread = true;
-            }
             auto saved = fitnode;
             fitnode = x;
             RecordStore(vd, held, iterprov.byteview, nullptr,
@@ -2107,7 +2133,7 @@ inline void TypeCheck::CheckVarDecl(VarDecl *vd, bool global) {
     TypeExpr *ann = nullptr;
     if (vd->type) {
         ConstNamesIn(vd->type);
-        ann = Subst(vd->type);
+        ann = DeclType(vd->type, Subst(vd->type));
         ValidateType(ann, vd->line, global ? VT_GLOBAL : VT_LOCAL);
         if (vd->isconst) ann = ast.ConstOf(ann);   // `const x: T` is `let x: const T`.
     }
@@ -2136,6 +2162,7 @@ inline void TypeCheck::CheckVarDecl(VarDecl *vd, bool global) {
         if (t->kind == TY_FN)
             Error(vd, "function values are compile-time only and cannot be stored (§7.6)");
         d->type = t;
+        if (global) CheckVarExtent(d, vd);
         if (v && IsRefOrSlice(t)) {
             BindRefProvenance(d, *v);
             if (t->cq) d->ref.writable = false;
@@ -2193,6 +2220,11 @@ inline void TypeCheck::CheckVarDecl(VarDecl *vd, bool global) {
             // as a single binding's does, unless the declaration binds by
             // reference (`.=`); one to a non-fixed value binds it (§4.1).
             auto rv = vd->byref || IsNonFixedRef(rets[i]) ? rets[i] : DecayRef(rets[i]);
+            // A decayed reference result is a copy of its pointee, while a
+            // value result is built where it is received, from_bytes' array
+            // included (NoRelRefCopy).
+            if (IsPlainRef(rets[i].type) && !IsRefOrSlice(rv.type))
+                NoRelRefCopy(vd->inits[0], rv.type, i, vd, &rv);
             CheckBindingRoot(d, rv, vd->inits[0]);
             Finish(d, rv.type, &rv, vd->inits[0]);
         }
@@ -2263,7 +2295,7 @@ inline void TypeCheck::CheckVarDecl(VarDecl *vd, bool global) {
         if (v.isnull && !ann)
             Error(vd->inits[i], "null needs an annotated optional type");
         if (!ann) {
-            NoRelRefCopy(vd->inits[i], v.type);
+            NoRelRefCopy(vd->inits[i], v.type, 0, vd, &v);
             CheckBindingRoot(d, v, vd->inits[i]);
         }
         d->assigned = d->maybeassigned = true;
@@ -2349,11 +2381,20 @@ inline void TypeCheck::AssignableClassCheck(TypeExpr *t, Node *at) {
 // which anything still pointing into it rejects (§5.1, §5.2) -- and the new
 // ones are built over them, so the assignment is a growth of it as well; the
 // value then runs with that array under construction, which nothing it does
-// may grow (§1.3(4)) or even use (§4.4).
+// may grow (§1.3(4)) or even use (§4.4): a reference to the whole array that
+// it follows through a variable it takes one out of leads into the array
+// being built (rebuilding, ExposedLater).
 inline Val TypeCheck::CheckAssignedValue(Assign *a, TypeExpr *target, TypeExpr *arr,
                                          const Roots &built, Dest dest) {
     if (arr) {
-        ShrinkThrough(a, "assign", ExprStr(a->lval), built, target);
+        {
+            struct Restore {
+                bool &flag, saved;
+                ~Restore() { flag = saved; }
+            } restore { rebuilding, rebuilding };
+            rebuilding = true;
+            ShrinkThrough(a, "assign", ExprStr(a->lval), built, target);
+        }
         NoteGrow(a, built, cat("assign ", ExprStr(a->lval)));
     }
     SlotScope ss(*this, true);
@@ -2361,7 +2402,7 @@ inline Val TypeCheck::CheckAssignedValue(Assign *a, TypeExpr *target, TypeExpr *
     auto v = CheckValueAt(a->rhs, target, dest);
     if (arr && !built.None()) {
         CheckGrowsSince(base, built, cat("the value assigned to ", ExprStr(a->lval)));
-        CheckBuiltUses(a->rhs, a->lval, built, arr);
+        CheckBuiltUses(a->rhs, a->lval, target, built, arr);
     }
     if (v.type->kind == TY_VOID && reachable)
         Error(a, "the right-hand side has no value");
@@ -2370,6 +2411,12 @@ inline Val TypeCheck::CheckAssignedValue(Assign *a, TypeExpr *target, TypeExpr *
 
 inline void TypeCheck::CheckAssign(Assign *a) {
     auto lv = CheckLValue(a->lval);
+    // Generic code stores a whole value of a type parameter's type with `.=`
+    // (§3.8): it rebinds where the type is a reference, and assigns as `=`
+    // does where it is not, so moving elements never writes through them.
+    if (a->op == T_DOTASSIGN && (lv.var ? lv.var->type : lv.type)->kind != TY_REF &&
+        InGenericBody())
+        a->op = T_ASSIGN;
     auto held = lv;
     auto throughref = a->op != T_DOTASSIGN && IsPlainRef(held.type);
     if (throughref) DerefLValue(held, a->lval);
@@ -2448,11 +2495,7 @@ inline void TypeCheck::CheckAssign(Assign *a) {
     auto arr = ResizableArrayIn(target);
     if (arr && (!lv.var || lv.var->assigned)) {
         if (lv.var) built.Set(lv.var, true); else built = lv;
-        if (arr->arr->akind == A_GROW &&
-            (built.None() || built.Any([](const RootAlt &r) { return !r.root || !r.root->type; })))
-            Error(a, "cannot assign a grow-only array through a reference: a shrink of "
-                     "a grow-only array applies to a local of the function that owns "
-                     "it (§5.1)");
+        if (arr->arr->akind == A_GROW) GrowOnlyAssignKnown(a, built, arr == target);
     } else {
         arr = nullptr;
     }
@@ -2468,6 +2511,18 @@ inline void TypeCheck::CheckAssign(Assign *a) {
         lv.var->assigned = lv.var->maybeassigned = true;
         KillNarrow(lv.var);
     }
+}
+
+// Whether the code being checked is a generic function's body, or a nested
+// function's or function value's written inside one: a function with type
+// parameters or untyped parameters (§7.7).
+inline bool TypeCheck::InGenericBody() {
+    for (auto sf = frames.back().sf; sf; sf = sf->outer) {
+        if (!sf->generics.empty()) return true;
+        for (auto &p : sf->params)
+            if (!p.type) return true;
+    }
+    return false;
 }
 
 // `.=`: rebinds the reference stored at the location (§3.8).
@@ -2543,12 +2598,9 @@ inline void TypeCheck::PointeeAssign(Assign *a, LVal &lv, const LVal &at) {
         Error(a, "varint fields are written only at construction (§3.6)");
     AssignableClassCheck(pt, a);
     auto arr = ResizableArrayIn(pt);
-    if (arr && arr->arr->akind == A_GROW)
-        Error(a, cat("cannot assign ", arr == pt ? "a grow-only array" : "a value holding a "
-                     "grow-only array", " through a reference: a shrink of a grow-only "
-                     "array applies to a local of the function that owns it (§5.1)"));
     Roots built;
     if (arr) built = at;
+    if (arr && arr->arr->akind == A_GROW) GrowOnlyAssignKnown(a, built, arr == pt);
     Dest dest(at, false, at.reached);
     dest.slot = pt->kind == TY_SLICE;
     CheckAssignedValue(a, pt, arr, built, dest);
@@ -2573,7 +2625,7 @@ inline bool TypeCheck::StoreIntoSlot(Node *at, VarDef *r, bool bound, TypeExpr *
     if (auto sv = SliceVarOf(r)) return RebindSliceVar(at, sv, v, via);
     if (!IsClassRoot(r)) return false;
     Val nv = v;
-    std::erase_if(nv.alts, [&](const RootAlt &a) { return !a.exact && a.from == r; });
+    erase_if(nv.alts, [&](const RootAlt &a) { return !a.exact && a.from == r; });
     if (nv.None()) return false;
     auto changed = false;
     VisibleVars([&](VarDef *x) {
@@ -2625,8 +2677,20 @@ inline bool TypeCheck::CheckRefRebindRoot(Node *at, VarDef *vd, const Val &rv,
             Error(at, cat("storing a slice rooted at ", rootname(nr), " into ", vd->name, via,
                           ": ", vd->name, " is bound to one rooted at ",
                           rootname(vd->ref.Root()), ", at a different scope depth (§9.2)"));
+        // A parameter's class names the variable its call was given, which
+        // is where the scope depth comes from.
+        auto describe = [&](VarDef *r) -> string {
+            if (!r) return "static data";
+            if (IsTemp(r)) return "a temporary";
+            if (!IsClassRoot(r)) return string(r->name);
+            auto from = UltimateRoot(r);
+            return cat("the caller's storage behind ", r->name,
+                       from && from->type && !from->isglobal ? cat(" (", from->name, ")") : "");
+        };
         Error(at, cat("re-binding ", vd->name, " with a reference rooted at a different "
-                      "scope depth is not supported; declare a new variable"));
+                      "scope depth is not supported; declare a new variable (§9.2): ",
+                      vd->name, " is bound to one rooted at ", describe(vd->ref.Root()),
+                      ", and this one is rooted at ", describe(nr)));
     }
     // Nor does a variable that points into no grow-shrink array start to:
     // what read it before -- earlier in a loop, through a reference to it --

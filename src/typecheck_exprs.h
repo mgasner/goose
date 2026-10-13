@@ -59,8 +59,10 @@ inline TypeCheck::LVal TypeCheck::CheckLValue(Node *n) {
     }
     if (auto d = Is<Dot>(n)) {
         auto lv = LValueBase(d->obj);
+        auto base = lv.type;
         DerefLValue(lv, d->obj);
         ResolveMemberLValue(lv, d);
+        if (lv.intemp) NoRelRefTempRead(d->obj, base, lv.type);
         n->exprtype = lv.type;
         RecordVal(n, ContainerRead(lv));
         return lv;
@@ -82,6 +84,7 @@ inline TypeCheck::LVal TypeCheck::CheckLValue(Node *n) {
             Error(n, cat(lv.type->kind == TY_SLICE ? "slices" : "arrays",
                          " of variable-size elements cannot be indexed, only iterated; for "
                          "random access, keep your own array of references to them (§3.3)"));
+        if (lv.intemp) NoRelRefTempRead(ix->obj, lv.type, elem);
         CheckIntAny(ix->idx);
         if (lv.type->cq) lv.writable = false;   // An element of a const value.
         lv.letbound = false;
@@ -244,14 +247,15 @@ inline Val TypeCheck::ContainerRead(LVal lv) {
     v.SetProv(lv);
     if (!IsRefOrSlice(v.type) && HoldsPlainRef(v.type)) {
         // What a holder read out of a container points at is bounded by
-        // the container: everything stored into it had to outlive it. Out
-        // of a temporary, it points where the temporary's contents do. Out
-        // of a field or an element, every reference it holds was stored
+        // the container: everything stored into it had to outlive it, and
+        // where that is one local holder, its record says where (HeldAt).
+        // Out of a temporary, it points where the temporary's contents do.
+        // Out of a field or an element, every reference it holds was stored
         // there, so none points into a grow-shrink array (RootAlt::slotread).
         if (lv.intemp) {
             v.contents = lv.contents.roots;
         } else {
-            v.contents = Bounds(lv);
+            v.contents = HeldAt(lv);
             for (auto &a : v.contents.alts) a.slotread = lv.isslot;
         }
         v.holderset = true;
@@ -501,9 +505,9 @@ template<typename F> void TypeCheck::HoldForSequence(ForLoop *fl, const Val &v, 
         else if (auto ix = Is<Index>(n)) obj = ix->obj;
         else break;
         // The slot lies in what obj is, or leads to.
-        auto it = nodevals.find(obj);
-        if (n->exprtype && IsRefOrSlice(n->exprtype) && it != nodevals.end()) {
-            auto slot = DecayRef(it->second);
+        auto ov = nodevals.find(obj);
+        if (n->exprtype && IsRefOrSlice(n->exprtype) && ov) {
+            auto slot = DecayRef(*ov);
             slot.byteview = false;
             slot.type = ast.SliceOf(LoadType(n->exprtype), n->line);
             hold(n, slot, true);
@@ -529,12 +533,12 @@ template<typename F> void TypeCheck::HeldOperands(F f) {
         ForOperands(e.node, [&](Node *ch, HoldKind kind) {
             auto at = i++;
             if (at >= e.pos) return;
-            auto it = nodevals.find(ch);
-            if (it == nodevals.end()) return;
+            auto cv = nodevals.find(ch);
+            if (!cv) return;
             if (ch == cur.renderarg && cur.rendering) {
-                HoldAs(ch, it->second, HK_VIEW, e.node, cur.rendering, f);
+                HoldAs(ch, *cv, HK_VIEW, e.node, cur.rendering, f);
                 if (ch == cur.renderwhere) {
-                    auto where = it->second;
+                    auto where = *cv;
                     where.type = ast.RefTo(where.type, ch->line);
                     f(Held { ch, std::move(where), false, cur.rendering });
                 }
@@ -547,7 +551,7 @@ template<typename F> void TypeCheck::HeldOperands(F f) {
                 return;
             }
             if (own) return;
-            HoldAs(ch, it->second, kind, e.node, nullptr, f);
+            HoldAs(ch, *cv, kind, e.node, nullptr, f);
         });
     }
 }
@@ -639,7 +643,7 @@ inline void TypeCheck::ResolveMemberLValue(LVal &lv, Dot *d) {
 
 // References are transparent: load the pointee unless the destination
 // wants the reference itself. Optionals never decay (narrow first).
-inline Val TypeCheck::DecayRef(Val v) {
+inline Val TypeCheck::DecayRef(const Val &v) {
     if (!IsPlainRef(v.type)) return v;
     Val r;
     r.type = LoadType(v.type->ref->sub);
@@ -670,7 +674,7 @@ inline Val TypeCheck::DecayRef(Val v) {
         r.writable = v.writable && !IsVarintT(v.type->ref->sub);
         r.byteview = v.byteview && HoldsPlainRef(r.type);
         if (HoldsPlainRef(r.type)) {
-            r.contents = Bounds(r);
+            r.contents = HeldAt(r);
             r.holderset = true;
             r.holderfrom = HolderSource(r);
             MarkClassCopy(r);
@@ -861,6 +865,7 @@ inline Val TypeCheck::CheckInferredResult(Node *&n, FnSpec *tspec) {
     if (IsNonFixedLValue(v) && !IsOwnLocal(n)) n = AutoRef(n, v);
     // All of a multi-value call's results are forwarded, as they are.
     if (auto c = Is<Call>(n); c && c->rettypes.size() > 1) return v;
+    NoRelRefCopy(n, v.type);
     if (reachable && IsNonFixedRef(v)) {
         auto dies = v.Any([&](const RootAlt &a) {
             return (a.root && a.root->ownerspec == tspec) || IsTemp(a.root);
@@ -902,7 +907,7 @@ inline Val TypeCheck::CheckValue(Node *&n, TypeExpr *expected, bool callsite, bo
     if (auto c = Is<Call>(n); c && c->builtin == B_DEFAULT &&
         v.type->kind != TY_ARRAY && Is<StructLit>(c->defaultinit))
         n = c->defaultinit;
-    auto dt = expected && expected->kind != TY_VOID ? expected : DecayRef(v).type;
+    auto dt = expected && expected->kind != TY_VOID ? expected : DecayedType(v);
     // An argument's parameter may bind the branch by reference instead, which
     // makes the & redundant another way: the argument's check against it
     // says which (argpath, RefCopyWarnings).
@@ -953,7 +958,7 @@ inline Val TypeCheck::Operand(Node *n) {
 }
 
 inline void TypeCheck::MustFit(Val &v, Node *n, TypeExpr *dt) {
-    auto vt = DecayRef(v).type;
+    auto vt = DecayedType(v);
     if (vt->kind == TY_ARRAY && vt->arr->akind == A_FIXED)
         CheckArrayCount(n, dt, ArraySize(vt->arr));
     if (!reachable) return;  // A diverging operand fits anything.
@@ -1389,10 +1394,11 @@ inline Val TypeCheck::CheckRefOf(Unary *x) {
 // A writable reference to d is made at `at` (§4.1: `&d`, or d bound by
 // reference). A `let` is written through one as a `var` is (§4.4), before
 // or after anything that relies on its value: the marks this, RelyOnNonneg,
-// ResizesToMark and RelyOnConstant leave do not follow the flow, so neither
-// a loop's later pass, a cycle's later round nor a nested function checked
-// only once can get past them, and whichever comes second is an error (but
-// for a resize, which is merely unbalanced after the reference).
+// ResizesToMark, RelyOnConstant and RelyOnExtent leave do not follow the
+// flow, so neither a loop's later pass, a cycle's later round nor a nested
+// function checked only once can get past them, and whichever comes second
+// is an error (but for a resize, which is merely unbalanced after the
+// reference).
 inline void TypeCheck::NoteWritableRef(VarDef *d, Node *at) {
     if (!d->refwrite) d->refwrite = at;
     if (d->nonneguse)
@@ -1411,6 +1417,14 @@ inline void TypeCheck::NoteWritableRef(VarDef *d, Node *at) {
                       " relies on it keeping its initializer's value, as a named constant "
                       "(§4.4, §11.1); bind the reference to a copy of it, or declare ",
                       d->name, " const"));
+    if (d->extentuse && !TypeFixesExtent(d, d->extentcap)) {
+        auto what = d->extentcap ? "capacity" : "length";
+        Error(at, cat(d->name, " is bound to a writable reference here, through which its ",
+                      what, " may change, while the ", d->extentwhat, " at ",
+                      Where(d->extentuse->line), " relies on it keeping its initializer's "
+                      "(§3.3, §4.4, §11.1); bind the reference to a copy of it, or give ",
+                      d->name, " a type that fixes its ", what));
+    }
 }
 
 // A comparison with a u64 at `at` relies on v being non-negative (§6.1),
@@ -1452,6 +1466,62 @@ inline void TypeCheck::RelyOnNamed(const Val &v, Node *at) {
     if (unifytrial || !v.constfrom) return;
     ConstUse use { at, "use as a literal", v.constfrom };
     for (auto d = v.constfrom; d; d = d->constfrom) RelyOnConstant(use, d);
+}
+
+// Whether d's type fixes its length (`cap`: its capacity), which no
+// assignment or reference can then change (§3.3). Not before d is checked.
+inline bool TypeCheck::TypeFixesExtent(VarDef *d, bool cap) {
+    auto t = d->type;
+    if (!t || t->kind != TY_ARRAY) return false;
+    return cap ? t->arr->akind == A_LIMITED && t->arr->sizeexpr : t->arr->akind == A_FIXED;
+}
+
+// A compile-time size, capacity or fill count takes the `.len` (`cap`: the
+// `.cap`) the initializer of the global d gives (§3.3), directly or through
+// the initializer of use.named. Where d's type fixes it, nothing can change
+// it. Where it does not, as a string literal's `const u8[:]` does not, a
+// `var` may be assigned another, and a `let` is relied on as a named
+// constant is (RelyOnConstant), though no reference to one holding a
+// literal's slice is writable (§9.5): whichever of the use and a writable
+// reference to it comes second is an error (NoteWritableRef). A reference
+// cannot come before d's declaration has been checked, naming d before its
+// initializer runs being an error (§11.1), but the use can, while d's type
+// is unknown: a `var`'s declaration checks it then (CheckVarExtent), and a
+// writable reference to a `let` afterwards.
+inline void TypeCheck::RelyOnExtent(ConstUse &use, VarDef *d, bool cap) {
+    if (TypeFixesExtent(d, cap)) return;
+    auto what = cap ? "capacity" : "length";
+    auto rests = d != use.named ? cat(", which rests on ", d->name, "'s") : string();
+    if (d->type && d->isvar)
+        Error(use.at, cat("the ", use.what, " relies on ", use.named->name,
+                          " keeping its initializer's ", what, rests, ", but ", d->name,
+                          " is a var of type ", TypeStr(d->type), ", which does not fix it "
+                          "(§3.3); declare ", d->name, " let, or give it a type that fixes "
+                          "its ", what));
+    if (d->refwrite)
+        Error(use.at, cat("the ", use.what, " relies on ", use.named->name,
+                          " keeping its initializer's ", what, rests,
+                          ", but a writable reference bound to ", d->name, " at ",
+                          Where(d->refwrite->line), " may change it (§3.3, §4.4, §11.1); bind "
+                          "that reference to a copy of it, or give ", d->name, " a type that "
+                          "fixes its ", what));
+    if (!d->extentuse) {
+        d->extentuse = use.at;
+        d->extentwhat = use.what;
+        d->extentcap = cap;
+    }
+}
+
+// The var global d's declaration, at `at`, has given it its type, after a
+// size took the `.len` or `.cap` its initializer gives (RelyOnExtent), which
+// the type must fix, since an assignment may give d another.
+inline void TypeCheck::CheckVarExtent(VarDef *d, Node *at) {
+    if (!d->isvar || !d->extentuse || TypeFixesExtent(d, d->extentcap)) return;
+    auto what = d->extentcap ? "capacity" : "length";
+    Error(at, cat(d->name, " is a var of type ", TypeStr(d->type), ", which does not fix its ",
+                  what, ", while the ", d->extentwhat, " at ", Where(d->extentuse->line),
+                  " relies on it keeping its initializer's (§3.3); declare ", d->name,
+                  " let, or give it a type that fixes its ", what));
 }
 
 // Folds a constant binary op at the width and signedness of out.type
@@ -1936,6 +2006,13 @@ inline Val TypeCheck::NumericUnary(Unary *u, const Val &cv, bool trial) {
                 }
                 r.constfrom = v.constfrom;
                 if (!trial) u->litfloat = r.litfloat;
+            } else if (ElementwiseOK(t)) {
+                // Elementwise negation (§6.1): every leaf is a signed
+                // integer, or every leaf a float.
+                if (auto leaf = UnsignedLeaf(t))
+                    return fail(cat("cannot negate a value of type ", TypeStr(t),
+                                    ", which holds the unsigned type ", TypeStr(leaf)));
+                r.type = t;
             } else {
                 return fail(cat("cannot negate a value of type ", TypeStr(t)));
             }
@@ -2523,7 +2600,72 @@ inline bool TypeCheck::ConstIntValue(Node *n, Val &v, bool &literal,
         literal = llit && rlit;
         return true;
     }
+    if (auto d = Is<Dot>(n)) {
+        // `X.len` / `X.cap`, an i64 as anywhere else, which adapts as no
+        // literal does.
+        auto id = Is<Ident>(d->obj);
+        auto bd = LookupBuiltin(d->name);
+        if (!id || !bd || (bd->kind != B_LEN && bd->kind != B_CAP)) return false;
+        int64_t extent;
+        if (!ConstExtent(id, bd->kind == B_CAP, extent, visiting, use)) return false;
+        v.type = ast.inttypes[IS_I64];
+        v.ck = CK_INT;
+        v.ival = extent;
+        v.uns = false;
+        literal = false;
+        return true;
+    }
     return false;
+}
+
+// The length (`cap`: the capacity) of the global id names, where that is
+// fixed before the program runs (§3.3): the size of its written fixed-array
+// type (`cap`: the capacity of its written limited one), or else the length
+// of the array literal, fill literal or string literal it is initialized to,
+// or of the global it copies. As a named constant's value is, it is read off
+// the declaration, which may not have been checked yet. A length its written
+// type fixes nothing can change; whether one its initializer gives can, the
+// type that gives the global decides (RelyOnExtent).
+inline bool TypeCheck::ConstExtent(Ident *id, bool cap, int64_t &extent,
+                                   set<VarDecl *> &visiting, ConstUse *use) {
+    auto g = ast.LookupGlobal(id->name, id->ns);
+    if (!g || g->byref || g->reusable || g->names.size() != 1 || g->inits.size() > 1)
+        return false;
+    if (!visiting.insert(g).second)
+        Error(id, cat("cycle in constant initializer: ", id->name));
+    if (use && visiting.size() == 1) use->named = g->defs[0];
+    auto ok = false;
+    Val v;
+    bool literal;
+    if (auto t = g->type) {
+        if (t->kind == TY_ARRAY && t->arr->sizeexpr &&
+            t->arr->akind == (cap ? A_LIMITED : A_FIXED) &&
+            ConstIntValue(t->arr->sizeexpr, v, literal, visiting, use)) {
+            extent = v.ival;
+            ok = true;
+        }
+    } else if (!g->inits.empty()) {
+        auto init = g->inits[0];
+        if (cap) {
+            if (auto from = Is<Ident>(init)) ok = ConstExtent(from, cap, extent, visiting, use);
+        } else if (auto al = Is<ArrayLit>(init); al && !al->capexpr) {
+            if (!al->fillcount) {
+                extent = (int64_t)al->elems.size();
+                ok = true;
+            } else if (ConstIntValue(al->fillcount, v, literal, visiting, use)) {
+                extent = v.ival;
+                ok = true;
+            }
+        } else if (auto s = Is<StrLit>(init)) {
+            extent = (int64_t)s->val.size();
+            ok = true;
+        } else if (auto from = Is<Ident>(init)) {
+            ok = ConstExtent(from, cap, extent, visiting, use);
+        }
+        if (ok && use) RelyOnExtent(*use, g->defs[0], cap);
+    }
+    visiting.erase(g);
+    return ok;
 }
 
 // All scalar leaves integers, or all floats; only structs and fixed
@@ -2554,6 +2696,19 @@ inline bool TypeCheck::ElementwiseOK(TypeExpr *t) {
         }
     };
     return (t->kind == TY_STRUCT || t->kind == TY_ARRAY) && rec(t);
+}
+
+// An unsigned integer leaf of an elementwise aggregate, or null.
+inline TypeExpr *TypeCheck::UnsignedLeaf(TypeExpr *t) {
+    switch (t->kind) {
+        case TY_INT: return IsUnsigned(t->intstorage) ? t : nullptr;
+        case TY_STRUCT:
+            for (auto ft : GetStructInst(t)->ftypes)
+                if (auto leaf = ft ? UnsignedLeaf(ft) : nullptr) return leaf;
+            return nullptr;
+        case TY_ARRAY: return UnsignedLeaf(t->arr->sub);
+        default: return nullptr;
+    }
 }
 
 // Scaling keeps the aggregate's nominal type, so every leaf must accept
@@ -2636,9 +2791,14 @@ inline bool TypeCheck::InitOrderSafe(Node *n, set<FnSpec *> &visiting, FnSpec *c
         Is<NullLit>(n) || Is<SelfRef>(n) || Is<Ident>(n)) return true;
     if (auto d = Is<Dot>(n)) return d->variantconst || safe(d->obj);
     if (auto u = Is<Unary>(n)) {
-        auto t = LoadType(u->child->exprtype);
-        if (u->op == T_MINUS && !IsIntT(t) && t->kind != TY_FLT) return false;
-        if (u->op == T_MINUS && IsIntT(t) && !IsUnsigned(t->intstorage)) return false;
+        // Implicit reference conversions have a typed unary node but need not
+        // type its synthesized operand. Only negation needs the operand's type
+        // to prove that initializer reordering cannot cross an overflow check.
+        if (u->op == T_MINUS) {
+            auto t = LoadType(u->child->exprtype);
+            if (!IsIntT(t) && t->kind != TY_FLT) return false;
+            if (IsIntT(t) && !IsUnsigned(t->intstorage)) return false;
+        }
         return safe(u->child);
     }
     if (auto b = Is<Binary>(n)) {
@@ -2854,9 +3014,17 @@ inline void TypeCheck::CheckSelfInit(Node *n, TypeExpr *ft, TypeExpr *selft) {
 
 inline void TypeCheck::CheckStmts(Block *b) {
     for (size_t i = 0; i < b->stmts.size(); i++) {
+        if (!reachable) {
+            b->stmts.resize(i);
+            break;
+        }
         blockpos.back().idx = i;
         CheckStmt(b->stmts[i]);
     }
+    // Drop the unreachable suffix (including the tail), so later passes never
+    // see unchecked nodes. Function bodies are specialization clones; unknown
+    // recursive calls may return, so only proven exits can prune them.
+    if (!reachable) b->tail = nullptr;
     blockpos.back().idx = b->stmts.size();
 }
 
@@ -2887,6 +3055,71 @@ inline bool TypeCheck::MentionsName(Node *n, string_view name, set<SFunction *> 
     return hit;
 }
 
+// Whether the code under n has a `continue` that leaves it: one that is not
+// inside a loop's body there, nor in a nested function or a function value,
+// whose loops are their own.
+inline bool TypeCheck::EscapingContinue(Node *n) {
+    if (!n || Is<FnDecl>(n) || Is<FunVal>(n)) return false;
+    if (Is<Continue>(n)) return true;
+    Node *body = nullptr;
+    if (auto w = Is<While>(n)) body = w->body;
+    else if (auto l = Is<LoopExpr>(n)) body = l->body;
+    else if (auto fl = Is<ForLoop>(n)) body = fl->body;
+    auto hit = false;
+    n->Children([&](Node *ch) { hit = hit || (ch != body && EscapingContinue(ch)); });
+    return hit;
+}
+
+// Whether the rest of the statement being checked (LaterOperands) may take a
+// reference or slice out of v: it names v other than to read a field path
+// whose value holds none, itself or in a nested function it calls. Syntactic,
+// as UsedAfter is: a field path is resolved by name against v's type.
+inline bool TypeCheck::ExposedLater(VarDef *v) {
+    auto vframe = FrameOfScope(Depth(v) - 1);
+    // The type of the field path `n` reads starting at v, or null.
+    auto fieldtype = [&](Node *n) -> TypeExpr * {
+        vector<string_view> names;
+        while (auto d = Is<Dot>(n)) {
+            names.push_back(d->name);
+            n = d->obj;
+        }
+        auto id = Is<Ident>(n);
+        if (!id || id->name != v->name || names.empty() || !v->type) return nullptr;
+        auto t = v->type;
+        for (auto i = names.size(); i-- > 0;) {
+            if (t->kind == TY_REF) t = t->ref->sub;
+            if (t->kind != TY_STRUCT) return nullptr;
+            auto inst = GetStructInst(t);
+            TypeExpr *ft = nullptr;
+            for (size_t k = 0; k < inst->st->fields.size() && k < inst->ftypes.size(); k++)
+                if (inst->st->fields[k].name == names[i]) ft = inst->ftypes[k];
+            if (!ft) return nullptr;
+            t = ft;
+        }
+        return t;
+    };
+    function<bool(Node *)> exposes = [&](Node *n) -> bool {
+        set<SFunction *> seen;
+        if (!n || !MentionsName(n, v->name, seen)) return false;
+        if (auto ft = fieldtype(n)) return HoldsPlainRef(ft);
+        if (Is<Ident>(n)) return true;
+        // A mention by a nested function the node calls, not by its operands.
+        auto inchild = false, any = false;
+        n->Children([&](Node *ch) {
+            set<SFunction *> s;
+            if (!MentionsName(ch, v->name, s)) return;
+            inchild = true;
+            any = any || exposes(ch);
+        });
+        return any || !inchild;
+    };
+    auto exposed = false;
+    LaterOperands([&](Node *n, int fi) {
+        exposed = exposed || (NamesFrame(fi, vframe) && exposes(n));
+    });
+    return exposed;
+}
+
 // Whether variable v can be read again after the shrink being checked
 // (§5.1): in the rest of its statement, later in an open block at or
 // inside v's scope, or anywhere in a loop that contains this point and
@@ -2896,7 +3129,12 @@ inline bool TypeCheck::MentionsName(Node *n, string_view name, set<SFunction *> 
 // may call again. Only code of v's own frame, or of one nested in it, can
 // name v: the same name in another frame -- the function running a function
 // value's body, a callee checked inside its caller's check -- is another
-// variable.
+// variable. Where a statement of the shrink's own block after the shrink's
+// statement is a `return` or a `break`, and nothing up to it is a `continue`
+// that could lead back into a loop, what that exit leaves is not run again
+// from the shrink: the rest of that block and its tail, and for a `return`
+// everything else of this frame's body, for a `break` everything inside the
+// loop or `block` it ends, that loop's next iteration included.
 inline bool TypeCheck::UsedAfter(VarDef *v) {
     set<SFunction *> seen;
     auto vframe = FrameOfScope(Depth(v) - 1);
@@ -2906,7 +3144,30 @@ inline bool TypeCheck::UsedAfter(VarDef *v) {
     auto later = false;
     LaterOperands([&](Node *n, int fi) { later = later || mentions(n, fi); });
     if (later) return true;
-    for (auto i = 0; i < (int)scopes.size(); i++) {
+    // The scopes the exit leaves, from `cut` on, and the statement it is in
+    // the innermost block (its stmts.size() for the tail).
+    auto cut = (int)scopes.size();
+    auto exitat = SIZE_MAX;
+    if (!blockpos.empty()) {
+        auto &bp = blockpos.back();
+        auto &stmts = bp.block->stmts;
+        auto frameidx = (int)frames.size() - 1;
+        if (bp.scopeidx == (int)scopes.size() - 1 && FrameOfScope(bp.scopeidx) == frameidx &&
+            bp.idx < stmts.size() && !EscapingContinue(stmts[bp.idx])) {
+            for (auto i = bp.idx + 1; i <= stmts.size(); i++) {
+                auto s = i < stmts.size() ? stmts[i] : bp.block->tail;
+                if (!s || EscapingContinue(s)) break;
+                auto to = Is<Return>(s) ? frames[frameidx].scopebase
+                          : Is<Break>(s) ? FindBreakScope(false)
+                                         : -1;
+                if (to < 0) continue;
+                cut = to;
+                exitat = i;
+                break;
+            }
+        }
+    }
+    for (auto i = 0; i < (int)scopes.size() && i < cut; i++) {
         if (scopes[i].kind != SK_LOOP) continue;
         // A `for` binding is rebound by the loop itself at every iteration.
         if (auto fl = Is<ForLoop>(scopes[i].node); fl && (fl->vdef == v || fl->idxdef == v))
@@ -2922,9 +3183,14 @@ inline bool TypeCheck::UsedAfter(VarDef *v) {
         if (fr.isfunval && !fr.isdefault && bp.scopeidx == fr.scopebase &&
             Depth(v) - 1 < bp.scopeidx && mentions(bp.block, fi))
             return true;
-        for (auto i = bp.idx + 1; i < bp.block->stmts.size(); i++)
-            if (mentions(bp.block->stmts[i], fi)) return true;
-        if (bp.idx < bp.block->stmts.size() && bp.block->tail && mentions(bp.block->tail, fi))
+        auto &stmts = bp.block->stmts;
+        auto exits = &bp == &blockpos.back() && exitat != SIZE_MAX;
+        if (bp.scopeidx >= cut && !exits) continue;
+        auto end = exits ? min(exitat + 1, stmts.size()) : stmts.size();
+        for (auto i = bp.idx + 1; i < end; i++)
+            if (mentions(stmts[i], fi)) return true;
+        if ((!exits || exitat == stmts.size()) && bp.idx < stmts.size() && bp.block->tail &&
+            mentions(bp.block->tail, fi))
             return true;
     }
     return false;

@@ -10,6 +10,9 @@ fn scalars() {
     print(lerp(0.0, 10.0, 0.25));                                                      // 2.5
     print(next_pow2(0), " ", next_pow2(1), " ", next_pow2(5), " ", next_pow2(64));     // 1 1 8 64
     print(popcount(255), " ", popcount(0), " ", clz(1), " ", ctz(8), " ", clz(0));      // 8 0 63 3 64
+    let top: u64 = 0x8000000000000000;
+    let ones: u64 = 0xffffffffffffffff;
+    print(popcount(ones), " ", clz(top), " ", ctz(top), " ", ctz(0), " ", clz(ones));  // 64 0 63 64 0
     var a = 1;
     var b = 2;
     swap(a, b);
@@ -29,6 +32,61 @@ fn hashing() {
     print(hash(0.1) == hash(0.1), " ", hash(-1.5) != hash(1.5));               // true true
     let q: f32 = 0.1;
     print(hash(q) == hash(q), " ", hash(q) != hash(-q));                       // true true
+    // Bytes: the same bytes hash the same wherever they lie, every prefix
+    // of a text (each length the hash reads its own way) hashes differently,
+    // and the low 12 bits, which a 4096-slot dictionary uses, spread 4096
+    // keys that differ in their last digits over as many buckets as random
+    // values would: 2594 on average, where the bound 2450 is far below and
+    // a byte-at-a-time FNV-1a, at 2360 for item_N, would already miss it.
+    let text = "the quick brown fox jumps over the lazy dog";
+    var buf: u8[>..] = [];
+    buf.append(text);
+    var same = true;
+    var distinct = true;
+    for i in text.len + 1 {
+        if hash(text[0..i]) != hash(buf[0..i]) || hash(text[i..]) != hash(buf[i..]) { same = false; }
+        for j in i { if hash(text[0..i]) == hash(text[0..j]) { distinct = false; } }
+    }
+    let inline: u8[..16] = "item_17";
+    print(same, " ", distinct, " ", hash(inline) == hash("item_17"));          // true true true
+    print(buckets("item_") > 2450, " ", buckets("v") > 2450, " ",
+          buckets("key number ") > 2450);                                      // true true true
+    // Longer keys, which the hash reads in two lanes, numbered at the end
+    // and at the start.
+    print(buckets("a key long enough to be read in two lanes, number ") > 2450, " ",
+          buckets_front(" is the number in front of this long key") > 2450);   // true true
+}
+
+// How many of 4096 buckets the low 12 bits of the hashes of prefix0 ..
+// prefix4095 fill.
+fn buckets(prefix: u8[:]) -> i64 {
+    var seen: bool[>..] = [];
+    for b in 4096 { seen.push(false); }
+    var key: u8[>..] = [];
+    var n = 0;
+    for i in 4096 {
+        key.clear();
+        format(key, prefix, i);
+        let b = (hash(key) & 4095) as i64;
+        if !seen[b] { n++; }
+        seen[b] = true;
+    }
+    return n;
+}
+
+fn buckets_front(suffix: u8[:]) -> i64 {
+    var seen: bool[>..] = [];
+    for b in 4096 { seen.push(false); }
+    var key: u8[>..] = [];
+    var n = 0;
+    for i in 4096 {
+        key.clear();
+        format(key, i, suffix);
+        let b = (hash(key) & 4095) as i64;
+        if !seen[b] { n++; }
+        seen[b] = true;
+    }
+    return n;
 }
 
 fn random() {
@@ -77,6 +135,10 @@ fn searching() {
     let q, found2 = binary_search(sorted, 4);
     print(q, " ", found2);                                                     // 2 false
     print(find("hello world", "o w"), " ", rfind("hello world", "o"), " ", find("abc", "x"));   // 4 7 -1
+    print(find("aab", "ab"), " ", rfind("abab", "ab"), " ", find("ab", ""), " ", rfind("ab", ""),
+          " ", find("a", "ab"));                                               // 1 2 0 2 -1
+    let digits = [3, 1, 4, 1, 5, 9];
+    print(find(digits, [1, 5]), " ", rfind(digits, [1]), " ", find(digits, [9, 9]));   // 3 3 -1
     print(starts_with("hello", "he"), " ", ends_with("hello", "lo"), " ", starts_with("hi", "hello"));   // true true false
 }
 
@@ -168,6 +230,11 @@ fn strings() {
     o.push('|');
     format_uint(o, 5, 2, 8, '0');
     print(o);                                                                  //     ff|-0042|00000101
+    var small: u8[..16] = [];
+    format_int(small, -7, 10, 4, '0');
+    small.push('|');
+    format_uint(small, 255, 16, 0, ' ');
+    print(small);                                                              // -007|ff
     var f: u8[>..] = [];
     format_flt(f, 3.14159, 2);
     f.push(' ');

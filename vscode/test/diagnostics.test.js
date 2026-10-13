@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const path = require('node:path');
-const { parseDiagnostics, CheckQueue } = require('../src/diagnostics');
+const { parseDiagnostics, failureMessage, CheckQueue } = require('../src/diagnostics');
 
 test('lexer carets, warnings, explicit columns and related instantiations', () => {
     const cwd = path.resolve('workspace');
@@ -88,6 +88,53 @@ test('roots have separate results and workspace invalidation is scoped', async (
     queue.invalidate();
 });
 
+test('edits keep results stale per workspace until a recheck replaces them', async () => {
+    const runner = deferredRunner();
+    let notified = 0;
+    const queue = new CheckQueue(config => runner.run(config), () => { notified++; });
+    const a = { file: 'a.goose', cwd: '/one' }, b = { file: 'b.goose', cwd: '/two' };
+    const first = [queue.schedule(a, 0), queue.schedule(b, 0)];
+    await tick();
+    runner.calls[0].resolve({ output: 'a error' });
+    runner.calls[1].resolve({ output: 'b ok' });
+    await Promise.all(first);
+    queue.stale('/one');
+    const before = notified;
+    queue.stale('/one');
+    assert.equal(notified, before, 'further edits change nothing');
+    assert.equal(queue.results.get('a.goose').stale, true);
+    assert.equal(queue.results.get('b.goose').stale, undefined, 'another workspace stays current');
+    const again = queue.schedule(a, 0);
+    await tick();
+    assert.equal(queue.results.get('a.goose').output, 'a error', 'a recheck keeps the stale result until it lands');
+    queue.stale('/one');
+    assert.equal(runner.calls[2].cancelled, true);
+    assert.equal(await again, false);
+    assert.equal(queue.results.get('a.goose').output, 'a error');
+    const last = queue.schedule(a, 0);
+    await tick();
+    runner.calls[3].resolve({ output: 'a ok' });
+    assert.equal(await last, true);
+    assert.equal(queue.results.get('a.goose').stale, undefined);
+    assert.equal(queue.results.get('a.goose').output, 'a ok');
+    queue.invalidate();
+});
+
+test('results of entries no longer checked are dropped', async () => {
+    let notified = 0;
+    const queue = new CheckQueue(config => ({ promise: Promise.resolve({ output: config.file }), cancel() {} }), () => { notified++; });
+    await queue.schedule({ file: 'a.goose', cwd: '/one' }, 0);
+    await queue.schedule({ file: 'b.goose', cwd: '/one' }, 0);
+    queue.stale('/one');
+    queue.retain(file => file === 'b.goose');
+    assert.deepEqual([...queue.results.keys()], ['b.goose']);
+    const before = notified;
+    queue.retain(file => file === 'b.goose');
+    assert.equal(notified, before);
+    queue.invalidate();
+    assert.equal(queue.results.size, 0);
+});
+
 test('synchronous launch failures are surfaced and pending timers cancel cleanly', async () => {
     const queue = new CheckQueue(() => { throw new Error('launch failure'); }, () => {});
     await queue.schedule({ file: 'a.goose', cwd: '/one' }, 0);
@@ -95,4 +142,12 @@ test('synchronous launch failures are surfaced and pending timers cancel cleanly
     const pending = queue.schedule({ file: 'a.goose', cwd: '/one' }, 1000);
     queue.invalidate();
     assert.equal(await pending, false);
+});
+
+test('unlocated failures drop the compiler progress lines', () => {
+    assert.equal(failureMessage('parsed ok: 50 top-level declarations, 3 file(s)\nprogram needs exactly one global fn main()\n'),
+        'program needs exactly one global fn main()');
+    assert.equal(failureMessage('parsed ok: 1 top-level declarations, 1 file(s)\n'), '');
+    assert.equal(failureMessage('cannot open file: x.goose\n'), 'cannot open file: x.goose');
+    assert.equal(failureMessage('typechecked ok: 1 specialization(s)\nbce: elided 0/0 index and 0/0 slice checks\nwrote a.c (12 bytes)\nbroken'), 'broken');
 });

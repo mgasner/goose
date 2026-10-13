@@ -1,5 +1,14 @@
 # Minimal namespaces
 
+<details>
+<summary>Table of contents</summary>
+
+- [Rules](#rules)
+- [Implementation](#implementation)
+- [Rust and Zig comparison](#rust-and-zig-comparison)
+
+</details>
+
 Files can declare a namespace and refer to declarations by qualified names.
 This extends the existing import loader and whole-program compiler.
 

@@ -1,9 +1,9 @@
 """Vendors SQLite for the sqlite module: downloads the pinned amalgamation
 from sqlite.org, checks it against the SHA3-256 recorded here, and writes
-sqlite3.c and sqlite3.h into third_party/sqlite/, where cmake/sqlite.cmake
-looks for them. They are not committed (third_party/sqlite/README.md says
-why). Without them the compiler builds as before, minus the sqlite module and
-checked SQL.
+sqlite3.c and sqlite3.h into third_party/sqlite/, where the sqlite package
+(packages/sqlite/CMakeLists.txt) looks for them. They are not committed
+(third_party/sqlite/README.md says why). Without them the compiler builds as
+before, minus the sqlite package and checked SQL.
 
     python scripts/fetch_sqlite.py            # fetch, unless already there
     python scripts/fetch_sqlite.py --force    # fetch again

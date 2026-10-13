@@ -127,19 +127,14 @@ inline Val Ident::Check(TypeCheck &tc, TypeExpr *) {
             v.lvalue = true;
             if (tc.HoldsPlainRef(v.type)) {
                 // What the references inside point at: a global's contents
-                // are rooted at globals or static data; anything else is
-                // bounded by the variable itself, which its contents
-                // outlive. The contents are what was stored so far, a
-                // loop's later iterations' stores included (CheckLoopPasses).
+                // are rooted at globals or static data; a local's are what
+                // was stored into it so far, a loop's later iterations'
+                // stores included (CheckLoopPasses), which is nothing where
+                // only nulls and empty slices were.
                 v.holderset = true;
                 v.holderfrom = vd;
-                if (vd->isglobal) {
-                    v.contents.Set(nullptr, false);
-                } else if (!vd->contents.None() || vd->contents.unknown) {
-                    v.contents = vd->contents;
-                } else {
-                    v.contents.Set(vd, false);
-                }
+                if (vd->isglobal) v.contents.Set(nullptr, false);
+                else v.contents = vd->contents;
             }
         }
         return v;
@@ -157,21 +152,19 @@ inline Val Ident::Check(TypeCheck &tc, TypeExpr *) {
         return v;
     }
     FnSpec *env = nullptr;
-    if (auto sf = tc.LookupLocalFnEnv(name, env)) {
-        fnref = sf;
+    if (auto fns = tc.LookupLocalFns(name, env); !fns.empty()) {
+        fnref = fns[0];
         Val v;
         v.type = tc.fntype;
-        v.fnv.named = sf;
-        v.fnv.env = env;
+        v.fnv = tc.LocalFnValue(fns, env);
         return v;
     }
     if (auto &cands = tc.ast.LookupFunctions(name, ns); !cands.empty()) {
-        if (cands.size() != 1)
-            tc.Error(this, cat("overloaded function ", name, " cannot be a function value"));
         fnref = cands[0];
         Val v;
         v.type = tc.fntype;
         v.fnv.named = cands[0];
+        if (cands.size() > 1) v.fnv.set = &cands;
         return v;
     }
     tc.Error(this, cat("unknown identifier: ", name));
@@ -423,7 +416,7 @@ inline Val Dot::Check(TypeCheck &tc, TypeExpr *) {
                 return tc.CheckVariantConst(this, en);
     }
     auto ov = tc.CheckV(obj, nullptr);
-    tc.NoUntypedEmptyArray(ov, obj, cat(".", name));
+    if (tc.IsUntypedEmptyArray(ov.type)) tc.NoUntypedEmptyArray(ov, obj, cat(".", name));
     obj->exprtype = ov.type;
     auto t = ov.type;
     if (t->kind == TY_REF) {
@@ -452,6 +445,7 @@ inline Val Dot::Check(TypeCheck &tc, TypeExpr *) {
     lv.SetProv(ov);
     lv.intemp = tc.TempContents(ov, lv.contents);
     tc.ResolveMemberLValue(lv, this);
+    if (lv.intemp) tc.NoRelRefTempRead(obj, t, lv.type);
     return tc.ContainerRead(lv);
 }
 
@@ -479,6 +473,8 @@ inline Val SliceExpr::Check(TypeCheck &tc, TypeExpr *) {
     } else {
         tc.Error(this, cat("cannot slice a value of type ", tc.TypeStr(lv.type)));
     }
+    // A comparison's view reads no link out of what it compares (§4.5).
+    if (lv.intemp && !cmpview) tc.NoRelRefTempRead(obj, lv.type, elem);
     if (lo) tc.CheckIntAny(lo);
     if (hi) tc.CheckIntAny(hi);
     Val v;

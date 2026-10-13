@@ -80,12 +80,14 @@ inline int RecvKindOf(TypeExpr *t) {
     F(B_BYTES_OF,         "bytes_of",         1,  1,   "",   "",  BR_ANY,         BF_MEMBER | BF_CUSTOM) \
     F(B_FROM_BYTES,       "from_bytes",       1,  1,   "",   "",  0,              BF_TYARGS | BF_CUSTOM) \
     F(B_EMBED_SHADER,     "embed_shader",     1, 99,   "",   "",  0,              BF_CUSTOM) \
+    F(B_EMBED_FILE,       "embed_file",       1,  1,   "",   "",  0,              BF_CUSTOM) \
     F(B_LEN,              "len",              1,  1,   "",   "i", BR_ANY,         BF_MEMBER | BF_PROPERTY) \
     F(B_CAP,              "cap",              1,  1,   "",   "i", BR_LIMITED,     BF_MEMBER | BF_PROPERTY) \
     F(B_INDEX_OF,         "index_of",         2,  2,   "",   "i", BR_INDEXABLE,   BF_MEMBER | BF_CUSTOM) \
     F(B_PUSH,             "push",             2,  2,   "e",  "r", BR_GROWABLE,    BF_MEMBER | BF_WRITE | BF_CUSTOM) \
     F(B_APPEND,           "append",           2,  2,   "a",  "",  BR_GROWABLE,    BF_MEMBER | BF_WRITE) \
     F(B_POP,              "pop",              1,  1,   "",   "e", BR_SHRINKABLE,  BF_MEMBER | BF_WRITE) \
+    F(B_POP_N,            "pop_n",            2,  2,   "i",  "",  BR_SHRINKABLE,  BF_MEMBER | BF_WRITE) \
     F(B_RESIZE,           "resize",           2,  3,   "",   "",  BR_SHRINKABLE,  BF_MEMBER | BF_WRITE | BF_CUSTOM) \
     F(B_CLEAR,            "clear",            1,  1,   "",   "",  BR_SHRINKABLE,  BF_MEMBER | BF_WRITE | BF_CUSTOM) \
     F(B_ALLOC_INDEX,      "alloc_index",      2,  2,   "e",  "i", BR_GROW,        BF_MEMBER | BF_WRITE | BF_REUSABLE) \
@@ -118,9 +120,15 @@ inline const BuiltinDef builtindefs[] = {
     #undef F
 };
 
+// The first definition of that name. Every call and member access asks.
 inline const BuiltinDef *LookupBuiltin(string_view name) {
-    for (auto &d : builtindefs) if (name == d.name) return &d;
-    return nullptr;
+    static const auto byname = [] {
+        unordered_map<string_view, const BuiltinDef *> m;
+        for (auto &d : builtindefs) m.emplace(d.name, &d);
+        return m;
+    }();
+    auto it = byname.find(name);
+    return it == byname.end() ? nullptr : it->second;
 }
 
 // The definition of a kind a checked Call records (Call::builtin).

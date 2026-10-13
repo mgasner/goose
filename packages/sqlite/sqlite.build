@@ -1,0 +1,5 @@
+// The sqlite package's native part: the C layer over SQLite, a CMake project
+// (CMakeLists.txt beside this file). Unlike the other native packages, its
+// functions may run on any thread: a connection belongs to the thread that
+// opened it, which the layer checks.
+cmake_target = "goose_sqlite";

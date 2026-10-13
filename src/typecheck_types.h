@@ -65,6 +65,7 @@ inline StructInst *TypeCheck::GetStructInst(TypeExpr *t) {
     auto inst = ast.NewStructInst();
     inst->st = st;
     inst->args = t->struc->args;
+    inst->run = { &st->fields, &inst->ftypes };
     st->insts.push_back(inst);
     t->struc->inst = inst;
     vector<pair<string_view, TypeExpr *>> bindings;
@@ -135,6 +136,8 @@ inline EnumInst *TypeCheck::GetEnumInst(TypeExpr *t) {
                 inst->vftypes.back().push_back(f.ispad ? nullptr : Subst(f.type));
         }
     });
+    for (size_t vi = 0; vi < en->variants.size(); vi++)
+        inst->runs.push_back({ &en->variants[vi].fields, &inst->vftypes[vi] });
     inst->vbuilt.assign(en->variants.size(), 0);
     typechain.push_back(t);
     BeginTypeBuild();
@@ -149,14 +152,14 @@ inline EnumInst *TypeCheck::GetEnumInst(TypeExpr *t) {
     // (CheckMatch), is left alone.
     if (inst->selfrel && inst->varclass == SC_RESIZABLE) {
         auto resizable = [&](size_t vi) {
-            return AnyFieldOf({ RunOf(inst, (int)vi) },
+            return AnyFieldOf(RunsOf(inst, (int)vi),
                               [&](TypeExpr *ft) { return ClassOf(ft) == SC_RESIZABLE; });
         };
         size_t tail = 0;
         while (!resizable(tail)) tail++;
         for (size_t vi = 0; vi < en->variants.size(); vi++)
             if (!resizable(vi) &&
-                AnyFieldOf({ RunOf(inst, (int)vi) }, [&](TypeExpr *ft) { return HasRelRefT(ft); }))
+                AnyFieldOf(RunsOf(inst, (int)vi), [&](TypeExpr *ft) { return HasRelRefT(ft); }))
                 Error(en->line, cat("enum ", TypeStr(ast.EnumOf(en, inst->args, false, en->line)),
                                     " is resizable (its variant ", en->variants[tail].name,
                                     "'s payload is), so a whole assignment may replace its "
@@ -224,6 +227,7 @@ inline TypeCheck::DefaultScope::DefaultScope(TypeCheck &t, FnSpec *env, Line cal
     f.scopebase = (int)tc.scopes.size();
     f.varbase = (int)tc.vars.size();
     f.callline = callline;
+    f.bodyidx = (int)tc.outerbodies.size();
     tc.frames.push_back(f);
 }
 
@@ -284,19 +288,16 @@ inline Node *TypeCheck::DefaultValue(TypeExpr *t, Line line) {
     }
 }
 
-inline vector<FieldRun> TypeCheck::FieldRuns(TypeExpr *t) {
-    vector<FieldRun> runs;
+inline span<const FieldRun> TypeCheck::FieldRuns(TypeExpr *t) {
     switch (t->kind) {
-        case TY_STRUCT: runs.push_back(RunOf(GetStructInst(t))); break;
-        case TY_ENUM: AllRunsOf(GetEnumInst(t), runs); break;
+        case TY_STRUCT: return RunsOf(GetStructInst(t));
+        case TY_ENUM: return RunsOf(GetEnumInst(t));
         case TY_VARIANT: {
             auto inst = GetEnumInst(t->var->adt);
-            runs.push_back(RunOf(inst, inst->en->VariantIndex(t->var->variant)));
-            break;
+            return RunsOf(inst, inst->en->VariantIndex(t->var->variant));
         }
-        default: break;
+        default: return {};
     }
-    return runs;
 }
 
 inline SizeClass TypeCheck::ClassOf(TypeExpr *t) {
@@ -432,7 +433,7 @@ inline bool TypeCheck::HasDefault(TypeExpr *t, string &why) {
             return false;
         case TY_STRUCT: case TY_ENUM: case TY_VARIANT: {
             auto runs = FieldRuns(t);
-            if (t->kind == TY_ENUM) runs.resize(1);   // Variant 0 is the default variant.
+            if (t->kind == TY_ENUM) runs = runs.first(1);   // Variant 0 is the default variant.
             for (auto &run : runs) {
                 for (size_t i = 0; i < run.fields->size(); i++) {
                     auto &f = (*run.fields)[i];
@@ -648,11 +649,42 @@ inline TypeExpr *TypeCheck::LoadType(TypeExpr *t) {
     return t;
 }
 
+// Comparing a loaded type needs no persistent AST node. Keep these views on
+// the stack, with exactly LoadType's conversion order, constness and source
+// location. In particular a relative reference loses its storage/pool detail.
+inline bool TypeCheck::LoadedTypeEq(TypeExpr *t, TypeExpr *of) {
+    if (t->kind == TY_INT && t->intstorage == IS_VARINT)
+        return TypeEq(ast.inttypes[IS_I64], of);
+    TypeExpr value = *t;
+    if (t->cq && !IsRefOrSlice(t)) {
+        value.cq = false;
+        return TypeEq(&value, of);
+    }
+    if (t->kind == TY_REF && t->ref->lenstorage >= 0) {
+        TypeRef ref;
+        ref.sub = t->ref->sub;
+        ref.optional = t->ref->optional;
+        value.ref = &ref;
+        return TypeEq(&value, of);
+    }
+    return TypeEq(t, of);
+}
+
 // The type a value that a type argument gives type t has: a function result
 // or a default<T>(). A relative reference is only ever storage, so as a
 // value it is the plain reference a load of it gives (§3.9).
 inline TypeExpr *TypeCheck::ValueType(TypeExpr *t) {
     return t->kind == TY_REF && t->ref->lenstorage >= 0 ? LoadType(t) : t;
+}
+
+// The type of a variable or parameter declared with written type t, which
+// is s in the current bindings. A variable or parameter is a relative slot
+// only where its declaration spells the relative reference (or names an
+// alias of one): one a type argument makes relative, a `T` or `T?` local in
+// generic code over an array of links, holds the plain reference, as a
+// result of that type does (§3.9).
+inline TypeExpr *TypeCheck::DeclType(TypeExpr *t, TypeExpr *s) {
+    return t->kind == TY_REF && t->ref->lenstorage >= 0 ? s : ValueType(s);
 }
 
 // The implicit numeric widenings (§6.3): conversions that can never
@@ -695,17 +727,195 @@ inline bool TypeCheck::HasRelRefT(TypeExpr *t, bool inpool) {
     }
 }
 
+// Whether n's value (`result`: which of a multi-value call's results) is
+// built where it is received rather than copied out of storage, so that
+// its self-relative references point within it whatever it lands in.
+inline bool TypeCheck::BuiltWhereReceived(Node *n, size_t result) {
+    if (Is<StructLit>(n) || Is<ArrayLit>(n)) return true;   // Constructed in place.
+    if (auto d = Is<Dot>(n); d && d->variantconst) return true;   // A payload-less variant: a tag.
+    // A default value's relative references are nulls, an empty limited
+    // array's none, and `self` where a field's default says so: offsets that
+    // mean the same wherever the value sits.
+    if (auto c = Is<Call>(n); c && c->builtin == B_DEFAULT) return true;
+    // A function's result is built where it is received where it is not
+    // fixed-size (§4.3, §7.3). A fixed-size one is what its returns made,
+    // which by this same rule is a literal, a default, another call's result
+    // or a named result, and a returned literal has no root for a relative
+    // reference to point within but itself: its links are nulls and `self`.
+    // A reference result is none of these: what it points at is copied, out
+    // of the storage its links point within.
+    if (auto c = Is<Call>(n); c && c->builtin < 0 && result < c->rettypes.size() &&
+                              !IsRefOrSlice(c->rettypes[result])) {
+        auto user = [](FnSpec *s) { return s && s->sf && !s->sf->isextern; };
+        auto &ds = c->dispatch;
+        return ds.empty() ? user(c->spec) : all_of(ds.begin(), ds.end(), user);
+    }
+    return false;
+}
+
 // A copy of a value containing self-relative references would carry
 // offsets measured from the source location; only in-place construction
 // (a literal) is allowed for now. TODO: track the region a relative
 // reference ranges over so whole-region copies can be permitted.
-inline void TypeCheck::NoRelRefCopy(Node *n, TypeExpr *t) {
+// `result`: which of a multi-value call's results n gives. `bind`: the
+// un-annotated declaration n initializes, and `src` the value it gives.
+inline void TypeCheck::NoRelRefCopy(Node *n, TypeExpr *t, size_t result, const VarDecl *bind,
+                                    const Val *src) {
     if (!reachable || !t) return;
     if (IsRefOrSlice(t) || !HasRelRefT(t)) return;
-    if (Is<StructLit>(n) || Is<ArrayLit>(n)) return;   // Constructed in place.
-    if (auto d = Is<Dot>(n); d && d->variantconst) return;   // A payload-less variant: a tag.
-    Error(n, cat("copying a value of type ", TypeStr(t), ", which contains self-relative "
-                 "references, is not supported; construct it in place"));
+    if (BuiltWhereReceived(n, result)) return;
+    if (auto id = Is<Ident>(n); id && n == retvalnode && AllowNamedResult(id, t)) return;
+    auto msg = cat("copying a value of type ", TypeStr(t), ", which contains self-relative "
+                   "references, is not supported; construct it in place");
+    // A declaration copying storage or what a reference points at most
+    // likely meant to bind it (§3.8).
+    auto c = Is<Call>(n);
+    auto refcall = c && result < c->rettypes.size() && IsPlainRef(c->rettypes[result]);
+    auto path = Is<Ident>(n) || Is<Dot>(n) || Is<Index>(n);
+    if (bind && src && ((path && (src->lvalue || src->pointee)) || refcall)) {
+        string names;
+        for (size_t i = 0; i < bind->names.size(); i++)
+            if (bind->inits.size() == 1 || bind->inits[i] == n)
+                names += cat(names.empty() ? "" : ", ", bind->names[i]);
+        msg += cat(", or bind a reference to it with .=: ", bind->isvar ? "var " : "let ", names,
+                   " .= ", ExprStr(n));
+    }
+    Error(n, msg);
+}
+
+// A part of type `member` read, viewed or rendered out of the temporary a
+// value of type t is materialized in (TempContents), which may hold a copy:
+// a self-relative reference read out of a copy would measure from the copy.
+// A path's own value lies in storage, or in a temporary whose read its own
+// base checked.
+inline void TypeCheck::NoRelRefTempRead(Node *base, TypeExpr *t, TypeExpr *member) {
+    if (!reachable || Is<Ident>(base) || Is<Dot>(base) || Is<Index>(base)) return;
+    if (!HasRelRefT(member) || BuiltWhereReceived(base, 0)) return;
+    Error(base, cat("copying a value of type ", TypeStr(t), ", which contains self-relative "
+                    "references, is not supported: its links, read out of this copy, would be "
+                    "measured from the copy; read them where the value is stored"));
+}
+
+// `return x` of a local every return of the function gives is built at the
+// result's destination from its declaration (§7.3), so nothing is copied:
+// the local is declared at the top of the body, the result is not
+// fixed-size, and its layout is the local's, or a resizable array's elements
+// make the variable array returned. Whether every return gives it only the
+// whole body says, which the end of its check judges (CheckNamedResultUses).
+inline bool TypeCheck::AllowNamedResult(Ident *id, TypeExpr *t) {
+    auto &fr = frames.back();
+    auto spec = fr.spec;
+    auto vd = id->vdef;
+    // A result type still to be inferred is the type of this single value.
+    if (!spec || !fr.sf || fr.isfunval || fr.isdefault || !spec->body || !vd || !vd->type ||
+        (spec->retsknown && spec->rets.size() != 1) || ClassOf(t) == SC_FIXED)
+        return false;
+    auto top = false;
+    for (auto st : spec->body->stmts)
+        if (auto d = Is<VarDecl>(st); d && d->defs.size() == 1 && d->defs[0] == vd) top = true;
+    if (!top) return false;
+    auto ct = vd->type;
+    auto elems = IsArrayKind(ct, A_GROW) || IsArrayKind(ct, A_GROWSHRINK);
+    if (!TypeEq(ct, t) && !(elems && IsArrayKind(t, A_VAR) && TypeEq(ct->arr->sub, t->arr->sub)))
+        return false;
+    if (!NamedResultKeepsLinks(ct)) return false;
+    namedresultuses.push_back({ spec, id, vd });
+    return true;
+}
+
+// The named result a body's returns agree on, as codegen finds it on the
+// final body (CodeGen::NamedResult): a local declared alone at the top of
+// the body that every return of the function gives, the tail included. A
+// return not checked as one of this function's counts as one.
+inline VarDef *TypeCheck::NamedResultOf(FnSpec *spec) {
+    auto body = spec->body;
+    set<VarDef *> top;
+    for (auto st : body->stmts)
+        if (auto d = Is<VarDecl>(st); d && d->defs.size() == 1) top.insert(d->defs[0]);
+    VarDef *cand = nullptr;
+    auto ok = true;
+    auto consider = [&](Node *v) {
+        auto id = Is<Ident>(v);
+        if (!id || !id->vdef || !top.count(id->vdef) || (cand && cand != id->vdef)) {
+            ok = false;
+            return;
+        }
+        cand = id->vdef;
+    };
+    function<void(Node *)> walk = [&](Node *n) {
+        if (!n || !ok) return;
+        if (auto r = Is<Return>(n); r && (r->target == spec->sf || !r->target)) {
+            if (r->vals.size() != 1) ok = false;
+            else consider(r->vals[0]);
+        }
+        RunChildren(n, walk);
+    };
+    walk(body);
+    if (body->tail && body->tail->exprtype && body->tail->exprtype->kind != TY_VOID)
+        consider(body->tail);
+    return ok ? cand : nullptr;
+}
+
+// The returns that relied on being the body's named result (AllowNamedResult)
+// stand where the body has one and it is theirs.
+inline void TypeCheck::CheckNamedResultUses(FnSpec *spec) {
+    VarDef *named = nullptr;
+    auto found = false;
+    for (size_t i = 0; i < namedresultuses.size();) {
+        auto u = namedresultuses[i];
+        if (u.spec != spec) {
+            i++;
+            continue;
+        }
+        namedresultuses.erase(namedresultuses.begin() + (ptrdiff_t)i);
+        if (!found) {
+            named = NamedResultOf(spec);
+            found = true;
+        }
+        if (named != u.var)
+            Error(u.at, cat("copying a value of type ", TypeStr(u.var->type), ", which contains "
+                            "self-relative references, is not supported: ", u.var->name,
+                            " is built where the result goes only where every return of ",
+                            spec->sf->name, " gives it (§7.3); construct it in place"));
+        spec->relnamedresult = true;
+    }
+}
+
+// The pointee types of the self-relative references a value of type t holds
+// by value.
+inline void TypeCheck::SelfRelPointees(TypeExpr *t, vector<TypeExpr *> &out) {
+    switch (t->kind) {
+        case TY_REF:
+            if (t->ref->lenstorage >= 0 && !t->ref->pool) out.push_back(LoadType(t->ref->sub));
+            return;
+        case TY_ARRAY: SelfRelPointees(t->arr->sub, out); return;
+        default: EachField(t, [&](TypeExpr *ft) { SelfRelPointees(ft, out); });
+    }
+}
+
+// A resizable struct returned as a named result keeps its resizable tail at
+// the destination, but its fields before the tail reach the caller's header
+// as a copy (C.3): a self-relative reference among them, or one in the tail
+// to a value they hold, would still measure from where they were.
+inline bool TypeCheck::NamedResultKeepsLinks(TypeExpr *t) {
+    vector<TypeExpr *> head;
+    auto tail = t;
+    while (tail->kind == TY_STRUCT && ClassOf(tail) == SC_RESIZABLE) {
+        vector<TypeExpr *> fts;
+        EachField(tail, [&](TypeExpr *ft) { fts.push_back(ft); });
+        if (fts.empty()) break;
+        head.insert(head.end(), fts.begin(), fts.end() - 1);
+        tail = fts.back();
+    }
+    if (tail->kind != TY_ARRAY && ClassOf(tail) == SC_RESIZABLE) return false;
+    vector<TypeExpr *> pointees;
+    SelfRelPointees(tail, pointees);
+    for (auto h : head) {
+        if (HasRelRefT(h)) return false;
+        for (auto p : pointees)
+            if (CanContain(h, p)) return false;
+    }
+    return true;
 }
 
 // ------------------------------------------------------------------
@@ -769,14 +979,44 @@ inline void TypeCheck::ValidatePool(TypeExpr *t) {
 // variable, and rules that need identity (a relative-reference store,
 // §3.9) may use it; otherwise the candidates only bound the lifetime.
 
+// A question about two types answered once where both graphs are complete,
+// as AppendArrayElemsReached's is; an unfinished graph takes the walk each
+// time. A complete graph stays complete, so a pair once answered needs no
+// second look at its graphs.
+template<typename F> bool TypeCheck::StableTypeQuery(TypePairCache &cache, TypeExpr *t,
+                                                     TypeExpr *of, F walk) {
+    pair key { t, of };
+    if (auto known = cache.find(key)) {
+        // Assertion builds compare each cached answer with the walk.
+        assert(*known == walk());
+        return *known;
+    }
+    if (typesbuilding || !stabletypes.Ready(t) || !stabletypes.Ready(of)) return walk();
+    auto r = walk();
+    cache[key] = r;
+    return r;
+}
+
 // Can a value of type `t` contain an `of` by value anywhere inside it? A
 // reference or slice field ends the search: what is behind one belongs to
 // its own root. A slice's pointee is its element type as stored, which for a
 // relative reference is not the plain reference a load yields, so the stored
-// type matches too.
+// type matches too. Only the types holding others are worth remembering an
+// answer for.
 inline bool TypeCheck::CanContain(TypeExpr *t, TypeExpr *of) {
     if (!t) return false;
-    if (TypeEq(t, of) || TypeEq(LoadType(t), of)) return true;
+    switch (t->kind) {
+        case TY_STRUCT: case TY_ENUM: case TY_VARIANT: case TY_ARRAY:
+            return StableTypeQuery(cancontain, t, of, [&]() { return CanContainWalk(t, of); });
+        default: return CanContainWalk(t, of);
+    }
+}
+
+inline bool TypeCheck::CanContainWalk(TypeExpr *t, TypeExpr *of) {
+    if (TypeEq(t, of)) return true;
+    auto loaded = LoadedTypeEq(t, of);
+    assert(loaded == TypeEq(LoadType(t), of));
+    if (loaded) return true;
     if (t->kind == TY_ARRAY) return CanContain(t->arr->sub, of);
     return AnyField(t, [&](TypeExpr *ft) { return CanContain(ft, of); });
 }
@@ -851,11 +1091,13 @@ inline void TypeCheck::ReachedThroughRefs(TypeExpr *t, vector<TypeExpr *> &out) 
 
 // Whether storage that can hold an `of` is among those.
 inline bool TypeCheck::ReachesThroughRefs(TypeExpr *t, TypeExpr *of) {
-    vector<TypeExpr *> reached;
-    ReachedThroughRefs(t, reached);
-    for (auto p : reached)
-        if (CanContain(p, of)) return true;
-    return false;
+    return StableTypeQuery(reachesthrough, t, of, [&]() {
+        vector<TypeExpr *> reached;
+        ReachedThroughRefs(t, reached);
+        for (auto p : reached)
+            if (CanContain(p, of)) return true;
+        return false;
+    });
 }
 
 // The types of the storage an inexact root r stands for beside its own: a
@@ -1007,14 +1249,21 @@ inline Roots TypeCheck::ReadBackRoot(TypeExpr *rt, const Roots &container, bool 
         // Case 3: the container came from a caller, or its own root is only a
         // bound -- storage this function cannot enumerate may be behind it.
         // Read out of a caller's container, its stores say what it holds.
+        // A holder of a frame around a nested function's or a function
+        // value's body is no caller's storage: its stores are on record as
+        // the activation's own are, and the body is checked again for a call
+        // that finds them otherwise (FnSpec::envreads).
         auto global = croot->isglobal;
         if (!global && (!c.exact || croot->ownerspec != CurRealFrame().spec)) {
+            if (c.exact && inplace && croot->type && !IsTemp(croot) && croot->ownerspec &&
+                OuterLocal(croot) && ContentsReadBack(croot, of, out))
+                continue;
             out.Add({ croot, false, from, false, classread });
             continue;
         }
         // A holder of the activation's whose stores say where what it holds
         // points: there.
-        if (!global && inplace && ContentsReadBack(croot, out)) continue;
+        if (!global && inplace && ContentsReadBack(croot, of, out)) continue;
         // Only globals outlive globals (§11.1), so a global container's
         // pointee is owned by a global or by static data, whatever local scope
         // is open here. A local container's was reachable from this frame and
@@ -1028,7 +1277,7 @@ inline Roots TypeCheck::ReadBackRoot(TypeExpr *rt, const Roots &container, bool 
         // storage owns nothing a slot holds. A bound stays, for the lifetime
         // it gives, and so does the owner of a whole grow-shrink array.
         if (slotread)
-            std::erase_if(cands.alts, [&](const RootAlt &a) {
+            erase_if(cands.alts, [&](const RootAlt &a) {
                 return a.exact && GrowShrinkCanHold(a.root, of);
             });
         if (cands.None()) {
@@ -1047,25 +1296,36 @@ inline Roots TypeCheck::ReadBackRoot(TypeExpr *rt, const Roots &container, bool 
 // reference to h, at each place an inexact one may name (ShrinkTargets),
 // and a callee's, a nested function's or a function value's, as its call
 // maps it (ApplyCalleeStores). Where each root stored there is a variable's
-// own storage exactly, static data, or a class whose storage's views they
-// are (RootAlt::classread), what is read out of h is one of those, exactly
-// as it was stored, or one of the views, as a read out of the storage
-// itself is, though read out of h (RootAlt::from). A store later in a loop
+// own storage exactly, static data, a class whose storage's views they are
+// (RootAlt::classread), or a parameter's class bounding what its argument
+// held (a holder parameter whose argument points into several arrays), what
+// is read out of h is one of those, exactly as it was stored, one of the
+// views, as a read out of the storage itself is, or the caller's storage
+// behind the class, as a bound, though read out of h (RootAlt::from). The
+// caller filled that storage before the call, so nothing in it can point
+// into this activation's own variables. A store later in a loop
 // body reaches the read on the next iteration, and a store of anything
 // else there adds a root to h's contents or takes the mark off one, which
 // the loop feeds back: it checks the read again. A root that only bounds
 // what was stored (a holder copied out of a slot, Bounds) says nothing of
-// which storage that is: false, and the read takes every candidate.
-inline bool TypeCheck::ContentsReadBack(VarDef *h, Roots &out) {
+// which storage that is: false, and the read takes every candidate. A
+// variable's own storage that cannot hold the pointee type `of` owns none of
+// what was stored there for a reference or slice of this type: a view of
+// another type stored beside it.
+inline bool TypeCheck::ContentsReadBack(VarDef *h, TypeExpr *of, Roots &out) {
     if (!h->type || IsRefOrSlice(h->type)) return false;
     Roots r;
     auto known = false;
     for (auto &a : h->contents.alts) {
         if (a.classread) r.Add({ a.root, false, h, false, true });
         else if (!a.root) r.Add({ nullptr, a.exact });
-        else if (a.exact) r.Add({ a.root, true, h });
+        else if (a.exact) {
+            if (!of || !a.root->type || CanContain(LoadType(a.root->type), of))
+                r.Add({ a.root, true, h });
+        }
+        else if (IsClassRoot(a.root)) r.Add({ a.root, false, h });
         else return false;
-        known = known || a.classread || a.exact;
+        known = known || a.classread || a.exact || IsClassRoot(a.root);
     }
     if (!known) return false;
     out.Add(r);
@@ -1157,6 +1417,47 @@ inline void TypeCheck::ArrayElemsReached(TypeExpr *t, vector<TypeExpr *> &out,
         ArrayElemsReached(t->arr->sub, out, open);
     } else {
         EachField(t, [&](TypeExpr *ft) { ArrayElemsReached(ft, out, open); });
+    }
+}
+
+// Reuse only complete graphs. An unfinished graph still follows the original
+// traversal, including its lazy instantiation and diagnostics. Each list is
+// in first-appearance order; merging preserves the specialization key's order.
+inline void TypeCheck::AppendArrayElemsReached(TypeExpr *t, vector<TypeExpr *> &out) {
+    if (typesbuilding || !stabletypes.Ready(t)) {
+        vector<TypeExpr *> open;
+        ArrayElemsReached(t, out, open);
+        return;
+    }
+    // A reference or slice reaches what its pointee does, and a struct type
+    // what its instance's fields do, so every type leading to one instance
+    // shares its answer; each specialization has types of its own.
+    auto root = t;
+    while (root->kind == TY_REF || root->kind == TY_SLICE)
+        root = root->kind == TY_REF ? root->ref->sub : root->sub;
+    auto key = root->kind == TY_STRUCT ? (const void *)root->struc->inst : t;
+    auto it = arrayelements.find(key);
+    if (it == arrayelements.end()) {
+        vector<TypeExpr *> elems, open;
+        ArrayElemsReached(t, elems, open);
+        it = arrayelements.emplace(key, std::move(elems)).first;
+    }
+#ifndef NDEBUG
+    // Assertion builds continuously compare cached answers with the original
+    // algorithm, including order and const/storage distinctions.
+    vector<TypeExpr *> check, open;
+    ArrayElemsReached(t, check, open);
+    assert(TypeArgsEq(check, it->second));
+#endif
+    // A list holds each type once, so it needs merging only into another.
+    if (out.empty()) {
+        out = it->second;
+        return;
+    }
+    for (auto e : it->second) {
+        auto found = false;
+        for (auto x : out) if (TypeEq(x, e)) { found = true; break; }
+        if (!found) out.push_back(e);
     }
 }
 

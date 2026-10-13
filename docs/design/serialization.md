@@ -1,5 +1,18 @@
 # Serialization of relative-reference structures: a verified loader
 
+<details>
+<summary>Table of contents</summary>
+
+- [1. Serialization guarantees](#1-serialization-guarantees)
+- [2. Why loading requires validation](#2-why-loading-requires-validation)
+- [3. The image](#3-the-image)
+- [4. What must be verified](#4-what-must-be-verified)
+- [5. The builtins](#5-the-builtins)
+- [6. Generating the verifier per type](#6-generating-the-verifier-per-type)
+- [7. Open points](#7-open-points)
+
+</details>
+
 *Implemented. This document describes the serialization guarantees, the
 loader's validation rules, and how the implementation preserves §9's safety
 guarantees.*
@@ -175,7 +188,7 @@ slots only, and then skips the cursor over the whole capacity.
 
 **The bitmap ceiling.** One bit per payload byte, on one data stack, so the
 largest verifiable image of *variable* elements is eight times a stack's
-reservation — 2 GB at the default `GS_STACK_RESERVE` of 256 MB, and it moves
+reservation — 16 GB at the default `GS_STACK_RESERVE` of 2 GB, and it moves
 with that constant. A payload past it is rejected (`false`) rather than
 growing into the guard region, which would be an abort. Fixed-element images
 have no such limit, since they need no scratch. The alternative — an array of

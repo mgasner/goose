@@ -22,15 +22,23 @@
 // through any nesting of inlined bodies.
 //
 // A body must not be inlined while a *separate* tree still references its
-// locals: a remaining (non-inlined) call to a nested function or to a spec
-// with bound function values means that callee's own body reaches our locals
-// as free variables, so splicing us elsewhere (which remaps our VarDefs)
-// would strand it. Ditto a remaining callee that does `return ... from` us.
-// Once such calls are themselves inlined the references live inside our own
-// tree, get remapped with everything else, and the restriction lifts.
+// locals in a way the copy cannot follow: a remaining (non-inlined) call to a
+// spec with bound function values means those bodies reach our locals as
+// free variables, so splicing us elsewhere (which remaps our VarDefs) would
+// strand them. Ditto a remaining callee that does `return ... from` us. A
+// remaining call to a nested function reaches them too, but only through
+// what the call passes: the copy of such a call records the copies of our
+// variables it passes in their place (Call::fvremap). Once such calls are
+// themselves inlined the references live inside our own tree, get remapped
+// with everything else, and the restrictions lift.
 //
-// Thresholds per call site of callee K: inline if K is used once anywhere,
-// or nodecount(K) < NC, or nodecount(K) * uses(K) < NCU.
+// Thresholds per call site of callee K: inline if K is used once anywhere
+// and nodecount(K) <= ONCEMAX, or nodecount(K) < NC, or nodecount(K) *
+// uses(K) < NCU, which a call site inside a loop raises to LOOPNCU * NCU.
+// A K used once that only that first rule would inline stays out of line
+// where the call is in a cold branch, the else of a guard or the body of an
+// early return or break, and where its body would make a caller with several
+// call sites too big to inline at them (OptBody).
 // -O0: no inlining; -O1: NC=8, NCU=48; -O2: NC=16, NCU=96.
 // Whatever the size, the C blocks around the call plus those K's body nests
 // must stay within MAXNEST (see Around): C compilers limit how deep blocks
@@ -72,11 +80,59 @@ struct Optimizer {
 
     // Inlining decisions use only this optimizer's classification of a body.
     // Keep it here rather than as annotations exposed to subsequent passes.
-    struct InlineInfo { int nodecount = 0; int nest = 0; bool noinline = false; };
+    // nestedcalls: a remaining call to a nested function, which reaches the
+    // body's captured variables through pointers the call passes.
+    struct InlineInfo {
+        int nodecount = 0;
+        int nest = 0;
+        bool noinline = false;
+        // Goose's inliner cannot paste this body into a caller, but the C
+        // compiler could inline the function: TryInline asks it to
+        // (FnSpec::cinline).
+        bool c_inlinable = false;
+        bool nestedcalls = false;
+    };
     unordered_map<FnSpec *, InlineInfo> inlineinfo;
 
     // The C blocks around the node being optimized (Around).
     int depth = 0;
+    // The loops around it, in the body being optimized and, for a copy
+    // being re-folded, around the call it replaced. A call site in a loop,
+    // outside its cold branches, runs once per iteration: a callee LOOPNCU
+    // times the size the use rule allows is worth its copy there, which is
+    // what keeps a small wrapper around inlined code from staying a call
+    // inside a hot loop.
+    int loopdepth = 0;
+    static constexpr int LOOPNCU = 4;
+    // The largest callee the used-once rule inlines. A used-once callee adds
+    // no code where it is inlined, but every walk of its caller pays for the
+    // size again. Without a limit, a program's single-use helpers fold into
+    // main through the chain of calls, and the later passes and the C compiler
+    // then work on one huge function.
+    static constexpr int ONCEMAX = 200;
+    // The cold branches around it (IfExpr::Opt): a call there runs at most
+    // once per run of the body or the loop it leaves, mostly on an error
+    // path, so a callee inlined there only because it has no other caller
+    // would grow the hot path of its caller for nothing.
+    int colddepth = 0;
+    // The branches around it that a run of the body may not take: the arms
+    // of an `if` or `match`, the right operand of && and ||.
+    int branchdepth = 0;
+    // While set, a callee only the used-once rule would inline, called on
+    // such a branch outside any loop, is not inlined but collected here, for
+    // OptBody to weigh against the size of the body it is optimizing.
+    bool deferonce = false;
+    vector<FnSpec *> deferred;
+
+    // Whether block b ends by leaving: a return, a break, or abort or exit.
+    static bool Leaves(Node *b) {
+        auto blk = Is<Block>(b);
+        if (!blk || blk->tail || blk->stmts.empty()) return false;
+        auto last = blk->stmts.back();
+        if (Is<Return>(last) || Is<Break>(last)) return true;
+        auto c = Is<Call>(last);
+        return c && (c->builtin == B_ABORT || c->builtin == B_EXIT);
+    }
     // The deepest C nesting an inlined body may reach: half of MSVC's limit
     // of 128 blocks in a function. The rest is for the blocks codegen opens
     // around runtime work, which Around does not count.
@@ -147,7 +203,7 @@ struct Optimizer {
             auto v = WrapStorage(i->val, it);
             r = ast.New<IntLit>(lit->line, v, v == i->val ? i->text : string_view {},
                                 it == IS_U64 && v < 0);
-        } else if (auto i = Is<IntLit>(lit)) r = ast.New<IntLit>(lit->line, i->val, i->text, i->uns);
+        } else if (i) r = ast.New<IntLit>(lit->line, i->val, i->text, i->uns);
         else if (auto f = Is<FltLit>(lit)) r = ast.New<FltLit>(lit->line, f->val, f->text);
         else r = ast.New<BoolLit>(lit->line, ((BoolLit *)lit)->val);
         r->exprtype = usetype ? usetype : lit->exprtype;
@@ -372,7 +428,11 @@ struct Optimizer {
             auto r = OptStmt(st);
             if (!r) continue;
             out.push_back(r);
-            if (Is<Return>(r) || Is<Break>(r) || Is<Continue>(r)) dead = true;
+            // The checker leaves values after program termination unadapted:
+            // they never reach a destination and must not become C assignments.
+            auto call = Is<Call>(r);
+            if (Is<Return>(r) || Is<Break>(r) || Is<Continue>(r) ||
+                (call && (call->builtin == B_ABORT || call->builtin == B_EXIT))) dead = true;
         }
         b->stmts = std::move(out);
         if (b->tail) {
@@ -417,8 +477,11 @@ struct Optimizer {
         auto &info = inlineinfo[sp];
         info.nodecount = 0;
         info.nest = 0;
+        info.nestedcalls = false;
+        // A simd body inlined into a caller would lose its versions (§7.12).
         auto noin = sp->sf->isrec || sp->incycle || sp->sf->isthread || sp->sf->isexport ||
-                    sp->rets.size() > 1;
+                    sp->sf->issimd || sp->relnamedresult;
+        auto multiret = sp->rets.size() > 1;
         function<void(Node *, int)> rec = [&](Node *n, int d) {
             if (!n) return;
             info.nodecount++;
@@ -426,11 +489,13 @@ struct Optimizer {
             if (auto c = Is<Call>(n)) {
                 auto callee = [&](FnSpec *k) {
                     if (!k) return;
-                    // A separate body referencing our locals (nested fn or
-                    // bound function values), or unwinding to us: our body
-                    // must stay a real frame.
-                    if (k->lexparent || !k->fnvals.empty()) noin = true;
+                    // A separate body referencing our locals that a copy
+                    // of the call cannot point elsewhere (bound function
+                    // values), or unwinding to us: our body must stay a
+                    // real frame.
+                    if (!k->fnvals.empty()) noin = true;
                     if (k->needs.count(sp)) noin = true;
+                    if (k->lexparent) info.nestedcalls = true;
                 };
                 if (c->builtin < 0) callee(c->spec);
                 for (auto k : c->dispatch) callee(k);
@@ -438,11 +503,53 @@ struct Optimizer {
             RunChildren(n, [&](Node *ch) { rec(ch, d + Around(n, ch)); });
         };
         rec(sp->body, 0);
-        info.noinline = noin;
+        info.noinline = noin || multiret;
+        info.c_inlinable = multiret && !noin;
+    }
+
+    // Optimizes the body of sp. A callee K used once that only the used-once
+    // rule would inline adds no code where sp is a real function, but sp's
+    // copies carry K's body wherever sp is inlined, and a sp small enough to
+    // inline at its several call sites (in a loop, at the most) may no longer
+    // be once it holds K. Where a run of sp need not call K, the call to K
+    // costs less than the call to sp it would bring back. So for such a sp
+    // the body is first optimized without those callees, and they are
+    // inlined, in the order the walk met them, only while sp stays small
+    // enough or where it never was. The rest keep their calls, which each
+    // copy of sp repeats: K then has as many uses as sp, which is what its
+    // ordinary inlining is decided by.
+    void OptBody(FnSpec *sp) {
+        deferonce = sp->uses > 1;
+        deferred.clear();
+        OptBlock(sp->body);
+        deferonce = false;
+        if (deferred.empty()) return;
+        Scan(sp);
+        auto &info = inlineinfo[sp];
+        auto maxsize = max(nc - 1, (ncu * LOOPNCU - 1) / sp->uses);
+        auto inlinable = !info.noinline && info.nodecount <= maxsize;
+        auto size = info.nodecount;
+        auto any = false;
+        for (auto K : deferred) {
+            auto ksize = inlineinfo[K].nodecount;
+            if (!inlinable || size + ksize <= maxsize) {
+                size += ksize;
+                any = true;
+            } else {
+                K->uses = sp->uses;
+            }
+        }
+        // Once more, where the callees still used once now inline: the walk
+        // takes the same decisions as before for everything else.
+        if (any) OptBlock(sp->body);
     }
 
     // Accumulator tail-recursion elimination, defined in optimize_tre.h.
     void TailRecurse(FnSpec *sp);
+
+    // Marks the loops codegen restates for the C compiler, over the final
+    // live bodies; defined in optimize_loops.h.
+    void ShapeLoops();
 
     // ------------------------------------------------------------------
     // Global initializers: fold (and on the second pass inline into) each
@@ -485,7 +592,7 @@ struct Optimizer {
             curspec = sp;
             cursf = sp->sf;
             SetupBaseCase(sp);
-            OptBlock(sp->body);
+            OptBody(sp);
             TailRecurse(sp);
             Scan(sp);
         }
@@ -498,6 +605,7 @@ struct Optimizer {
         for (auto sp : ast.fnspecs) { sp->live = false; sp->uses = 0; }
         postorder.clear();
         ReachRoots();
+        ShapeLoops();
     }
 
     // Optimized bodies for eyeballing (--specs); not reparseable.
@@ -535,20 +643,46 @@ struct Inliner {
     FnSpec *dst;             // The spec receiving the copy (null: a global init).
     unordered_map<VarDef *, VarDef *> vmap;
     unordered_map<VarDef *, Node *> subst;   // Param -> constant argument.
+    // The body still calls a nested function, which reaches the captured
+    // variables of the copy through pointers (Call::fvremap): they stay
+    // captured, and none is substituted away.
+    bool keepcaptured = false;
+    // Variables src does not own that the copy names under another one: the
+    // copies the call being inlined passes for them (Call::fvremap).
+    unordered_map<VarDef *, VarDef *> outer;
 
     VarDef *Remap(VarDef *v) {
-        if (!v || v->ownerspec != src) return v;
+        if (!v) return v;
+        if (v->ownerspec != src) {
+            auto it = outer.find(v);
+            return it != outer.end() ? it->second : v;
+        }
         auto it = vmap.find(v);
         if (it != vmap.end()) return it->second;
         auto nv = ast.NewVarDef();
         *nv = *v;
         nv->ownerspec = dst;
         nv->isparam = false;
-        nv->captured = false;  // Every use of the copy lives in the copied tree.
+        // Otherwise every use of the copy lives in the copied tree.
+        nv->captured = keepcaptured && v->captured;
         vmap[v] = nv;
         auto fit = o.facts.find(v);
         if (fit != o.facts.end()) o.facts[nv] = fit->second;
         return nv;
+    }
+
+    // The free variables a copied call to a nested function passes: what the
+    // original call passed, as copied, and every captured variable of the
+    // body this copy replaced.
+    void RemapFreeVars(const Call *from, Call *to) {
+        auto add = [&](VarDef *v, VarDef *nv) {
+            if (v == nv) return;
+            for (auto &p : to->fvremap) if (p.first == v) return;
+            to->fvremap.push_back({ v, nv });
+        };
+        for (auto &p : from->fvremap) add(p.first, Remap(p.second));
+        for (auto &kv : vmap) if (kv.first->captured) add(kv.first, kv.second);
+        for (auto &kv : outer) add(kv.first, kv.second);
     }
 
     // Bind one runtime argument, or substitute an immutable scalar literal.
@@ -557,7 +691,7 @@ struct Inliner {
     VarDecl *BindArg(VarDef *pv, Node *arg, Line ln) {
         auto &f = o.facts[pv];
         if (Optimizer::AsLiteral(arg) && Optimizer::ScalarType(pv->type) &&
-            f.writes == 0 && f.addrof == 0) {
+            f.writes == 0 && f.addrof == 0 && !(keepcaptured && pv->captured)) {
             subst[pv] = arg;
             return nullptr;
         }
@@ -576,24 +710,69 @@ struct Inliner {
     }
 
     Block *CpBlock(const Block *b) { return (Block *)Cp(b); }
+
+    // A copied variable's provenance still names the variables of the body
+    // it was copied from; point it at their copies, so that an analysis
+    // following a copied reference to its root (BCE's aliasing) lands on the
+    // variable the copied body declares. A root the copy does not own -- an
+    // outer local, a parameter's class root -- stays as it is.
+    void RemapProvenance() {
+        auto remap = [&](VarDef *&r) {
+            auto it = r ? vmap.find(r) : vmap.end();
+            if (it != vmap.end()) r = it->second;
+        };
+        for (auto &kv : vmap) {
+            auto nv = kv.second;
+            if (nv == kv.first) continue;
+            for (auto &a : nv->ref.alts) {
+                remap(a.root);
+                remap(a.from);
+            }
+            for (auto &a : nv->contents.alts) {
+                remap(a.root);
+                remap(a.from);
+            }
+        }
+    }
 };
 
 inline Node *Optimizer::TryInline(Call *c) {
     if (!caninline || !c->spec || c->builtin >= 0 || !c->dispatch.empty()) return nullptr;
     auto K = c->spec;
     auto &info = inlineinfo[K];
-    if (!K->live || info.noinline || !K->body) return nullptr;
+    if (!K->live || !K->body) return nullptr;
+    auto ncuhere = loopdepth > 0 && !colddepth ? ncu * LOOPNCU : ncu;
+    // An `inline fn` passes the size rules wherever inlining is on.
+    auto small = (K->sf->isinline && nc > 0) || info.nodecount < nc || info.nodecount * K->uses < ncuhere;
+    if (info.noinline) {
+        // Goose would inline it here but cannot: let the C compiler do it.
+        if (info.c_inlinable && small && !K->outofline) K->cinline = true;
+        return nullptr;
+    }
     // Never into a recursive cycle: the inlined body's locals would become
     // the cycle function's own, upsetting the §7.8 stack-assignment rule.
     if (curspec && (curspec->incycle || curspec->sf->isrec)) return nullptr;
-    if (!(K->uses == 1 || info.nodecount < nc || info.nodecount * K->uses < ncu)) return nullptr;
+    if (!small && K->uses == 1 && colddepth > 0) {
+        K->outofline = true;
+        return nullptr;
+    }
+    if (!((K->uses == 1 && info.nodecount <= ONCEMAX) || small)) return nullptr;
     // The body's blocks would open `depth` deep. Past the limit the call
     // stays, and a chain of single-use functions folds into one body per
     // MAXNEST levels rather than one as deep as the chain.
     if (depth + info.nest > MAXNEST) return nullptr;
+    // A global initializer's locals belong to no specialization, so its
+    // copies could not be told from the variables they replace.
+    if (info.nestedcalls && !curspec) return nullptr;
     auto argnodes = c->ArgNodes();
     if (argnodes.size() != K->params.size()) return nullptr;
+    if (!small && deferonce && branchdepth > 0 && loopdepth == 0) {
+        deferred.push_back(K);
+        return nullptr;
+    }
     Inliner inl { *this, ast, K, curspec, {}, {} };
+    inl.keepcaptured = info.nestedcalls;
+    for (auto &p : c->fvremap) inl.outer[p.first] = p.second;
     vector<Node *> decls;
     for (size_t i = 0; i < K->params.size(); i++) {
         if (auto vd = inl.BindArg(K->params[i], argnodes[i], c->line)) {
@@ -602,26 +781,7 @@ inline Node *Optimizer::TryInline(Call *c) {
         }
     }
     auto body = inl.CpBlock(K->body);
-    // A copied variable's provenance still names the variables of the body
-    // it was copied from; point it at their copies, so that an analysis
-    // following a copied reference to its root (BCE's aliasing) lands on the
-    // variable the copied body declares. A root the copy does not own -- an
-    // outer local, a parameter's class root -- stays as it is.
-    auto remap = [&](VarDef *&r) {
-        auto it = r ? inl.vmap.find(r) : inl.vmap.end();
-        if (it != inl.vmap.end()) r = it->second;
-    };
-    for (auto &kv : inl.vmap) {
-        auto nv = kv.second;
-        for (auto &a : nv->ref.alts) {
-            remap(a.root);
-            remap(a.from);
-        }
-        for (auto &a : nv->contents.alts) {
-            remap(a.root);
-            remap(a.from);
-        }
-    }
+    inl.RemapProvenance();
     body->stmts.insert(body->stmts.begin(), decls.begin(), decls.end());
     auto ib = ast.New<InlineBlock>(c->line, K->sf, K, body);
     ib->exprtype = c->exprtype;
@@ -740,6 +900,10 @@ inline Node *Call::Cp1(Inliner &inl) const {
     c->fmtcontexts = fmtcontexts;
     for (auto p : fvparams) c->fvparams.push_back(inl.Remap(p));
     c->fvbody = fvbody ? inl.CpBlock(fvbody) : nullptr;
+    // Case functions nested in one scope are dispatch targets too.
+    auto nested = spec && spec->lexparent;
+    for (auto d : dispatch) nested = nested || d->lexparent;
+    if (nested) inl.RemapFreeVars(this, c);
     c->defaultinit = defaultinit ? inl.Cp(defaultinit) : nullptr;
     return c;
 }
@@ -949,7 +1113,9 @@ inline Node *Binary::Opt(Optimizer &o) {
             if (op == T_ANDAND) return lb->val ? o.Opt(right) : left;
             return lb->val ? left : o.Opt(right);
         }
+        o.branchdepth++;
         right = o.OptIn(this, right);
+        o.branchdepth--;
         if (auto rb = Is<BoolLit>(right)) {
             // The left still evaluates; only the trivial combine drops.
             if (op == T_ANDAND && rb->val) { o.folded++; return left; }
@@ -1164,11 +1330,22 @@ inline Node *IfExpr::Opt(Optimizer &o) {
             return o.Opt(taken);
         }
     }
+    // A branch that leaves where the other goes on is cold: the else of a
+    // guard, or the body of an early return.
+    auto thenleaves = Optimizer::Leaves(thenb), elseleaves = elseb && Optimizer::Leaves(elseb);
+    auto thencold = thenleaves && !elseleaves && !flat;
+    auto elsecold = elseleaves && (flat || !thenleaves);
     auto k = Optimizer::Around(this, thenb);
+    o.branchdepth++;
     o.depth += k;
+    o.colddepth += thencold;
     o.OptBlock(thenb);
+    o.colddepth -= thencold;
     o.depth -= k;
+    o.colddepth += elsecold;
     if (elseb) elseb = o.OptIn(this, elseb);
+    o.colddepth -= elsecold;
+    o.branchdepth--;
     return this;
 }
 
@@ -1197,7 +1374,9 @@ inline Node *MatchExpr::Opt(Optimizer &o) {
             return o.Opt(sel->body);
         }
     }
+    o.branchdepth++;
     for (auto &arm : arms) arm.body = o.OptIn(this, arm.body);
+    o.branchdepth--;
     return this;
 }
 
@@ -1207,23 +1386,30 @@ inline Node *EarlyBlock::Opt(Optimizer &o) {
 }
 
 inline Node *While::Opt(Optimizer &o) {
+    o.loopdepth++;
     cond = o.OptIn(this, cond);
     if (auto b = Is<BoolLit>(cond); b && !b->val) {
+        o.loopdepth--;
         o.folded++;
         return o.EmptyBlock(this);
     }
     o.OptBlock(body);
+    o.loopdepth--;
     return this;
 }
 
 inline Node *LoopExpr::Opt(Optimizer &o) {
+    o.loopdepth++;
     o.OptBlock(body);
+    o.loopdepth--;
     return this;
 }
 
 inline Node *ForLoop::Opt(Optimizer &o) {
     iter = o.OptViewed(iter);
+    o.loopdepth++;
     o.OptBlock(body);
+    o.loopdepth--;
     return this;
 }
 

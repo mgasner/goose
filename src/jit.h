@@ -1,40 +1,15 @@
-// The optional in-process C backend: instead of writing the generated C out
-// for another compiler to build, hand it to TinyCC, which compiles it into
-// this process's memory and calls its main. That is what happens when no `-o`
-// is given ("JIT mode").
-//
-// Present only when the third_party/tinycc submodule was checked out at
-// configure time; everything below compiles to a "not built in" error
-// otherwise, and the driver falls back to writing the .c file.
+// The in-process C backend: instead of writing the generated C out for
+// another compiler to build, hand it to TinyCC, which compiles it into this
+// process's memory and calls its main. That is what happens when no `-o` is
+// given ("JIT mode"). TinyCC is vendored under third_party/tinycc and built
+// into every compiler.
 
 #pragma once
 
-#ifdef GOOSE_HAVE_LIBTCC
 #include "libtcc.h"
-#endif
-#ifdef GOOSE_HAVE_GFX
-#include "gfx/gfx_api.h"
-#endif
-#ifdef GOOSE_HAVE_AUDIO
-#include "audio/audio_api.h"
-#endif
-#ifdef GOOSE_HAVE_PHYSICS
-#include "physics/physics_api.h"
-#endif
-#ifdef GOOSE_HAVE_UI
-#include "ui/ui_api.h"
-#endif
-#ifdef GOOSE_HAVE_SQLITE
-#include "sqlite/sqlite_api.h"
-#endif
+#include <filesystem>
 
 namespace goose {
-
-#ifdef GOOSE_HAVE_LIBTCC
-inline constexpr bool have_jit = true;
-#else
-inline constexpr bool have_jit = false;
-#endif
 
 // Where TinyCC's own headers and its libtcc1 support archive were staged: an
 // explicit override for a moved build tree, next to the compiler binary for an
@@ -56,73 +31,20 @@ inline string JitLibPath(const string &exedir) {
     return staged;
 }
 
-#ifdef GOOSE_HAVE_LIBTCC
-
 // TinyCC reports through a callback rather than a return value, so its
 // diagnostics are collected and raised as one CompileError.
 inline void JitDiag(void *opaque, const char *msg) {
     Append(*(string *)opaque, msg, "\n");
 }
 
-// Register each optional native layer's own functions before relocation.
-inline void AddAudioSymbols(TCCState *s) {
-    #ifdef GOOSE_HAVE_AUDIO
-        #define GS_AUDIO_SYMBOL(ret, name, params) tcc_add_symbol(s, #name, (const void *)&name);
-        GS_AUDIO_API(GS_AUDIO_SYMBOL)
-        #undef GS_AUDIO_SYMBOL
-    #else
-        (void)s;
-    #endif
-}
-
-inline void AddGfxSymbols(TCCState *s) {
-    #ifdef GOOSE_HAVE_GFX
-        #define GS_GFX_SYMBOL(ret, name, params) tcc_add_symbol(s, #name, (const void *)&name);
-        GS_GFX_API(GS_GFX_SYMBOL)
-        #undef GS_GFX_SYMBOL
-    #else
-        (void)s;
-    #endif
-}
-
-// The physics layer's functions (src/physics/physics_api.h), the same way.
-inline void AddPhysicsSymbols(TCCState *s) {
-    #ifdef GOOSE_HAVE_PHYSICS
-        #define GS_PHYS_SYMBOL(ret, name, params) tcc_add_symbol(s, #name, (const void *)&name);
-        GS_PHYS_API(GS_PHYS_SYMBOL)
-        #undef GS_PHYS_SYMBOL
-    #else
-        (void)s;
-    #endif
-}
-
-// The ui layer's functions (src/ui/ui_api.h), the same way.
-inline void AddUiSymbols(TCCState *s) {
-    #ifdef GOOSE_HAVE_UI
-        #define GS_UI_SYMBOL(ret, name, params) tcc_add_symbol(s, #name, (const void *)&name);
-        GS_UI_API(GS_UI_SYMBOL)
-        #undef GS_UI_SYMBOL
-    #else
-        (void)s;
-    #endif
-}
-
-// The sqlite layer's functions (src/sqlite/sqlite_api.h), the same way.
-inline void AddSqliteSymbols(TCCState *s) {
-    #ifdef GOOSE_HAVE_SQLITE
-        #define GS_SQL_SYMBOL(ret, name, params) tcc_add_symbol(s, #name, (const void *)&name);
-        GS_SQL_API(GS_SQL_SYMBOL)
-        #undef GS_SQL_SYMBOL
-    #else
-        (void)s;
-    #endif
-}
-
 // Compiles `csrc` in memory and calls its main, returning what the program
 // returned or exited with. `progargs` become the program's argv after argv[0].
-// `layers` says which native layers the program calls into.
+// `symbols` holds the C functions of the packages' native parts the program
+// reaches, by name (native.h, builtin.h): from the tables compiled in with
+// builtin packages, or loaded from the libraries built for the others.
 inline int RunJit(const string &csrc, const string &libpath, const string &progname,
-                  const vector<string> &progargs, const NativeLayers &layers) {
+                  const vector<string> &progargs,
+                  const vector<pair<string, const void *>> &symbols) {
     string diags;
     auto s = tcc_new();
     if (!s) throw CompileError { "libtcc: out of memory" };
@@ -136,12 +58,26 @@ inline int RunJit(const string &csrc, const string &libpath, const string &progn
         throw CompileError { msg };
     };
     if (tcc_set_output_type(s, TCC_OUTPUT_MEMORY) < 0) fail("cannot target memory");
-    if (tcc_compile_string(s, csrc.c_str()) < 0) fail("compiling the generated C failed");
-    if (layers.audio) AddAudioSymbols(s);
-    if (layers.gfx) AddGfxSymbols(s);
-    if (layers.physics) AddPhysicsSymbols(s);
-    if (layers.ui) AddUiSymbols(s);
-    if (layers.sqlite) AddSqliteSymbols(s);
+    // The in-process program's assets belong to its entry source, not to
+    // the Goose executable. This define is JIT-only: emitted AOT C keeps no
+    // build-machine resource path. Resolve now, without changing cwd.
+    std::error_code patherror;
+    auto root = filesystem::absolute(filesystem::path(progname), patherror).parent_path();
+    if (patherror) fail("cannot locate the entry source directory");
+    auto bytes = root.generic_u8string();
+    string source = "#define GS_JIT_RESOURCE_DIR \"";
+    // Fixed-width octal escapes are unambiguous even for quotes, control
+    // characters, UTF-8 and a hex digit immediately after an escaped byte.
+    for (auto ch : bytes) {
+        char escaped[5];
+        snprintf(escaped, sizeof escaped, "\\%03o", (unsigned)(uint8_t)ch);
+        source += escaped;
+    }
+    if (bytes.empty() || bytes.back() != u8'/') source += '/';
+    source += "\"\n";
+    source += csrc;
+    if (tcc_compile_string(s, source.c_str()) < 0) fail("compiling the generated C failed");
+    for (auto &[name, addr] : symbols) tcc_add_symbol(s, name.c_str(), addr);
     // tcc_run hands these to the program's main, which takes them as C main
     // does: an array of writable pointers. Hence the mutable copies.
     auto name = progname;
@@ -158,15 +94,5 @@ inline int RunJit(const string &csrc, const string &libpath, const string &progn
     tcc_delete(s);
     return code;
 }
-
-#else
-
-inline int RunJit(const string &, const string &, const string &,
-                  const vector<string> &, const NativeLayers &) {
-    throw CompileError { "this compiler was built without the TinyCC backend; "
-                         "check out third_party/tinycc and reconfigure, or pass -o" };
-}
-
-#endif
 
 }  // namespace goose

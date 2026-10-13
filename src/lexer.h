@@ -36,7 +36,7 @@ namespace goose {
     F(T_IMPORT,   "import")    F(T_NAMESPACE, "namespace") \
     F(T_STRUCT,   "struct")    F(T_ENUM,     "enum") \
     F(T_TYPE,     "type")      F(T_FN,       "fn")      F(T_THREADFN, "thread_fn") \
-    F(T_EXPORT,   "export") \
+    F(T_EXPORT,   "export")    F(T_SIMD,     "simd") \
     F(T_RECURSIVE, "recursive") F(T_LET,     "let")     F(T_VAR,    "var") \
     F(T_EXTERN,   "extern")    F(T_CONST,    "const") \
     F(T_PAD,      "pad")       F(T_REUSABLE, "reusable") \
@@ -96,6 +96,13 @@ struct Lexer {
     }
 
     [[noreturn]] void Error(const string &msg) { ErrorAt(msg, tokline, toklinestart); }
+
+    // The token after the current one, without moving.
+    TType PeekTok() const {
+        auto copy = *this;
+        copy.Next();
+        return copy.tok;
+    }
 
     [[noreturn]] void ErrorAt(const string &msg, int errline, const char *errlinestart,
                               const char *caret = nullptr) {

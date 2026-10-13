@@ -396,8 +396,11 @@ struct FnValBind {
     const FunVal *fv = nullptr;
     SFunction *named = nullptr;
     FnSpec *env = nullptr;
+    // A named function with overloads: the whole set, which each call of the
+    // value resolves against (§7.6); `named` is its first member.
+    const vector<SFunction *> *set = nullptr;
     bool operator==(const FnValBind &o) const {
-        return fv == o.fv && named == o.named && env == o.env;
+        return fv == o.fv && named == o.named && env == o.env && set == o.set;
     }
 };
 
@@ -456,7 +459,7 @@ struct RootAlt {
 // would. Two alternatives never share a root: adding one that does keeps the
 // weaker of the two.
 struct Roots {
-    vector<RootAlt> alts;
+    small_vector<RootAlt, 1> alts;
     // No places yet: a reference variable read before its binding in a pass
     // of a loop, or a recursive call's result in the first round of its
     // cycle, which a later pass or round revisits (TypeCheck::RefProvOf,
@@ -580,7 +583,6 @@ struct Roots {
 // holds (VarDef::ref) all carry one.
 struct Prov : Roots {
     bool writable = false;       // Writable provenance (§9.5).
-    int reusable = 0;            // Root is a reusable pool (§5.4): its RU_ kind.
     // A `bytes_of` view (docs/design/serialization.md): a u8 slice over the
     // element region of an array of some other type. The shrink scans of §5.1
     // and §5.2 otherwise dismiss a slice whose pointee the root's elements
@@ -591,6 +593,7 @@ struct Prov : Roots {
     // byte view loaded out of one never does. One not stored may cover any
     // that its roots lead to (TypeCheck::GrowShrinkTaint).
     bool freshview = false;
+    int reusable = 0;            // Root is a reusable pool (§5.4): its RU_ kind.
     // Where the path to the pointee crossed a reference or slice: the type of
     // the last one's pointee, which the fields and elements stepped into
     // after it lie in by value, as storage the root owns or bounds. Whatever
@@ -729,13 +732,59 @@ struct Val : Prov {
 // AST nodes. One base, leaves per construct; Dump implementations live
 // together in dump.h so that pass reads top to bottom.
 
+// Which NODE a Node is. Every pass asks often, so Is<T> compares this
+// instead of paying for a dynamic_cast.
+enum NodeKind : uint8_t {
+    NK_IntLit,
+    NK_FltLit,
+    NK_BoolLit,
+    NK_StrLit,
+    NK_Ident,
+    NK_ArrayLit,
+    NK_StructLit,
+    NK_Unary,
+    NK_Binary,
+    NK_Dot,
+    NK_Call,
+    NK_Index,
+    NK_SliceExpr,
+    NK_AsCast,
+    NK_NullLit,
+    NK_SelfRef,
+    NK_RangeExpr,
+    NK_Block,
+    NK_IfExpr,
+    NK_MatchExpr,
+    NK_EarlyBlock,
+    NK_While,
+    NK_LoopExpr,
+    NK_ForLoop,
+    NK_Return,
+    NK_Break,
+    NK_Continue,
+    NK_FunVal,
+    NK_VarDecl,
+    NK_Assign,
+    NK_IncDec,
+    NK_InlineBlock,
+    NK_FnDecl,
+    NK_StructDecl,
+    NK_EnumDecl,
+    NK_AliasDecl,
+};
+
 struct Node {
     Line line;
     TypeExpr *exprtype = nullptr;   // Filled by typecheck (the value's type; TY_VOID for none).
+    // Filled by typecheck: the value is of non-fixed-size class and no
+    // storage, so it is a temporary of its statement, held on a data stack
+    // of the activation until the statement ends (TypeCheck::NoteTemp, §7.8).
+    bool nftemp = false;
+    NodeKind nkind;
     // The node as the source has it, which every clone of it shares; null in
     // that one itself.
     const Node *origin = nullptr;
-    Node(Line _line) : line(_line) {}
+    Node(Line _line, NodeKind _nkind) : line(_line), nkind(_nkind) {}
     virtual ~Node() {}
     virtual void Dump(string &s, int ind) const = 0;
     // Deep copy of the tree (typecheck clones function bodies per specialization
@@ -776,10 +825,19 @@ struct Node {
     virtual void CgStmt(CodeGen &cg) = 0;
 };
 
+// The node as a T, or null when it is some other kind.
+template<typename T> const T *Is(const Node *n) {
+    return n && n->nkind == T::NKind ? static_cast<const T *>(n) : nullptr;
+}
+template<typename T> T *Is(Node *n) {
+    return n && n->nkind == T::NKind ? static_cast<T *>(n) : nullptr;
+}
+
 #define BCE_WALK bool BceWalk(BCE &bce) override;
 #define BCE_MARK void BceMark(BCE &bce) override;
 
 #define NODE(name) struct name : Node { \
+    static constexpr NodeKind NKind = NK_##name; \
     void Dump(string &s, int ind) const override; \
     Node *Clone1(Ast &ast) const override; \
     void Children(const function<void(Node *)> &f) const override; \
@@ -796,18 +854,18 @@ NODE(IntLit)
     string_view text;  // Original spelling, so hex/char literals dump readably.
     bool uns;          // Value above i64.max: a u64 constant carried as bits.
     IntLit(Line l, int64_t _val, string_view _text = {}, bool _uns = false)
-        : Node(l), val(_val), text(_text), uns(_uns) {}
+        : Node(l, NKind), val(_val), text(_text), uns(_uns) {}
 NODE_END
 
 NODE(FltLit)
     double val;
     string_view text;  // Original spelling, so hex floats and overflowing exponents dump as written.
-    FltLit(Line l, double _val, string_view _text = {}) : Node(l), val(_val), text(_text) {}
+    FltLit(Line l, double _val, string_view _text = {}) : Node(l, NKind), val(_val), text(_text) {}
 NODE_END
 
 NODE(BoolLit)
     bool val;
-    BoolLit(Line l, bool _val) : Node(l), val(_val) {}
+    BoolLit(Line l, bool _val) : Node(l, NKind), val(_val) {}
 NODE_END
 
 NODE(StrLit)
@@ -816,7 +874,7 @@ NODE(StrLit)
     // `line.line + k`, which embed_shader reports shader errors at.
     bool multiline = false;
     StrLit(Line l, string _val, bool _multiline = false)
-        : Node(l), val(std::move(_val)), multiline(_multiline) {}
+        : Node(l, NKind), val(std::move(_val)), multiline(_multiline) {}
 NODE_END
 
 NODE(Ident)
@@ -829,7 +887,7 @@ NODE(Ident)
     // Filled by typecheck: exactly one of these.
     VarDef *vdef = nullptr;         // A variable.
     SFunction *fnref = nullptr;     // A named function used as a function value.
-    Ident(Line l, string_view _name, string_view _ns = {}) : Node(l), name(_name), ns(_ns) {}
+    Ident(Line l, string_view _name, string_view _ns = {}) : Node(l, NKind), name(_name), ns(_ns) {}
 NODE_END
 
 NODE(ArrayLit)
@@ -837,7 +895,7 @@ NODE(ArrayLit)
     Node *fillval = nullptr;    // [v; n] fill form: fillval/fillcount, elems empty.
     Node *fillcount = nullptr;
     Node *capexpr = nullptr;    // [..cap]: an empty limited array with capacity.
-    ArrayLit(Line l) : Node(l) {}
+    ArrayLit(Line l) : Node(l, NKind) {}
 NODE_END
 
 NODE(StructLit)
@@ -855,7 +913,7 @@ NODE(StructLit)
     SVariant *variant = nullptr;    //   "
     vector<int> fieldindices;       // Per init, the target field index.
     vector<int> sourcefieldindices; // Supplied fields before CheckInits sorts; retained on rechecks.
-    StructLit(Line l, TypeExpr *_type) : Node(l), type(_type) {}
+    StructLit(Line l, TypeExpr *_type) : Node(l, NKind), type(_type) {}
     // The initializer of field `fieldidx` once the literal is checked
     // (TypeCheck::CheckInits): the one written, the field's declared
     // default, or the default<T>() call a `..` or default<T>() fills it
@@ -874,7 +932,7 @@ NODE(Unary)
     bool synth = false;         // A `&` the checker inserted (§4.1), not written by the user.
     bool litfloat = false;      // Filled by typecheck: its value is a Val::litfloat.
     bool flexint = false;       // Filled by typecheck: its value is a Val::flexint.
-    Unary(Line l, TType _op, Node *_child) : Node(l), op(_op), child(_child) {}
+    Unary(Line l, TType _op, Node *_child) : Node(l, NKind), op(_op), child(_child) {}
 NODE_END
 
 NODE(Binary)
@@ -883,9 +941,19 @@ NODE(Binary)
     Node *left, *right;
     // Filled by typecheck for && and ||: optionals the right operand un-narrows.
     vector<VarDef *> rightkills;
+    // Filled by BCE for && and || (BCE::ProbeRight): 1 where every bounds
+    // check in the right operand holds whatever the left operand gives, -1
+    // where one may not, 0 where the pass did not look. Codegen evaluates a
+    // right operand with a bounds check in it unconditionally only on a 1
+    // (CodeGen::Speculatable).
+    int8_t specidx = 0;
     bool litfloat = false;      // Filled by typecheck: its value is a Val::litfloat.
     bool flexint = false;       // Filled by typecheck: its value is a Val::flexint.
-    Binary(Line l, TType _op, Node *_l, Node *_r) : Node(l), op(_op), left(_l), right(_r) {}
+    // Filled by BCE (bce.h) for a signed `/`, `%` or `>>`: the left operand
+    // is provably nonnegative and a divisor provably positive, so codegen
+    // computes it unsigned, with no zero or overflow check to make.
+    bool nonneg = false;
+    Binary(Line l, TType _op, Node *_l, Node *_r) : Node(l, NKind), op(_op), left(_l), right(_r) {}
 NODE_END
 
 NODE(Dot)
@@ -901,7 +969,7 @@ NODE(Dot)
     SVariant *variantconst = nullptr;
     EnumInst *einst = nullptr;
     Dot(Line l, Node *_obj, string_view _name, string_view _ns = {})
-        : Node(l), obj(_obj), name(_name), ns(_ns) {}
+        : Node(l, NKind), obj(_obj), name(_name), ns(_ns) {}
     // A field, which lies in its object's storage: a path, as codegen
     // addresses it (CodeGen::GenLoc). A property or a variant constant is a
     // value computed on the spot (Dot::CgX).
@@ -929,6 +997,11 @@ NODE(Call)
     vector<VarDef *> fvparams;          //   its parameter bindings.
     SFunction *fvtarget = nullptr;      //   the named fn a plain `return` inside exits.
     vector<TypeExpr *> rettypes;        // All return values (exprtype is rettypes[0] or void).
+    // A call to a nested function that the optimizer copied out of the body
+    // declaring it (Inliner): the variables the callee reaches as free
+    // variables (§7.5) that the copy replaced, each with the copy the call
+    // passes in its place.
+    vector<pair<VarDef *, VarDef *>> fvremap;
     // print/str/format: the user `format` overloads rendering the types that
     // occur in the arguments, by type (§3.7).
     vector<pair<TypeExpr *, FnSpec *>> fmtspecs;
@@ -942,11 +1015,16 @@ NODE(Call)
     // free_slice/realloc_slice: the slice handed back is not provably the pool's,
     // so codegen checks at run time that it lies inside the pool (§5.4).
     bool poolcheck = false;
-    const string *shaderblob = nullptr;  // embed_shader: its compiled blob, in Ast::shaders.
-    Call(Line l, Node *_callee) : Node(l), callee(_callee) {}
+    const string *shaderblob = nullptr;  // embed_shader's compiled blob or embed_file's bytes, in Ast::shaders.
+    Call(Line l, Node *_callee) : Node(l, NKind), callee(_callee) {}
+    // What the call passes for the callee's free variable v (fvremap).
+    VarDef *FreeVarArg(VarDef *v) const {
+        for (auto &p : fvremap) if (p.first == v) return p.second;
+        return v;
+    }
     // The first argument in either spelling: a.f(b) is f(a, b) (§7.1).
     Node *FirstArg() const {
-        if (auto d = dynamic_cast<Dot *>(callee)) return d->obj;
+        if (auto d = Is<Dot>(callee)) return d->obj;
         return args[0];
     }
     // Every argument in either spelling, the receiver of a.f(b) first: what
@@ -954,7 +1032,7 @@ NODE(Call)
     // argument is among them, a trailing block is not.
     vector<Node *> ArgNodes() const {
         vector<Node *> an;
-        if (auto d = dynamic_cast<Dot *>(callee)) an.push_back(d->obj);
+        if (auto d = Is<Dot>(callee)) an.push_back(d->obj);
         for (auto a : args) an.push_back(a);
         return an;
     }
@@ -962,7 +1040,7 @@ NODE(Call)
     // check of the argument made of it (TypeCheck::AutoRef) stands in for
     // the original.
     void SetArgNode(size_t i, Node *n) {
-        if (auto d = dynamic_cast<Dot *>(callee)) {
+        if (auto d = Is<Dot>(callee)) {
             if (!i) { d->obj = n; return; }
             i--;
         }
@@ -982,7 +1060,7 @@ NODE(Index)
     BCE_MARK
     Node *obj, *idx;
     bool nobc = false;          // Bounds check proven redundant (bce.h); codegen omits it.
-    Index(Line l, Node *_obj, Node *_idx) : Node(l), obj(_obj), idx(_idx) {}
+    Index(Line l, Node *_obj, Node *_idx) : Node(l, NKind), obj(_obj), idx(_idx) {}
 NODE_END
 
 NODE(SliceExpr)
@@ -993,7 +1071,7 @@ NODE(SliceExpr)
     bool lo_from_end = false, hi_from_end = false;  // ^k bounds.
     bool nobc = false;          // Bounds check proven redundant (bce.h); codegen omits it.
     bool cmpview = false;       // The whole slice `==` takes of an operand (§4.5).
-    SliceExpr(Line l, Node *_obj) : Node(l), obj(_obj) {}
+    SliceExpr(Line l, Node *_obj) : Node(l, NKind), obj(_obj) {}
 NODE_END
 
 NODE(AsCast)
@@ -1008,7 +1086,7 @@ NODE(AsCast)
     // into an i64), and the cast still wraps and checks at its own type.
     TypeExpr *totype = nullptr;
     AsCast(Line l, Node *_child, TypeExpr *_type, bool _unchecked)
-        : Node(l), child(_child), type(_type), unchecked(_unchecked) {}
+        : Node(l, NKind), child(_child), type(_type), unchecked(_unchecked) {}
     // The cast as the source has it, which the checker's clones of it (one
     // per specialization) share. A redundant cast warns once for all of them
     // (TypeCheck::CastVerdict).
@@ -1016,16 +1094,16 @@ NODE(AsCast)
 NODE_END
 
 NODE(NullLit)                   // The null optional; adapts to any T? (§3.8).
-    NullLit(Line l) : Node(l) {}
+    NullLit(Line l) : Node(l, NKind) {}
 NODE_END
 
 NODE(SelfRef)                   // `self`: the value a literal is constructing (§3.9).
-    SelfRef(Line l) : Node(l) {}
+    SelfRef(Line l) : Node(l, NKind) {}
 NODE_END
 
 NODE(RangeExpr)                 // Only inside for-headers.
     Node *lo, *hi;
-    RangeExpr(Line l, Node *_lo, Node *_hi) : Node(l), lo(_lo), hi(_hi) {}
+    RangeExpr(Line l, Node *_lo, Node *_hi) : Node(l, NKind), lo(_lo), hi(_hi) {}
 NODE_END
 
 // A { stmt* expr? } sequence; tail is the value-producing trailing expression.
@@ -1033,7 +1111,7 @@ NODE(Block)
     BCE_WALK
     vector<Node *> stmts;
     Node *tail = nullptr;
-    Block(Line l) : Node(l) {}
+    Block(Line l) : Node(l, NKind) {}
 NODE_END
 
 NODE(IfExpr)
@@ -1050,7 +1128,7 @@ NODE(IfExpr)
     // block for the then-block (Optimizer::Around).
     bool flat = false;
     IfExpr(Line l, Node *_cond, Block *_thenb, Node *_elseb)
-        : Node(l), cond(_cond), thenb(_thenb), elseb(_elseb) {}
+        : Node(l, NKind), cond(_cond), thenb(_thenb), elseb(_elseb) {}
 NODE_END
 
 NODE(MatchExpr)
@@ -1058,15 +1136,19 @@ NODE(MatchExpr)
     BCE_MARK
     Node *scrutinee;
     vector<MatchArm> arms;
-    MatchExpr(Line l, Node *_scrutinee) : Node(l), scrutinee(_scrutinee) {}
+    MatchExpr(Line l, Node *_scrutinee) : Node(l, NKind), scrutinee(_scrutinee) {}
 NODE_END
 
 NODE(EarlyBlock)                // "block { }": breakable early-out construct.
     BCE_WALK
     Block *body;
     vector<Break *> breaks;     // Filled by typecheck: the breaks giving it a value.
-    EarlyBlock(Line l, Block *_body) : Node(l), body(_body) {}
+    EarlyBlock(Line l, Block *_body) : Node(l, NKind), body(_body) {}
 NODE_END
+
+// A resizable array in a field: the variable holding or referencing the
+// struct, and the field indices from there out (BCE::FieldIndexed).
+using FieldPath = pair<VarDef *, vector<int>>;
 
 NODE(While)
     BCE_WALK
@@ -1074,17 +1156,25 @@ NODE(While)
     // neither resize nor re-bind, so codegen reads their base and length once
     // before the loop instead of through the reference at every access.
     vector<VarDef *> hoistrefs;
+    // Likewise for the arrays it indexes in fields (FieldPath).
+    vector<FieldPath> hoistfields;
+    // Set by the optimizer's loop shaping (optimize_loops.h): the loop is
+    // `while v > 0 { v--; ... }` over a local integer nothing else in the
+    // body can write, so its trip count is v's value at entry and codegen
+    // runs it as a counted loop.
+    bool countdown = false;
     Node *cond;
     Block *body;
-    While(Line l, Node *_cond, Block *_body) : Node(l), cond(_cond), body(_body) {}
+    While(Line l, Node *_cond, Block *_body) : Node(l, NKind), cond(_cond), body(_body) {}
 NODE_END
 
 NODE(LoopExpr)
     BCE_WALK
     vector<VarDef *> hoistrefs;   // See While.
+    vector<FieldPath> hoistfields;
     Block *body;
     vector<Break *> breaks;       // Filled by typecheck: the breaks giving it a value.
-    LoopExpr(Line l, Block *_body) : Node(l), body(_body) {}
+    LoopExpr(Line l, Block *_body) : Node(l, NKind), body(_body) {}
 NODE_END
 
 NODE(ForLoop)
@@ -1095,6 +1185,23 @@ NODE(ForLoop)
     // iteration is legal).
     bool fixedlen = false;
     vector<VarDef *> hoistrefs;   // See While.
+    vector<FieldPath> hoistfields;
+    // Set by BCE for array/slice iteration: a constant the length never
+    // exceeds where an iteration tests it (-1: none known), and whether it
+    // always equals it.
+    int64_t lenbound = -1;
+    bool lenexact = false;
+    // Set by the optimizer's loop shaping (optimize_loops.h); codegen uses
+    // them where the iteration count is fixed at entry and the body can be
+    // emitted twice (CodeGen::Dupable). `stripk`: the counter starts at 0
+    // and the body takes it modulo stripk (the `lanemods`), which in a block
+    // of stripk iterations starting at a multiple of it is the position in
+    // the block. `sumred`: the body is `s += e` on a float local that e
+    // neither reads nor writes, so the terms of a block of iterations may be
+    // computed before they are added to s, in order.
+    int stripk = 0;
+    vector<Binary *> lanemods;
+    bool sumred = false;
     BCE_MARK
     bool byref;                 // for &x in ...
     string_view var;
@@ -1109,7 +1216,7 @@ NODE(ForLoop)
     VarDef *idxdef = nullptr;
     int iterkind = 0;           // IterKind, typecheck.h.
     ForLoop(Line l, bool _byref, string_view _var, string_view _idxvar, Node *_iter, Block *_body)
-        : Node(l), byref(_byref), var(_var), idxvar(_idxvar), iter(_iter), body(_body) {}
+        : Node(l, NKind), byref(_byref), var(_var), idxvar(_idxvar), iter(_iter), body(_body) {}
 NODE_END
 
 NODE(Return)
@@ -1119,18 +1226,18 @@ NODE(Return)
     string_view ns;             // The namespace `from` resolves in first (Ident::ns).
     SFunction *target = nullptr;  // Filled by typecheck (the fn this exits; `from` or own).
     FnSpec *targetspec = nullptr; // Its concrete return contract and propagation channel.
-    Return(Line l) : Node(l) {}
+    Return(Line l) : Node(l, NKind) {}
 NODE_END
 
 NODE(Break)
     BCE_WALK
     Node *val;
-    Break(Line l, Node *_val) : Node(l), val(_val) {}
+    Break(Line l, Node *_val) : Node(l, NKind), val(_val) {}
 NODE_END
 
 NODE(Continue)
     BCE_WALK
-    Continue(Line l) : Node(l) {}
+    Continue(Line l) : Node(l, NKind) {}
 NODE_END
 
 // A function value: trailing block or block with named params. Non-escaping,
@@ -1142,7 +1249,7 @@ NODE(FunVal)
     int col = 0;                // Of the `{`, 1-based: tells blocks on one line apart
                                 // in the instantiation chain (Line has no column).
     Block *body;
-    FunVal(Line l, Block *_body) : Node(l), body(_body) {}
+    FunVal(Line l, Block *_body) : Node(l, NKind), body(_body) {}
 NODE_END
 
 // let/var declarations, local and global.
@@ -1160,7 +1267,7 @@ NODE(VarDecl)
     TypeExpr *type = nullptr;
     vector<Node *> inits;       // Empty for uninitialized locals.
     vector<VarDef *> defs;      // Filled by typecheck, aligned with names.
-    VarDecl(Line l, bool _isvar) : Node(l), isvar(_isvar) {}
+    VarDecl(Line l, bool _isvar) : Node(l, NKind), isvar(_isvar) {}
 NODE_END
 
 NODE(Assign)
@@ -1169,7 +1276,7 @@ NODE(Assign)
     TType op;                   // T_ASSIGN, T_PLUSEQ, ...
     Node *lval, *rhs;
     bool pointee = false;       // Typecheck: lval is a reference and this writes its pointee.
-    Assign(Line l, TType _op, Node *_lval, Node *_rhs) : Node(l), op(_op), lval(_lval), rhs(_rhs) {}
+    Assign(Line l, TType _op, Node *_lval, Node *_rhs) : Node(l, NKind), op(_op), lval(_lval), rhs(_rhs) {}
 NODE_END
 
 NODE(IncDec)
@@ -1177,7 +1284,7 @@ NODE(IncDec)
     BCE_MARK
     TType op;                   // T_INC / T_DEC.
     Node *lval;
-    IncDec(Line l, TType _op, Node *_lval) : Node(l), op(_op), lval(_lval) {}
+    IncDec(Line l, TType _op, Node *_lval) : Node(l, NKind), op(_op), lval(_lval) {}
 NODE_END
 
 // Created by the optimizer (optimize.h), never by the parser: an inlined call
@@ -1194,7 +1301,7 @@ NODE(InlineBlock)
     FnSpec *spec;               // The specialization this body came from.
     Block *body;
     InlineBlock(Line l, SFunction *_sf, FnSpec *_spec, Block *_body)
-        : Node(l), sf(_sf), spec(_spec), body(_body) {}
+        : Node(l, NKind), sf(_sf), spec(_spec), body(_body) {}
     void EmitBody(CodeGen &cg, const Dst &d);   // CgAny, as the callee's own result type.
 NODE_END
 
@@ -1212,6 +1319,8 @@ struct SFunction {
     vector<TypeExpr *> rets;    // Empty + !has_rets = inferred/none.
     bool has_rets = false;
     bool isrec = false;         // Declared with `recursive`.
+    bool isinline = false;      // Declared with `inline`: inlined whatever its size (§7.13).
+    bool issimd = false;        // Declared with `simd`: one version per instruction set (§7.12).
     bool isthread = false;
     bool isextern = false;      // A C function behind a Goose signature (§7.10); no body.
     bool isexport = false;      // A Goose function exposed through a C ABI wrapper.
@@ -1302,22 +1411,22 @@ inline string_view NominalNs(const TypeExpr *t) {
 
 NODE(FnDecl)
     SFunction *sf;
-    FnDecl(Line l, SFunction *_sf) : Node(l), sf(_sf) {}
+    FnDecl(Line l, SFunction *_sf) : Node(l, NKind), sf(_sf) {}
 NODE_END
 
 NODE(StructDecl)
     SStruct *st;
-    StructDecl(Line l, SStruct *_st) : Node(l), st(_st) {}
+    StructDecl(Line l, SStruct *_st) : Node(l, NKind), st(_st) {}
 NODE_END
 
 NODE(EnumDecl)
     SEnum *en;
-    EnumDecl(Line l, SEnum *_en) : Node(l), en(_en) {}
+    EnumDecl(Line l, SEnum *_en) : Node(l, NKind), en(_en) {}
 NODE_END
 
 NODE(AliasDecl)
     SAlias *al;
-    AliasDecl(Line l, SAlias *_al) : Node(l), al(_al) {}
+    AliasDecl(Line l, SAlias *_al) : Node(l, NKind), al(_al) {}
 NODE_END
 
 #undef NODE
@@ -1450,6 +1559,13 @@ struct VarDef {
     Node *constuse = nullptr;
     const char *constwhat = nullptr;
     Node *refwrite = nullptr;
+    // Globals only: the first compile-time size, capacity or fill count
+    // taking the `.len` (`extentcap`: the `.cap`) its initializer gives
+    // (§3.3), which a type not fixing it would let change
+    // (TypeCheck::RelyOnExtent); `extentwhat` says which.
+    Node *extentuse = nullptr;
+    const char *extentwhat = nullptr;
+    bool extentcap = false;
     // A slice variable a reference to whose slot has been made (§3.8), so
     // that a reference read out of storage, or a parameter's class, may name
     // it (TypeCheck::RootCandidates, StoreIntoSlot). Kept as the marks are.
@@ -1476,12 +1592,22 @@ inline VarDef *Roots::From() const {
     return f;
 }
 
+// One run of fields with their instantiated types, aligned (a pad's type is
+// null): what a nominal type's values are made of. A struct type has one
+// run, a variant type its variant's, and an enum type one per variant, its
+// tag aside. Every pass that walks a type's contents does so run by run.
+struct FieldRun {
+    const vector<Field> *fields = nullptr;
+    const vector<TypeExpr *> *ftypes = nullptr;
+};
+
 // A struct type with concrete generic arguments: substituted field types plus
 // the derived properties every user of the type needs.
 struct StructInst {
     SStruct *st = nullptr;
     vector<TypeExpr *> args;
     vector<TypeExpr *> ftypes;     // Aligned with st->fields; null for pads.
+    FieldRun run;                  // st->fields with ftypes (RunsOf).
     SizeClass sclass = SC_FIXED;
     bool flat = true;
     bool validated = false;        // Guards against recursive by-value nesting.
@@ -1496,6 +1622,7 @@ struct EnumInst {
     SEnum *en = nullptr;
     vector<TypeExpr *> args;
     vector<vector<TypeExpr *>> vftypes;   // Per variant, per field.
+    vector<FieldRun> runs;                // Per variant, its fields and vftypes.
     bool allfixed = true;                 // Every payload is fixed-size.
     // A payload holds self-relative references, which only a binding by
     // reference reads: a copy does not keep them (§3.9), and fixed mode
@@ -1509,35 +1636,22 @@ struct EnumInst {
     vector<uint8_t> vbuilt;
 };
 
-// One run of fields with their instantiated types, aligned (a pad's type is
-// null): what a nominal type's values are made of. A struct type has one
-// run, a variant type its variant's, and an enum type one per variant, its
-// tag aside. Every pass that walks a type's contents does so run by run.
-struct FieldRun {
-    const vector<Field> *fields = nullptr;
-    const vector<TypeExpr *> *ftypes = nullptr;
-};
-
-inline FieldRun RunOf(const StructInst *si) { return { &si->st->fields, &si->ftypes }; }
-inline FieldRun RunOf(const EnumInst *ei, int vi) {
-    return { &ei->en->variants[vi].fields, &ei->vftypes[vi] };
-}
-inline void AllRunsOf(const EnumInst *ei, vector<FieldRun> &out) {
-    for (size_t vi = 0; vi < ei->en->variants.size(); vi++) out.push_back(RunOf(ei, (int)vi));
-}
+inline span<const FieldRun> RunsOf(const StructInst *si) { return { &si->run, 1 }; }
+inline span<const FieldRun> RunsOf(const EnumInst *ei) { return ei->runs; }
+inline span<const FieldRun> RunsOf(const EnumInst *ei, int vi) { return { &ei->runs[vi], 1 }; }
 
 // Whether `f` holds of some field type in these runs, and the same for every
 // one of them; pads (a null type) are skipped. Which runs a type has is the
 // pass's own question -- the checker instantiates the type to answer it, the
 // backend reads the instantiation the checker left behind -- but what to do
 // with them is this.
-template<typename F> bool AnyFieldOf(const vector<FieldRun> &runs, F f) {
+template<typename F> bool AnyFieldOf(span<const FieldRun> runs, F f) {
     for (auto &run : runs)
         for (auto ft : *run.ftypes) if (ft && f(ft)) return true;
     return false;
 }
 
-template<typename F> void EachFieldOf(const vector<FieldRun> &runs, F f) {
+template<typename F> void EachFieldOf(span<const FieldRun> runs, F f) {
     for (auto &run : runs)
         for (auto ft : *run.ftypes) if (ft) f(ft);
 }
@@ -1788,6 +1902,10 @@ struct OuterExit {
 // The event range locates this round's stores in TypeCheck::storeevents; it
 // is replay metadata, not a fact compared for convergence.
 struct FnRecord {
+    // Whether this specialization can resume its immediate Goose caller.
+    // A return-from to an outer body does not, although its C function returns
+    // normally to propagate that exit. Unknown recursive calls may return.
+    bool mayreturn = true;
     vector<RetRoot> retroots;      // Per ret: the checked returns' roots and the prediction.
     // External optional bindings this body (or a callee) may rebind.
     set<VarDef *> reboundoptionals;
@@ -1907,10 +2025,23 @@ struct FnSpec {
     // call's arguments in place (TypeCheck::ApplyCalleeStores): no other
     // call reuses the check.
     bool storesout = false;
+    // A value with self-relative references is returned as the body's named
+    // result, which is right only where it is built at the destination
+    // (TypeCheck::CheckNamedResultUses): the body is never inlined, where a
+    // destination might not take it in place (Optimizer::Scan).
+    bool relnamedresult = false;
     int id = 0;                    // Unique, for diagnostics/codegen naming.
     // Filled by the optimizer (optimize.h):
     int uses = 0;                  // Call sites in live code (tag-dispatch entries included).
     bool live = false;             // Reachable from main / threads / global initializers.
+    // Left out of line where the inliner could have inlined it, as a cold
+    // branch's only callee (Optimizer::TryInline): the C compiler is told so
+    // too, since it inlines a function with one caller whatever its size.
+    bool outofline = false;
+    // Goose wanted to inline this function at some call but could not
+    // (Optimizer::TryInline), so it is declared GS_INLINE in C and the C
+    // compiler inlines it.
+    bool cinline = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -1954,10 +2085,41 @@ inline string_view GlobalLeaf(string_view name) {
 // ---------------------------------------------------------------------------
 // Ast: owner of everything produced by parsing.
 
+// A package (docs/design/packages.md §4.1): a directory of modules, under
+// which a file's `import a.b;` resolves `a/b.goose`. Package 0 is the
+// program, rooted at its root file's directory; a standard library
+// directory is one too, once a module in it is reached.
+struct Package {
+    string name;
+    string root;          // With its trailing separator, or "" for the working directory.
+    bool stdlib = false;
+    string cachekey;      // A git source's place under GOOSE_HOME/pkg; "" for a path.
+    int builtin = -1;     // Its index in builtin_packages when compiled into the compiler.
+    // The sidecar beside its entry, `<name>.build` (docs/design/packages.md
+    // §4.7), read when the package is loaded: the C it compiles, which makes
+    // its native part (§5), and the rest of its settings.
+    string sidecar;
+    bool hassidecar = false;
+    vector<string> csources, cincludes;     // Absolute.
+    vector<string> cdefines, cflags_cc, cflags_msvc, clibs;
+    string cmake_target;
+    vector<string> cmake_options;
+    // Directories whose files are none of its own (§4.7): absolute, forward
+    // slashes, trailing /.
+    vector<string> exclude;
+    bool main_thread_only = false;
+    string output;                          // A program's executable, relative to its root.
+    vector<int> required;                   // The packages its files require (§4.3), by index.
+
+    bool HasNative() const { return !csources.empty() || !cmake_target.empty(); }
+};
+
 struct Ast {
     // Source buffers stay alive here; all string_views point into them. The
     // contents are heap-boxed so vector growth never moves an SSO buffer.
     vector<pair<string, unique_ptr<string>>> sources;   // (filename, contents).
+    vector<Package> packages;
+    vector<int> filepkg;                                // Per source, its package.
 
     vector<Node *> allnodes;
     vector<TypeExpr *> alltypes;
@@ -1980,6 +2142,7 @@ struct Ast {
     // embed_shader's compiled blobs, compiled once by the checker and emitted
     // by codegen: a shader file's by its path as resolved from the file
     // calling it, a shader given as source by that file, stage and source.
+    // And embed_file's bytes, by "file\n" and the path, read the same way.
     map<string, string> shaders;
 
     // Checked SQL's schemas and statements, as the compiler's own SQLite
@@ -2258,6 +2421,15 @@ struct Ast {
         if (!n) return nullptr;
         auto it = n->functionmap.find("main");
         return it != n->functionmap.end() && it->second.size() == 1 ? it->second[0] : nullptr;
+    }
+
+    // Whether the root file declares a main() in any namespace. Only the
+    // root's are registered, and a main anywhere but the global namespace is
+    // never the entry point, so a file declaring one is meant to be a program.
+    bool DeclaresMain() {
+        for (auto &[name, n] : namespaces)
+            if (n.functionmap.count("main")) return true;
+        return false;
     }
 
     void Dump(string &s) const;  // In dump.h.

@@ -1,5 +1,19 @@
 # Compiler and runtime tests
 
+<details>
+<summary>Table of contents</summary>
+
+- [Running the suite](#running-the-suite)
+- [Fixture layout](#fixture-layout)
+- [Configurations and backends](#configurations-and-backends)
+- [Expected output and diagnostics](#expected-output-and-diagnostics)
+- [Additional compiler checks](#additional-compiler-checks)
+- [Fixture audit](#fixture-audit)
+
+</details>
+
+## Running the suite
+
 Run `python test/run_tests.py --profile baseline --cc native --require-clang`
 after a normal compiler build. CI runs this on Windows, macOS and Linux.
 
@@ -16,6 +30,15 @@ with as many jobs) start first: the -O0 bootstrap chain is the longest piece
 of work, and the suite takes about as long as it does. `--gpu-jobs N` limits
 how many gfx programs run at once within each runner, should a GPU driver not
 take many headless devices at a time; by default nothing limits them.
+
+The log comes in sections (parse, roundtrip and typecheck; generated C;
+JIT runs; `errors_tc/`; samples; ...), each ending in a line counting its
+checks, `== typecheck errors (...): 1668 ok`. What a section prints besides
+its ok lines shows in place, under the section's title: a failure with what
+led to it, and the skips. `-v` prints a line for every check that passed as
+well. Under GitHub Actions those lines are kept in a collapsed group per
+section, closed before anything else prints. After the log, the FAIL lines
+repeat with the titles of their sections, as GitHub annotations there.
 
 The compiler runs per fixture are as few as the checks allow. One run,
 `goose --roundtrip --check`, parses, checks that the dump parses again to
@@ -51,6 +74,8 @@ time. `--batch N` sets how many files go to one compiler process and how
 many programs to one executable (by default a number that leaves every job
 some batches); `--batch 1` gives each a process and an executable of its own.
 
+## Fixture layout
+
 Test fixtures are grouped by category; `run_tests.py` stays at the root of `test/`:
 
 | Path under `test/` | Coverage |
@@ -73,7 +98,10 @@ Test fixtures are grouped by category; `run_tests.py` stays at the root of `test
 | `expected/` | Shared output and runtime-diagnostic expectations. |
 | `run_tests.py` | The Python test runner. |
 | `compiler_roots.cpp` | Root-set join laws, feedback on weakening, order-independent equality and the deliberate comparison projections; compiled and run in both native profiles. |
-| `api_check.py` | Checks `stdlib/gfx.goose`, `stdlib/physics.goose`, `stdlib/sqlite.goose` and `stdlib/ui.goose` against their C layers' headers; run by `run_tests.py`. |
+| `compiler_containers.cpp` | The compiler's `small_vector` and `flat_map` against `std::vector` and `std::unordered_map` under random operations, across in-place/heap storage, growth and erasure; compiled and run in both native profiles. |
+| `resource_paths.py` | Unicode source and C output paths, JIT entry-source resource roots, native executable roots with separate and standalone runtimes, relocation, and unchanged working-directory file access. Called by the main runner. |
+| `extern_types.py` | One imported extern interface and C adapter with unused and partially used functions: slice, reference-pointee and return types are available to the header at O0/O2 through native C and TinyCC, with no implementation needed for an unused extern. Called by the main runner. |
+| `runtime_cache.py`, `runtime_cache_cc.c` | Concurrent first builds share one completed runtime object; a failed compile cannot poison the cache, retry and reuse work, and dry runs leave the cache untouched. A controlled C compiler exercises both driver flag styles in debug and release configurations. Called by the main runner. |
 
 Positive fixtures are discovered one level below `test/`; nested import helpers
 run through their entry programs. `goose_in_goose/` is handled separately as one
@@ -81,6 +109,8 @@ bootstrap program, rather than discovering its modules as standalone fixtures.
 Keep fixture stems unique across categories,
 since expectations and generated build artifacts use those names. The runner
 rejects duplicate names.
+
+## Configurations and backends
 
 | Configuration | Purpose |
 |---|---|
@@ -123,9 +153,10 @@ mappings and Windows handles across worker churn, including unjoined workers,
 concurrent/repeated waits and children outliving their parents. It runs in both
 profiles. The normal suite also checks user-visible worker error diagnostics.
 
-The `gfx/` tests exercise the SDL3 graphics module (`docs/design/gfx.md`). They
+The `gfx/` tests exercise the gfx package (https://github.com/aardappel/goose_gfx,
+its `docs/gfx.md`). They
 always parse, typecheck and generate C. When the compiler includes the gfx layer
-(built from the `third_party/SDL` submodule), the tests also link against the
+(configured with the package, `GOOSE_BUILTIN_LIBS`), the tests also link against the
 libraries listed by `goose --gfx-link` and run at -O0 and -O2 and through
 TinyCC. They render headless into textures and read back only pixel-aligned
 results, so their output is the same on every backend and GPU; a machine with no
@@ -134,15 +165,16 @@ does a compiler without the layer. Linux CI runs them on Mesa's lavapipe. The
 runners set `GOOSE_GFX_HEADLESS=1`, so no test or sample opens a window. The
 hidden `--compile-shader` flag is probed on `gfx/probe.frag`.
 
-The `physics/` tests exercise the Box3D physics module
-(`docs/design/physics.md`) in the same way. They always generate C. When the
-compiler includes the physics layer from `third_party/box3d`, they link using
-`goose --physics-link` and run at -O0 and -O2 and through TinyCC. Box3D
+The `physics/` tests exercise the physics package
+(https://github.com/aardappel/goose_physics) in the same way. They always
+generate C. When the compiler was configured with the package
+(`GOOSE_BUILTIN_LIBS`), `goose build` links them and they run at -O0 and
+-O2 and through TinyCC. Box3D
 is deterministic across platforms and worker counts, so they print physics
 results, rounded, and compare them exactly. Between them they call every
 function of the layer.
 
-The `ui/` tests exercise the Nuklear ui module (`docs/design/ui.md`) in the
+The `ui/` tests exercise the ui module of the gfx package (its `docs/ui.md`) in the
 same way, linking `goose --ui-link` and, for the one that renders through
 gfx, `goose --gfx-link` too: a test needs the layers of its own category and
 of every module it imports, and is skipped where one is missing. They drive a
@@ -151,22 +183,22 @@ drawn; `ui_render` draws through headless gfx and reads back pixels only
 where the ui drew solid color. Between them they call every function of the
 layer.
 
-The `sqlite/` tests exercise the SQLite module (`docs/design/sqlite.md`) in
-the same way, linking `goose --sqlite-link`, where SQLite was fetched into
-`third_party/sqlite` (`scripts/fetch_sqlite.py`) before configuring; CI
-fetches it in both jobs.
+The `sqlite/` tests exercise the sqlite package (`packages/sqlite`,
+`docs/design/sqlite.md`) in the same way, built by `goose build` where SQLite
+was fetched into `third_party/sqlite` (`scripts/fetch_sqlite.py`) before
+configuring with the package; CI fetches it in both jobs.
 The tests run on in-memory databases, except `sqlite_threads` and
 `sqlite_images`, which use a file of a random name in the working directory
 and delete it. `run_tests.py` also checks that the argument-count overloads
-of `stdlib/sqlite.goose` are what `scripts/sqlite_arity.py` generates, and
-compares `goose --sqlite-types` on `sqlite_checked.goose` with
-`expected/sqlite_types.out`. The checked-SQL tests (those declaring a
-`sqlite::schema`) need the compiler's own SQLite and are skipped, with a
-note, by a compiler built without it.
+of `packages/sqlite/sqlite.goose` are what `scripts/sqlite_arity.py`
+generates, runs the package's own `test/api_check.py`, and compares `goose
+--sqlite-types` on `sqlite_checked.goose` with `expected/sqlite_types.out`.
+The checked-SQL tests (those declaring a `sqlite::schema`) need the
+compiler's own SQLite (`goose toolchain --json` says `"sql_check": true`)
+and are skipped, with a note, by a compiler built without it.
 
-`api_check.py` compares the functions, structs, and constants in
-`stdlib/gfx.goose`, `stdlib/physics.goose` and `stdlib/ui.goose` with their C
-headers. This catches
+Each package's own `test/api_check.py` compares the functions, structs, and
+constants in its modules with their C headers. This catches
 interface mismatches that can compile successfully on both sides. It also
 rejects a struct the layer passes by value that TinyCC would pass differently
 from the C compilers on System V x86-64: one of at most 16 bytes with a
@@ -180,11 +212,9 @@ platform, checks what the program reports about its own readbacks, and decodes
 the screenshots it saves (under `build/gfx-window/`) to check them for detail
 and compare them across runs.
 
-The TinyCC runs need the `third_party/tinycc` submodule at configure time; a
-compiler built without it skips them, and the runners find that out by running
-a one-line program rather than by asking the build. They are also skipped under
-the sanitizers, where the program runs uninstrumented inside an instrumented
-compiler and still holds its runtime allocations when that compiler exits.
+The TinyCC runs are skipped under the sanitizers, where the program runs
+uninstrumented inside an instrumented compiler and still holds its runtime
+allocations when that compiler exits.
 A test the backend cannot run yet is reported as a skip, not a failure: either
 because the compiler refuses the program outright (`JIT mode does not support`)
 or because the test's first line says `no-jit`. Prefer portable assertions to
@@ -192,22 +222,34 @@ skipping a backend; the math tests allow small rounding differences in
 transcendental results. See `docs/design/jit_backend.md` for the backend's remaining limitations and
 possible solutions.
 
+## Expected output and diagnostics
+
 An explicitly requested compiler must exist; CI does not silently skip it.
 Every runnable fixture requires an `expected/<name>.out`, including an empty
 file when the program should be silent. Expected aborts additionally require
 `.aborts` and a nonempty `.stderr` containing the expected runtime diagnostic
 substrings. Sanitizer reports fail even when a program was expected to abort.
-Resource-bound fixtures can set a runtime limit in their first line, such as
-`// runtime-define: GS_MAX_STACKS=1`; the runner applies it to both TinyCC
-and generated C. `append_destination_storage.goose` uses this to detect
+Resource-bound fixtures can set a limit in their first line, such as
+`// runtime-define: GS_MAX_STACKS=1`; the runner passes it as a `-D` to
+every compile, where the compiler checks `GS_MAX_STACKS` against the
+program's static stack count and the generated C takes the rest. `append_destination_storage.goose` uses this to detect
 temporary result stacks that output-only comparisons would miss,
 `cycle_scratch_locals.goose` to show that a recursion's scratch locals take
 the same few stacks at every level, and `discarded_resizable_results.goose`
 shrinks each stack's reservation (`GS_STACK_RESERVE`) so that its loops
 overflow one unless every discarded result is released, as
 `guard_flat_storage.goose` does for what a guard's condition, its else and
-the rest of its block take, the rest emitted without braces of its own;
-`data_stacks_exhausted.goose` runs out of stacks on purpose. A fixture
+the rest of its block take, the rest emitted without braces of its own.
+`cycle_static_stacks.goose` runs the shapes a call into a recursive cycle
+allows (§7.8), the `errors_tc/cycle_temporary_*`, `cycle_construction_*` and
+`cycle_result_*` fixtures being the rejected ones, and codegen fails with an
+internal error should any program hold a data stack across such a call.
+`thread_cap.goose` shrinks the address space budget (`GS_STACK_BUDGET`) so
+that `hardware_threads()` reports its floor of one wherever it runs, and
+`stack_stats.goose` has its program report its stack use
+(`GS_STACK_STATS`), checked through `expected/stack_stats.stderr`. The
+runner also checks the `--stacks` report of `thread_cap.goose` and
+`cycle_scratch_locals.goose` for its shape, not its counts. A fixture
 expecting a debug-only abort sets `GS_DEBUG=1` the same way, which makes
 every run of it a debug build: `cast_abort_location.goose` and
 `overflow_abort_location.goose` check the location a failing check reports.
@@ -239,6 +281,8 @@ stops at its error, so which warnings print first depends on how far it got.
 `cycle_local_store.goose`, for one, warns about its recursive call's
 `&local` before the error that call reveals, at the store on the line above.
 
+## Additional compiler checks
+
 The runner checks more than exit status and runtime output:
 
 | Check | Contract |
@@ -250,7 +294,12 @@ The runner checks more than exit status and runtime output:
 | `gfx_err_shader_syntax.goose`, `gfx_err_shader_part.goose` | Besides their markers, the error is reported at the program's line holding the offending GLSL. |
 | Generated `call_chain.goose`, `call_chain_too_deep.goose` (`build/gen/<profile>/`) | A compile-time call path through 2000 distinct functions checks at `-O0`, and runs through TinyCC; at `-O2`, where the inliner may fold its single-use functions into one body only 64 C blocks deep at a time, it builds with the native C compiler and runs (`docs/implementation.md` §4). One through 6000, each calling the next from 32 blocks deep, is rejected as too deep for the compiler's stack instead of overflowing it (§3.1). |
 | Generated `guard_runs.goose` (`build/gen/<profile>/`) | 300 guards in a row, in a function's body and in a loop's, build with the native C compiler and run at `-O0` and `-O2`: the rest of the block after a guard whose else leaves opens no C block (`docs/implementation.md` §6.2), where MSVC stops at 128 levels and clang at 256. A chain of 200 single-use functions, each calling the next behind four guards, folds at `-O2` into bodies 64 blocks deep, which would nest past both limits if the inliner's count left out blocks codegen opens (§4). |
-| `optimize.goose` at O0/O1/O2 | Inspect named tail-recursion bodies in `--specs`: supported integer accumulator/plain recursion becomes loops; modulo, floating-point reassociation, nonlocal-return frames and returns inside nested loops retain self calls. Mixed operators retain the ineligible call. Leading locals prevent base-case inlining from consuming these cases first. |
+| `loop_shapes.goose` at O1 | Read the generated C: every `shape_` function has the restated loop it is named for, marked by codegen's `/* loop shape: ... */` comment, and no `keep_` function has one (`docs/implementation.md` §6.12). Its runs check that each restated loop computes what a reference loop does. |
+| `member_parameters.goose` at O1 | Read the generated C: `walk`, which takes two slices and a `T[>..]&`, has each as two scalar C parameters (data pointer and count, header pointer and stack; spec C.3, `ParamFields`). Its runs pass slices, builders and pool references through calls, a recursion, a case-function dispatch, nested functions' free variables, a `simd` function, a `format` overload and an exported wrapper. |
+| `member_stores.goose` at O1 | Read the generated C: `store_links` stores to fields reached through references that cannot be rebound, with no index on the way, as C member stores rather than through a pointer taken first (`StableDest`); its runs check the stores, and that a right side rebinding the reference on the way still stores where the destination named before it ran (`evaluation_order.goose` has a right side writing the destination itself). |
+| `optimize.goose` at O0/O1/O2 | Inspect named tail-recursion bodies in `--specs`: supported integer accumulator/plain recursion becomes loops; modulo, floating-point reassociation, nonlocal-return frames and returns inside nested loops retain self calls. Mixed operators retain the ineligible call. Leading locals prevent base-case inlining from consuming these cases first. The `gb_` functions count the copies of their first statement: guarded base-case inlining copies the body once per self-call site where the test compares unassigned parameters, UFCS-spelled self-calls included, and not where it reads a global or a node, does arithmetic, or reads an assigned parameter. |
+
+## Fixture audit
 
 The fixture audit retained the small lifetime, optional-narrowing, alias-cycle,
 dispatch and frame-layout regressions. Similar diagnostics do not make them

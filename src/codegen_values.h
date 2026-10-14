@@ -14,19 +14,19 @@ namespace goose {
 // Reference variables with reusable-pool provenance are represented as
 // gs_pref so pool operations stay available through them (§5.4). This is
 // a property of the VarDef (provenance), shared by caller and callee.
-inline bool CodeGen::PrefVar(const VarDef *vd) {
+bool CodeGen::PrefVar(const VarDef *vd) {
     return vd->type && CarriesPool(vd->type) && vd->ref.reusable;
 }
 
 // Whether a value of type `have` needs a pointee load to serve as `want`:
 // optimizer splices can leave a reference-typed tree in a slot whose checked
 // type already decayed, and Dst::t says what the receiver wants.
-inline bool CodeGen::NeedsDeref(TypeExpr *have, TypeExpr *want) {
+bool CodeGen::NeedsDeref(TypeExpr *have, TypeExpr *want) {
     return have && want && IsPlainRef(have) && want->kind != TY_REF && want->kind != TY_VOID;
 }
 
 // The pointee of a fat reference `x` as a location.
-inline CodeGen::Loc CodeGen::FatRefLoc(const string &x, TypeExpr *sub) {
+CodeGen::Loc CodeGen::FatRefLoc(const string &x, TypeExpr *sub) {
     Loc lv;
     lv.t = sub;
     lv.stk = cat(x, ".stk");
@@ -42,7 +42,7 @@ inline CodeGen::Loc CodeGen::FatRefLoc(const string &x, TypeExpr *sub) {
     return lv;
 }
 
-inline CodeGen::Loc CodeGen::BytesLoc(const string &ptr, TypeExpr *t, const Loc &from) {
+CodeGen::Loc CodeGen::BytesLoc(const string &ptr, TypeExpr *t, const Loc &from) {
     Loc l;
     l.t = t;
     l.stk = from.stk;
@@ -64,7 +64,7 @@ inline CodeGen::Loc CodeGen::BytesLoc(const string &ptr, TypeExpr *t, const Loc 
 // reference loc. The stored offset is signed for the self-relative form
 // and unsigned for the `in pool` one, despite both widths being spelled
 // unsigned (§3.9); an int64 holds either.
-inline void CodeGen::RelParts(const Loc &lv, string &faddr, string &off) {
+void CodeGen::RelParts(const Loc &lv, string &faddr, string &off) {
     auto &r = *lv.t->ref;
     if (r.lenstorage == IS_VARINT) {
         assert(!lv.val);
@@ -82,7 +82,7 @@ inline void CodeGen::RelParts(const Loc &lv, string &faddr, string &off) {
 // What a relative offset is measured from (§3.9): the offset field's own
 // address, or, for an `in pool` reference, the pool's base biased by one
 // so that a target at the base still encodes non-zero and 0 stays null.
-inline string CodeGen::RelOrigin(TypeExpr *rt, const string &faddr) {
+string CodeGen::RelOrigin(TypeExpr *rt, const string &faddr) {
     if (!rt->ref->pool) return faddr;
     return cat("(", PoolBase(rt->ref->pool), " - 1)");
 }
@@ -91,14 +91,14 @@ inline string CodeGen::RelOrigin(TypeExpr *rt, const string &faddr) {
 // C lvalue. A reference's C type names a struct-like pointee by its forward
 // typedef only (CT), which is all passing the pointer on needs; a member
 // access, a load or a store through it needs the body, so this emits it.
-inline string CodeGen::PointeeLv(const string &p, TypeExpr *t) {
+string CodeGen::PointeeLv(const string &p, TypeExpr *t) {
     CT(t);
     return cat("(*", p, ")");
 }
 
 // Loads the value of a loc holding a (plain or relative) reference and
 // steps to the pointee. Optional locs never get here (narrowing).
-inline void CodeGen::DerefLoc(Loc &lv) {
+void CodeGen::DerefLoc(Loc &lv) {
     assert(lv.t->kind == TY_REF);
     if (lv.aliasof || lv.aliaspath) {
         auto nl = lv.aliaspath ? GenLoc(lv.aliaspath) : VarLoc(const_cast<VarDef *>(lv.aliasof));
@@ -168,7 +168,7 @@ inline void CodeGen::DerefLoc(Loc &lv) {
 // later uses and may rebind that reference. A resizable is its header's
 // address; a stack whose top this body caches keeps its name, being named by
 // a binding nothing rebinds.
-inline void CodeGen::PinLoc(Loc &lv) {
+void CodeGen::PinLoc(Loc &lv) {
     if (lv.val) {
         auto p = T();
         L(CT(lv.t), " *", p, " = &(", lv.s, ");");
@@ -193,7 +193,7 @@ inline void CodeGen::PinLoc(Loc &lv) {
     lv.viaref = false;
 }
 
-inline CodeGen::Loc CodeGen::VarLoc(VarDef *vd) {
+CodeGen::Loc CodeGen::VarLoc(VarDef *vd) {
     Loc l;
     l.t = vd->type;
     if (auto ait = refalias.find(vd); ait != refalias.end()) {
@@ -286,19 +286,19 @@ inline CodeGen::Loc CodeGen::VarLoc(VarDef *vd) {
 }
 
 // The gs_rhdr lvalue of a resizable variable (frame header form, C.2).
-inline string CodeGen::HdrLv(VarDef *vd) {
+string CodeGen::HdrLv(VarDef *vd) {
     auto name = VName(vd);
     return fvptr.count(vd) ? cat("(*", name, ")") : name;
 }
 
 // The C type a variable's storage uses (gs_pref for pool references).
-inline string CodeGen::VarCT(const VarDef *vd) {
+string CodeGen::VarCT(const VarDef *vd) {
     if (PrefVar(vd)) { EmitCoreTypes(); return "gs_pref"; }
     return CT(vd->type);
 }
 
 // The data stack a nonfixed variable's value lives on, if known here.
-inline string CodeGen::VStkOf(const VarDef *vd) {
+string CodeGen::VStkOf(const VarDef *vd) {
     auto it = vstk.find(vd);
     if (it != vstk.end()) return it->second;
     auto git = gstks.find(vd);
@@ -310,7 +310,7 @@ inline string CodeGen::VStkOf(const VarDef *vd) {
 // `base` (fields/ftypes from a struct instance or a variant), grouped as one
 // operand for the casts and dereferences applied to it. Emits cursor
 // statements when a dynamic-size field precedes the target.
-inline string CodeGen::FieldPtr(const string &base, const vector<Field> &fields,
+string CodeGen::FieldPtr(const string &base, const vector<Field> &fields,
                                 const vector<TypeExpr *> &ftypes, int fieldidx) {
     int64_t off = 0;
     string cur;   // Cursor variable once dynamic fields intervene.
@@ -333,13 +333,13 @@ inline string CodeGen::FieldPtr(const string &base, const vector<Field> &fields,
 
 // Reads of the length come from a loop-hoisted local where there is one;
 // `lenlv`, which the operations that change the length write, does not.
-inline CodeGen::ArrView CodeGen::ArrayView(const Loc &lv) {
+CodeGen::ArrView CodeGen::ArrayView(const Loc &lv) {
     auto v = RawArrayView(lv);
     if (!lv.hlen.empty()) v.len = lv.hlen;
     return v;
 }
 
-inline CodeGen::ArrView CodeGen::RawArrayView(const Loc &lv) {
+CodeGen::ArrView CodeGen::RawArrayView(const Loc &lv) {
     auto t = lv.t;
     ArrView v;
     if (t->kind == TY_SLICE) {
@@ -396,7 +396,7 @@ inline CodeGen::ArrView CodeGen::RawArrayView(const Loc &lv) {
     }
 }
 
-inline bool CodeGen::AddView(VarDef *vd) {
+bool CodeGen::AddView(VarDef *vd) {
     auto t = vd->type;
     if (views.count(vd) || !t || t->kind != TY_REF) return false;
     if (t->ref->optional || t->ref->lenstorage >= 0) return false;
@@ -426,7 +426,7 @@ inline bool CodeGen::AddView(VarDef *vd) {
 
 // The variable a field path's root names the storage of: an alias stands
 // for its target, which every spelling of the path shares.
-inline const VarDef *CodeGen::FieldRoot(const VarDef *vd) {
+const VarDef *CodeGen::FieldRoot(const VarDef *vd) {
     for (auto guard = 0; guard < 16; guard++) {
         auto it = refalias.find(vd);
         if (it == refalias.end() || aliaspath.count(vd)) break;
@@ -437,7 +437,7 @@ inline const VarDef *CodeGen::FieldRoot(const VarDef *vd) {
 
 // Reads the view of a grow-only or grow-shrink array held in a field into
 // locals ahead of a loop (`hoistfields`), as AddView does for a reference.
-inline bool CodeGen::AddFieldView(const FieldPath &fp) {
+bool CodeGen::AddFieldView(const FieldPath &fp) {
     auto vd = const_cast<VarDef *>(FieldRoot(fp.first));
     auto key = pair<const VarDef *, vector<int>>(vd, fp.second);
     auto t = vd->type;
@@ -463,7 +463,7 @@ inline bool CodeGen::AddFieldView(const FieldPath &fp) {
 
 // A field array whose view a loop around this code read out (fieldviews)
 // is read from there; growth still writes the header.
-inline void CodeGen::UseFieldView(Dot *d, Loc &lv) {
+void CodeGen::UseFieldView(Dot *d, Loc &lv) {
     if (lv.lenlv.empty() || lv.t->kind != TY_ARRAY || !IsResz(lv.t) || IsFrameObj(lv.t)) return;
     vector<int> path;
     Node *cur = d;
@@ -486,7 +486,7 @@ inline void CodeGen::UseFieldView(Dot *d, Loc &lv) {
 // into a huge native frame by HoistAggregateDecls or by a C compiler's
 // inliner. Reuse follows the existing scope watermarks, including
 // break/continue/return-from.
-inline void CodeGen::FixedLocal(TypeExpr *t, string &name, const string &init, bool forlocal) {
+void CodeGen::FixedLocal(TypeExpr *t, string &name, const string &init, bool forlocal) {
     if (!LargeFixedOnStack(t)) {
         L(CT(t), " ", name, init.empty() ? ";" : cat(" = ", init, ";"));
         return;
@@ -502,13 +502,13 @@ inline void CodeGen::FixedLocal(TypeExpr *t, string &name, const string &init, b
 
 // Materialize a read now, before a later operand can mutate its storage.
 // A bare C variable is side-effect-free but is not an evaluated value.
-inline string CodeGen::Snapshot(TypeExpr *vt, const string &x) {
+string CodeGen::Snapshot(TypeExpr *vt, const string &x) {
     auto t = T();
     FixedLocal(vt, t, x);
     return t;
 }
 
-inline string CodeGen::GenPure(Node *n) {
+string CodeGen::GenPure(Node *n) {
     if (Is<IntLit>(n) || Is<FltLit>(n) || Is<BoolLit>(n)) return GenX(n);
     return Snapshot(n->exprtype, GenX(n));
 }
@@ -516,14 +516,14 @@ inline string CodeGen::GenPure(Node *n) {
 // The two minima are written as a subtraction: C has no negative decimal
 // constants, and MSVC's C front end types both magnitudes as unsigned
 // (C90 literal rules), which the negation would carry through.
-inline string CodeGen::IntStr(int64_t v) {
+string CodeGen::IntStr(int64_t v) {
     if (v == INT64_MIN) return "(-9223372036854775807LL - 1)";
     if (v == INT32_MIN) return "(-2147483647 - 1)";
     if (v > INT32_MAX || v < INT32_MIN) return cat(v, "LL");
     return cat(v);
 }
 
-inline string CodeGen::FltStr(double v, bool f32) {
+string CodeGen::FltStr(double v, bool f32) {
     // A folded NaN or infinity has no literal spelling; math.h's macros.
     if (v != v) return "NAN";
     if (std::isinf(v)) return v > 0 ? "INFINITY" : "(-INFINITY)";
@@ -540,7 +540,7 @@ inline string CodeGen::FltStr(double v, bool f32) {
 // Indexed element location with bounds check (elided when the BCE pass
 // proved it redundant, or for provably in-range constant indices into
 // fixed arrays).
-inline CodeGen::Loc CodeGen::IndexLoc(Loc lv, Node *idxnode, Line ln, bool nobc) {
+CodeGen::Loc CodeGen::IndexLoc(Loc lv, Node *idxnode, Line ln, bool nobc) {
     if (lv.t->kind == TY_REF) DerefLoc(lv);
     auto v = ArrayView(lv);
     if (HasStmts(idxnode)) {
@@ -592,7 +592,7 @@ static bool CheckFreePath(Node *n) {
 }
 
 // Two check-free paths, or integer constants, that denote the same thing.
-inline bool CodeGen::SamePath(Node *a, Node *b) {
+bool CodeGen::SamePath(Node *a, Node *b) {
     if (auto ia = Is<Ident>(a)) {
         auto ib = Is<Ident>(b);
         return ib && ia->vdef && ia->vdef == ib->vdef;
@@ -611,7 +611,7 @@ inline bool CodeGen::SamePath(Node *a, Node *b) {
 // check-free path, at an index held in a variable or a constant. Null
 // otherwise, and where there is no check: elided already, or a constant
 // within a fixed array (IndexLoc).
-inline Index *CodeGen::LeadingCheck(Node *arm) {
+Index *CodeGen::LeadingCheck(Node *arm) {
     auto b = Is<Block>(arm);
     if (!b || b->stmts.empty()) return nullptr;
     auto a = Is<Assign>(b->stmts[0]);
@@ -632,7 +632,7 @@ inline Index *CodeGen::LeadingCheck(Node *arm) {
 }
 
 // Whether two leading checks test the same index against the same array.
-inline bool CodeGen::SameCheck(Index *a, Index *b) {
+bool CodeGen::SameCheck(Index *a, Index *b) {
     return SamePath(a->obj, b->obj) && SamePath(a->idx, b->idx) &&
            TEq(a->obj->exprtype, b->obj->exprtype);
 }
@@ -640,7 +640,7 @@ inline bool CodeGen::SameCheck(Index *a, Index *b) {
 // The check both arms of an if start with (LeadingCheck), emitted once
 // ahead of the branch on condition `c`: it fails where either arm's would,
 // and reports the location of the arm `c` selects.
-inline void CodeGen::EmitHoistedCheck(Index *ta, Index *ea, const string &c) {
+void CodeGen::EmitHoistedCheck(Index *ta, Index *ea, const string &c) {
     auto lv = GenLoc(ta->obj);
     while (lv.t->kind == TY_REF) DerefLoc(lv);
     auto v = ArrayView(lv);
@@ -652,7 +652,7 @@ inline void CodeGen::EmitHoistedCheck(Index *ta, Index *ea, const string &c) {
     L("(void)GS_IDX((int64_t)(", idx, "), ", v.len, ", ", file, ", ", line, ");");
 }
 
-inline CodeGen::Loc CodeGen::GenLoc(Node *n) {
+CodeGen::Loc CodeGen::GenLoc(Node *n) {
     if (auto it = fillvalues.find(n); it != fillvalues.end()) return it->second;
     if (auto id = Is<Ident>(n)) {
         assert(id->vdef);
@@ -705,7 +705,7 @@ inline CodeGen::Loc CodeGen::GenLoc(Node *n) {
 // such a destination as it is spelled, a member store the C compiler's
 // type-based alias analysis tells apart from other structs' fields, where
 // a store through a pointer taken first is to any value of the field's type.
-inline bool CodeGen::StableDest(Node *n) {
+bool CodeGen::StableDest(Node *n) {
     while (auto d = Is<Dot>(n)) {
         if (!d->IsField()) return false;
         auto ot = d->obj->exprtype;
@@ -721,7 +721,7 @@ inline bool CodeGen::StableDest(Node *n) {
 
 // A fresh statement-scoped stack for a bytes-class temporary, returned in
 // `stk`; the value's base (also the watermark to restore) is the result.
-inline string CodeGen::BytesTemp(string &stk) {
+string CodeGen::BytesTemp(string &stk) {
     stk = AllocStk(false);
     auto base = T();
     L("uint8_t *", base, " = ", Top(stk), ";");
@@ -732,7 +732,7 @@ inline string CodeGen::BytesTemp(string &stk) {
 // A fresh header -- or frame object -- for a resizable value of type t,
 // named by the result, on a fresh statement-scoped stack returned in
 // `stk`; the elements are built there next.
-inline string CodeGen::RzTemp(TypeExpr *t, string &stk) {
+string CodeGen::RzTemp(TypeExpr *t, string &stk) {
     EmitCoreTypes();
     stk = AllocStk(false);
     auto h = T();
@@ -748,12 +748,12 @@ inline string CodeGen::RzTemp(TypeExpr *t, string &stk) {
 
 // What a construction of type t behind header h writes its count to: the
 // whole frame object, or the header's count.
-inline string CodeGen::RzLenLv(TypeExpr *t, const string &h) {
+string CodeGen::RzLenLv(TypeExpr *t, const string &h) {
     return IsFrameObj(t) ? h : cat(h, ".len");
 }
 
 // The value behind such a header as a location.
-inline CodeGen::Loc CodeGen::RzTempLoc(TypeExpr *t, const string &h, const string &stk) {
+CodeGen::Loc CodeGen::RzTempLoc(TypeExpr *t, const string &h, const string &stk) {
     Loc l;
     l.t = t;
     l.stk = stk;
@@ -770,7 +770,7 @@ inline CodeGen::Loc CodeGen::RzTempLoc(TypeExpr *t, const string &h, const strin
 
 // A resizable-valued temporary (a call or control result): elements on a
 // fresh statement-scoped stack, header in a temp.
-inline CodeGen::Loc CodeGen::GenRzTmp(Node *n) {
+CodeGen::Loc CodeGen::GenRzTmp(Node *n) {
     auto t = n->exprtype;
     string stk;
     auto h = RzTemp(t, stk);
@@ -778,12 +778,12 @@ inline CodeGen::Loc CodeGen::GenRzTmp(Node *n) {
     return RzTempLoc(t, h, stk);
 }
 
-inline CodeGen::Loc CodeGen::MemberLoc(Loc lv, Dot *d) {
+CodeGen::Loc CodeGen::MemberLoc(Loc lv, Dot *d) {
     assert(d->fieldidx >= 0);
     return FieldLocAt(lv, d->fieldidx);
 }
 
-inline CodeGen::Loc CodeGen::FieldLocAt(Loc lv, int fieldidx) {
+CodeGen::Loc CodeGen::FieldLocAt(Loc lv, int fieldidx) {
     if (lv.t->kind == TY_STRUCT) {
         auto si = SI(lv.t);
         auto ft = si->ftypes[fieldidx];
@@ -831,7 +831,7 @@ inline CodeGen::Loc CodeGen::FieldLocAt(Loc lv, int fieldidx) {
 // a bytes-class value. Both follow the node's checked exprtype, which
 // already encodes operand unification and reference decay.
 
-inline bool CodeGen::IsCtl(Node *n) {
+bool CodeGen::IsCtl(Node *n) {
     return Is<IfExpr>(n) || Is<MatchExpr>(n) || Is<Block>(n) || Is<EarlyBlock>(n) ||
            Is<LoopExpr>(n) || Is<InlineBlock>(n);
 }
@@ -839,7 +839,7 @@ inline bool CodeGen::IsCtl(Node *n) {
 // The value of a location, as the given expression type expects: storage
 // widening is implicit in C, varints decode, relative references load,
 // and a reference loc decays to its pointee when the exprtype says so.
-inline string CodeGen::LoadLoc(Loc lv, TypeExpr *et, Line ln) {
+string CodeGen::LoadLoc(Loc lv, TypeExpr *et, Line ln) {
     if (lv.t->kind == TY_REF && et->kind != TY_REF &&
         !(IsOptional(lv.t) && et->kind == TY_REF)) {
         DerefLoc(lv);
@@ -902,7 +902,7 @@ inline string CodeGen::LoadLoc(Loc lv, TypeExpr *et, Line ln) {
 // A fixed C value built from a differently-represented source: a variant
 // or a variable-mode ADT read into a fixed-mode context, or an array/slice
 // into a static-capacity limited array.
-inline string CodeGen::AdaptToFixed(Loc lv, TypeExpr *et, Line ln) {
+string CodeGen::AdaptToFixed(Loc lv, TypeExpr *et, Line ln) {
     if (et->kind == TY_ENUM && lv.t->kind == TY_VARIANT) {
         // The variant's own tag, its value the payload.
         assert(lv.val);
@@ -947,7 +947,7 @@ inline string CodeGen::AdaptToFixed(Loc lv, TypeExpr *et, Line ln) {
 // its capacity check (§4.2). The count and the elements are read before
 // anything is written, and with `overlap` they move as memmove moves them,
 // so the source may lie in `dst`'s own slots.
-inline void CodeGen::CopyIntoLimited(Loc lv, TypeExpr *et, Line ln, const string &dst,
+void CodeGen::CopyIntoLimited(Loc lv, TypeExpr *et, Line ln, const string &dst,
                                      bool overlap) {
     auto v = ArrayView(lv);
     auto nn = T();
@@ -961,7 +961,7 @@ inline void CodeGen::CopyIntoLimited(Loc lv, TypeExpr *et, Line ln, const string
 
 // Whether `n`, for a static-capacity limited destination `want`, is an
 // array or slice of another representation that is copied in (§4.2).
-inline bool CodeGen::AdaptsToLimited(Node *n, TypeExpr *want) {
+bool CodeGen::AdaptsToLimited(Node *n, TypeExpr *want) {
     auto nt = n->exprtype;
     if (!want || !nt || !IsStaticLimited(want) || fillvalues.count(n)) return false;
     auto st = IsPlainRef(nt) ? nt->ref->sub : nt;
@@ -974,7 +974,7 @@ inline bool CodeGen::AdaptsToLimited(Node *n, TypeExpr *want) {
 // type first. That covers a node whose checked type differs from `want`,
 // and a range or a path the checker typed as `want` whose location is such
 // an array or slice. False, with nothing emitted, for anything else.
-inline bool CodeGen::GenIntoLimited(Node *n, TypeExpr *want, const string &dst, bool overlap) {
+bool CodeGen::GenIntoLimited(Node *n, TypeExpr *want, const string &dst, bool overlap) {
     if (!want || !IsStaticLimited(want) || !n->exprtype || fillvalues.count(n)) return false;
     Loc lv;
     auto dot = Is<Dot>(n);
@@ -1002,13 +1002,13 @@ inline bool CodeGen::GenIntoLimited(Node *n, TypeExpr *want, const string &dst, 
     return true;
 }
 
-inline string CodeGen::BytesAddrOf(const Loc &lv) {
+string CodeGen::BytesAddrOf(const Loc &lv) {
     return lv.val ? cat("(uint8_t *)&", lv.s) : lv.s;
 }
 
 // &lvalue (§3.8): the reference value. On a location holding a reference,
 // yields the stored reference.
-inline string CodeGen::GenRefVal(Node *child, Line ln) {
+string CodeGen::GenRefVal(Node *child, Line ln) {
     // A reference to a resizable value points at its frame header (C.2),
     // so it can only be taken of a whole variable.
     if (auto id = Is<Ident>(child); id && id->vdef && IsResz(id->vdef->type)) {
@@ -1040,7 +1040,7 @@ inline string CodeGen::GenRefVal(Node *child, Line ln) {
 
 // GenX, loading the pointee when an optimizer splice left a reference
 // where the context's checked type had already decayed.
-inline string CodeGen::GenXD(Node *n, TypeExpr *want) {
+string CodeGen::GenXD(Node *n, TypeExpr *want) {
     if (auto it = fillvalues.find(n); it != fillvalues.end())
         return LoadLoc(it->second, want, n->line);
     if (AdaptsToLimited(n, want)) {
@@ -1068,7 +1068,7 @@ inline string CodeGen::GenXD(Node *n, TypeExpr *want) {
     return GenX(n);
 }
 
-inline string CodeGen::GenTruth(Node *n) {
+string CodeGen::GenTruth(Node *n) {
     auto x = GenX(n);
     auto t = n->exprtype;
     if (t->kind == TY_REF && IsResz(t->ref->sub)) return cat("(", x, ".hdr != 0)");
@@ -1086,7 +1086,7 @@ inline string CodeGen::GenTruth(Node *n) {
 // reference, which the left operand may be what narrows (§3.8). In truth
 // position an optional variable stands for its null test, which reads the
 // reference alone. `budget` bounds the work the operand may do for nothing.
-inline bool CodeGen::Speculatable(Node *n, bool idxok, bool truth, int &budget) {
+bool CodeGen::Speculatable(Node *n, bool idxok, bool truth, int &budget) {
     if (--budget < 0) return false;
     auto t = n->exprtype;
     auto scalar = [](TypeExpr *x) {
@@ -1189,7 +1189,7 @@ inline bool CodeGen::Speculatable(Node *n, bool idxok, bool truth, int &budget) 
 // gave, for Speculatable: a variable but an optional reference, a field of
 // such storage holding a fixed value, or an element of it as Speculatable
 // takes one.
-inline bool CodeGen::SpeculatablePlace(Node *n, bool idxok, int &budget) {
+bool CodeGen::SpeculatablePlace(Node *n, bool idxok, int &budget) {
     if (--budget < 0) return false;
     if (auto id = Is<Ident>(n)) {
         auto vt = id->vdef ? id->vdef->type : nullptr;
@@ -1219,7 +1219,7 @@ inline bool CodeGen::SpeculatablePlace(Node *n, bool idxok, int &budget) {
 // and a relative-reference-typed one (an `if` choosing a relative field's
 // target) as the plain reference every relative load gives and every
 // relative store encodes (§3.9).
-inline string CodeGen::CtlValX(Node *n) {
+string CodeGen::CtlValX(Node *n) {
     auto t = T();
     auto vt = n->exprtype;
     if (vt->kind == TY_INT && vt->intstorage == IS_VARINT) vt = ast.inttypes[IS_I64];
@@ -1233,7 +1233,7 @@ inline string CodeGen::CtlValX(Node *n) {
 }
 
 // A non-control node's value routed to a destination.
-inline void CodeGen::LeafAny(Node *n, const Dst &d) {
+void CodeGen::LeafAny(Node *n, const Dst &d) {
     if (d.k == DK_STACK) { GenConstruct(n, d.s, d.t, d.lenlv); return; }
     if (d.k == DK_LVALUE) {
         if (d.pool) { L(d.s, " = ", GenPrefVal(n), ";"); return; }
@@ -1258,7 +1258,7 @@ inline void CodeGen::LeafAny(Node *n, const Dst &d) {
     L("(void)(", GenVal(n), ");");
 }
 
-inline string CodeGen::GenFixedArrayLit(ArrayLit *al) {
+string CodeGen::GenFixedArrayLit(ArrayLit *al) {
     auto et = al->exprtype;
     if (et->kind == TY_SLICE) {
         // A literal in slice position: a temporary fixed array, sliced
@@ -1284,7 +1284,7 @@ inline string CodeGen::GenFixedArrayLit(ArrayLit *al) {
 // Bytes-class value of an expression; optionally reports the data stack
 // it lives on (temporaries land on a fresh statement-scoped stack).
 // Resizable values carry a header and go through GenLoc/GenRzTmp instead.
-inline string CodeGen::GenPtr(Node *n, string *stkout) {
+string CodeGen::GenPtr(Node *n, string *stkout) {
     assert(!IsResz(n->exprtype));
     if (stkout) stkout->clear();
     if (auto it = fillvalues.find(n); it != fillvalues.end()) {
@@ -1324,7 +1324,7 @@ inline string CodeGen::GenPtr(Node *n, string *stkout) {
     return base;
 }
 
-inline string CodeGen::StrRaw(const string &v) {
+string CodeGen::StrRaw(const string &v) {
     auto it = strdata.find(v);
     if (it != strdata.end()) return it->second;
     auto name = Unique(cat("gs_str", strdata.size()));
@@ -1341,7 +1341,7 @@ inline string CodeGen::StrRaw(const string &v) {
 // Binary static data, such as an embedded shader: an initializer list, which
 // MSVC takes at any size, where it takes a string literal only in pieces
 // (CStr).
-inline string CodeGen::BlobRaw(const string &v) {
+string CodeGen::BlobRaw(const string &v) {
     auto it = blobdata.find(v);
     if (it != blobdata.end()) return it->second;
     auto name = Unique(cat("gs_blob", blobdata.size()));
@@ -1356,7 +1356,7 @@ inline string CodeGen::BlobRaw(const string &v) {
     return expr;
 }
 
-inline string CodeGen::GenStrBytes(StrLit *s) {
+string CodeGen::GenStrBytes(StrLit *s) {
     auto et = s->exprtype;
     assert(et->kind == TY_ARRAY);
     auto key = cat(Mangle(et), "|", s->val);
@@ -1394,19 +1394,19 @@ inline string CodeGen::GenStrBytes(StrLit *s) {
 
 // Operand exprtype as an operator sees it: a spliced reference reads as
 // its pointee.
-inline TypeExpr *CodeGen::OperandT(TypeExpr *t) {
+TypeExpr *CodeGen::OperandT(TypeExpr *t) {
     return t && IsPlainRef(t) ? t->ref->sub : t;
 }
 
 // GenX or GenPtr per the operand's rep; operators see spliced references
 // as their pointees.
-inline string CodeGen::GenVal(Node *n) {
+string CodeGen::GenVal(Node *n) {
     auto et = OperandT(n->exprtype);
     if (et != n->exprtype) return GenXD(n, et);   // Bytes pointees share the currency.
     return IsBytesT(et) ? GenPtr(n) : GenX(n);
 }
 
-inline string CodeGen::GenPureVal(Node *n) {
+string CodeGen::GenPureVal(Node *n) {
     auto et = OperandT(n->exprtype);
     if (IsBytesT(et)) {
         auto p = T();
@@ -1416,7 +1416,7 @@ inline string CodeGen::GenPureVal(Node *n) {
     return Snapshot(et, GenVal(n));
 }
 
-inline bool CodeGen::HasStmts(Node *n) {
+bool CodeGen::HasStmts(Node *n) {
     if (!n) return false;
     if (Is<Call>(n) || IsCtl(n) || Is<StrLit>(n)) return true;
     auto found = false;
@@ -1426,12 +1426,12 @@ inline bool CodeGen::HasStmts(Node *n) {
 
 // Equality of two direct operands (§4.5): a slice compares length then
 // elements here, where as a member it compares by identity (EqX).
-inline string CodeGen::GenEquality(TypeExpr *lt, const string &l, const string &r) {
+string CodeGen::GenEquality(TypeExpr *lt, const string &l, const string &r) {
     if (lt->kind == TY_SLICE) return GenSliceEq(lt, l, r);
     return EqX(lt, l, r);
 }
 
-inline string CodeGen::GenSliceEq(TypeExpr *st, const string &l, const string &r) {
+string CodeGen::GenSliceEq(TypeExpr *st, const string &l, const string &r) {
     return GenRangeEq(st->sub, cat(l, ".data"), cat(l, ".len"), cat(r, ".data"),
                       cat(r, ".len"));
 }
@@ -1439,7 +1439,7 @@ inline string CodeGen::GenSliceEq(TypeExpr *st, const string &l, const string &r
 // Structural equality of two element ranges (§4.5): length then elements.
 // Either range's elements may be an empty slice's null pointer, which
 // gs_memeq allows.
-inline string CodeGen::GenRangeEq(TypeExpr *elem, const string &ae, const string &an,
+string CodeGen::GenRangeEq(TypeExpr *elem, const string &ae, const string &an,
                                   const string &be, const string &bn) {
     auto t = T();
     L("uint8_t ", t, " = ", an, " == ", bn, ";");
@@ -1477,7 +1477,7 @@ inline string CodeGen::GenRangeEq(TypeExpr *elem, const string &ae, const string
 // operand, so writing members straight into `dst` is exact even when it
 // aliases an operand (the p.vel = p.vel + g shape). Scalar operands are
 // snapshotted by the caller because they may alias any destination member.
-inline void CodeGen::GenElemwiseInto(TypeExpr *t, TType op, Line line, const string &l,
+void CodeGen::GenElemwiseInto(TypeExpr *t, TType op, Line line, const string &l,
                                      const string &r, const string &dst,
                                      bool lscalar, bool rscalar) {
     GenElemwiseLeaves(t, dst, [&](TypeExpr *tt, const string &path) {
@@ -1508,7 +1508,7 @@ inline void CodeGen::GenElemwiseInto(TypeExpr *t, TType op, Line line, const str
 
 // Elementwise negation (§6.1), member by member as above: member i of the
 // result reads only member i of the operand.
-inline void CodeGen::GenElemwiseNegInto(TypeExpr *t, Line line, const string &x,
+void CodeGen::GenElemwiseNegInto(TypeExpr *t, Line line, const string &x,
                                         const string &dst) {
     GenElemwiseLeaves(t, dst, [&](TypeExpr *tt, const string &path) {
         auto a = cat("(", x, ")", path);
@@ -1520,7 +1520,7 @@ inline void CodeGen::GenElemwiseNegInto(TypeExpr *t, Line line, const string &x,
 
 // Stores leaf(type, path) into dst's member at each numeric leaf path of the
 // struct or fixed array type t.
-inline void CodeGen::GenElemwiseLeaves(TypeExpr *t, const string &dst,
+void CodeGen::GenElemwiseLeaves(TypeExpr *t, const string &dst,
                                        const function<string(TypeExpr *, const string &)> &leaf) {
     function<void(TypeExpr *, const string &)> rec = [&](TypeExpr *tt, const string &path) {
         switch (tt->kind) {
@@ -1555,7 +1555,7 @@ inline void CodeGen::GenElemwiseLeaves(TypeExpr *t, const string &dst,
 
 // Left-to-right evaluation (§2): when the right operand needs statements,
 // the left's value must be snapshotted before they run.
-inline void CodeGen::ElemwiseOperands(Binary *b, string &l, string &r) {
+void CodeGen::ElemwiseOperands(Binary *b, string &l, string &r) {
     auto scalar = [&](Node *n) {
         auto t = OperandT(n->exprtype);
         return t->kind == TY_INT || t->kind == TY_FLT;
@@ -1572,7 +1572,7 @@ inline void CodeGen::ElemwiseOperands(Binary *b, string &l, string &r) {
     r = scalar(b->right) ? GenPureVal(b->right) : GenVal(b->right);
 }
 
-inline string CodeGen::GenElemwise(Binary *b, const string &l, const string &r) {
+string CodeGen::GenElemwise(Binary *b, const string &l, const string &r) {
     auto tv = T();
     FixedLocal(b->exprtype, tv);
     GenElemwiseInto(b->exprtype, b->op, b->line, l, r, tv,
@@ -1581,7 +1581,7 @@ inline string CodeGen::GenElemwise(Binary *b, const string &l, const string &r) 
     return tv;
 }
 
-inline string CodeGen::GenSlice(SliceExpr *se) {
+string CodeGen::GenSlice(SliceExpr *se) {
     auto lv = GenLoc(se->obj);
     if (lv.t->kind == TY_REF) DerefLoc(lv);
     auto v = ArrayView(lv);

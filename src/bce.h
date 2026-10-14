@@ -111,22 +111,6 @@
 
 namespace goose {
 
-// Whether index ix is in bounds by the types alone: a fixed array indexed by
-// a constant within it, or by an integer whose type holds no value outside it
-// (a u8 into a [256]). Codegen speculates such an index whatever this pass
-// proved about it (CodeGen::Speculatable).
-inline bool IndexInRangeByType(Index *ix) {
-    auto at = ix->obj->exprtype;
-    if (at && IsPlainRef(at)) at = at->ref->sub;
-    if (!at || !IsArrayKind(at, A_FIXED) || at->arr->size <= 0) return false;
-    auto n = at->arr->size;
-    if (auto lit = Is<IntLit>(ix->idx)) return !lit->uns && lit->val >= 0 && lit->val < n;
-    auto it = ix->idx->exprtype;
-    if (!it || !IsIntT(it)) return false;
-    auto [lo, hi] = IntRange(it->intstorage);
-    return lo >= 0 && hi < n;
-}
-
 struct BCE {
     Ast &ast;
 
@@ -2776,39 +2760,39 @@ struct BCE {
 // The default recurses over Children, which is all a node whose only role is
 // to hold subexpressions needs.
 
-inline void Node::BceMark(BCE &b) { Children([&](Node *ch) { b.Mark(ch); }); }
+void Node::BceMark(BCE &b) { Children([&](Node *ch) { b.Mark(ch); }); }
 
-inline void Ident::BceMark(BCE &b) { b.NoteVar(vdef); }
+void Ident::BceMark(BCE &b) { b.NoteVar(vdef); }
 
-inline void Unary::BceMark(BCE &b) {
+void Unary::BceMark(BCE &b) {
     if (op == T_BITAND) b.MarkAddr(child);
     Node::BceMark(b);
 }
 
-inline void Dot::BceMark(BCE &b) {
+void Dot::BceMark(BCE &b) {
     if (member == B_LEN) b.NotePlace(obj);
     Node::BceMark(b);
 }
 
-inline void Call::BceMark(BCE &b) {
+void Call::BceMark(BCE &b) {
     for (auto p : fvparams) b.NoteOwn(p);
     RunChildren(this, [&](Node *ch) { b.Mark(ch); });
 }
 
-inline void Index::BceMark(BCE &b) {
+void Index::BceMark(BCE &b) {
     b.NotePlace(obj);
     b.NoteRel(obj, idx);
     Node::BceMark(b);
 }
 
-inline void SliceExpr::BceMark(BCE &b) {
+void SliceExpr::BceMark(BCE &b) {
     b.NotePlace(obj);
     b.NoteRel(obj, lo);
     b.NoteRel(obj, hi);
     Node::BceMark(b);
 }
 
-inline void MatchExpr::BceMark(BCE &b) {
+void MatchExpr::BceMark(BCE &b) {
     for (auto &arm : arms) {
         if (arm.pat.byref) b.MarkAddr(scrutinee);
         b.NoteVar(arm.binder);
@@ -2817,7 +2801,7 @@ inline void MatchExpr::BceMark(BCE &b) {
     Node::BceMark(b);
 }
 
-inline void ForLoop::BceMark(BCE &b) {
+void ForLoop::BceMark(BCE &b) {
     if ((iterkind == IK_ARRAY || iterkind == IK_SLICE) && !vdef->copybind) b.MarkAddr(iter);
     b.NoteVar(vdef);
     b.NoteVar(idxdef);
@@ -2826,7 +2810,7 @@ inline void ForLoop::BceMark(BCE &b) {
     Node::BceMark(b);
 }
 
-inline void VarDecl::BceMark(BCE &b) {
+void VarDecl::BceMark(BCE &b) {
     for (auto d : defs) {
         b.NoteVar(d);
         b.NoteOwn(d);
@@ -2836,7 +2820,7 @@ inline void VarDecl::BceMark(BCE &b) {
     Node::BceMark(b);
 }
 
-inline void Assign::BceMark(BCE &b) {
+void Assign::BceMark(BCE &b) {
     if (auto id = Is<Ident>(lval); id && id->vdef && !pointee) {
         auto v = id->vdef;
         auto lit = Is<IntLit>(rhs);
@@ -2854,7 +2838,7 @@ inline void Assign::BceMark(BCE &b) {
     Node::BceMark(b);
 }
 
-inline void IncDec::BceMark(BCE &b) {
+void IncDec::BceMark(BCE &b) {
     if (auto id = Is<Ident>(lval); id && id->vdef &&
         (!id->vdef->type || id->vdef->type->kind != TY_REF))
         (op == T_INC ? b.wkinds[id->vdef].inc : b.wkinds[id->vdef].dec) = true;
@@ -2866,16 +2850,16 @@ inline void IncDec::BceMark(BCE &b) {
 // kills, or a bounds check. The default evaluates the children left to right
 // and falls through, which is exactly right for every operand-holding node.
 
-inline bool Node::BceWalk(BCE &b) {
+bool Node::BceWalk(BCE &b) {
     Children([&](Node *ch) { b.Walk(ch); });
     return true;
 }
 
 // A function-value template is never analyzed: the checked instance reached
 // through its call site is (Call::BceWalk).
-inline bool FunVal::BceWalk(BCE &) { return true; }
+bool FunVal::BceWalk(BCE &) { return true; }
 
-inline bool Binary::BceWalk(BCE &b) {
+bool Binary::BceWalk(BCE &b) {
     if ((op == T_ANDAND || op == T_OROR) && b.mode != BCE::M_KILLS) {
         // The right side runs only when the left settled it one way, so its
         // facts and effects merge against the short-circuit path.
@@ -2899,7 +2883,7 @@ inline bool Binary::BceWalk(BCE &b) {
     return true;
 }
 
-inline bool Index::BceWalk(BCE &b) {
+bool Index::BceWalk(BCE &b) {
     b.Walk(obj);
     auto lent = b.mode == BCE::M_KILLS ? BCE::Term {} : b.LenTermOf(obj);
     auto gen = b.nextgen;
@@ -2911,7 +2895,7 @@ inline bool Index::BceWalk(BCE &b) {
     return true;
 }
 
-inline bool SliceExpr::BceWalk(BCE &b) {
+bool SliceExpr::BceWalk(BCE &b) {
     auto kills = b.mode == BCE::M_KILLS;
     b.Walk(obj);
     // The runtime check compares against a length snapshot taken before the
@@ -2940,7 +2924,7 @@ inline bool SliceExpr::BceWalk(BCE &b) {
     return true;
 }
 
-inline bool Call::BceWalk(BCE &b) {
+bool Call::BceWalk(BCE &b) {
     Node *recv = nullptr;
     // A call into user code is a site (RecordSite): each integer argument's
     // term is sampled as it is evaluated, a slice argument's length as its
@@ -3114,7 +3098,7 @@ inline bool Call::BceWalk(BCE &b) {
     return true;
 }
 
-inline bool Block::BceWalk(BCE &b) {
+bool Block::BceWalk(BCE &b) {
     auto fell = true;
     for (auto st : stmts) {
         fell = b.Walk(st);
@@ -3124,7 +3108,7 @@ inline bool Block::BceWalk(BCE &b) {
     return fell;
 }
 
-inline bool IfExpr::BceWalk(BCE &b) {
+bool IfExpr::BceWalk(BCE &b) {
     b.Walk(cond);
     if (b.mode == BCE::M_KILLS) {
         b.Walk(thenb);
@@ -3146,7 +3130,7 @@ inline bool IfExpr::BceWalk(BCE &b) {
     return true;
 }
 
-inline bool MatchExpr::BceWalk(BCE &b) {
+bool MatchExpr::BceWalk(BCE &b) {
     b.Walk(scrutinee);
     if (b.mode == BCE::M_KILLS) {
         for (auto &arm : arms) {
@@ -3185,7 +3169,7 @@ inline bool MatchExpr::BceWalk(BCE &b) {
     return true;
 }
 
-inline bool EarlyBlock::BceWalk(BCE &b) {
+bool EarlyBlock::BceWalk(BCE &b) {
     if (b.mode == BCE::M_KILLS) {
         b.Walk(body);
         return true;
@@ -3198,7 +3182,7 @@ inline bool EarlyBlock::BceWalk(BCE &b) {
     return true;
 }
 
-inline bool While::BceWalk(BCE &b) {
+bool While::BceWalk(BCE &b) {
     b.loopdepth++;
     if (b.mode == BCE::M_KILLS) {
         b.Walk(cond);
@@ -3220,7 +3204,7 @@ inline bool While::BceWalk(BCE &b) {
     return true;
 }
 
-inline bool LoopExpr::BceWalk(BCE &b) {
+bool LoopExpr::BceWalk(BCE &b) {
     b.loopdepth++;
     if (b.mode == BCE::M_KILLS) {
         b.Walk(body);
@@ -3236,7 +3220,7 @@ inline bool LoopExpr::BceWalk(BCE &b) {
     return true;
 }
 
-inline bool ForLoop::BceWalk(BCE &b) {
+bool ForLoop::BceWalk(BCE &b) {
     if (b.mode == BCE::M_KILLS) {
         b.Walk(iter);
         b.loopdepth++;
@@ -3399,7 +3383,7 @@ inline bool ForLoop::BceWalk(BCE &b) {
     return true;
 }
 
-inline bool InlineBlock::BceWalk(BCE &b) {
+bool InlineBlock::BceWalk(BCE &b) {
     if (b.mode == BCE::M_KILLS) {
         b.Walk(body);
         return true;
@@ -3432,19 +3416,19 @@ inline bool InlineBlock::BceWalk(BCE &b) {
     return true;
 }
 
-inline bool Return::BceWalk(BCE &b) {
+bool Return::BceWalk(BCE &b) {
     for (auto v : vals) b.Walk(v);
     return false;
 }
 
-inline bool Break::BceWalk(BCE &b) {
+bool Break::BceWalk(BCE &b) {
     b.Walk(val);
     return false;
 }
 
-inline bool Continue::BceWalk(BCE &) { return false; }
+bool Continue::BceWalk(BCE &) { return false; }
 
-inline bool VarDecl::BceWalk(BCE &b) {
+bool VarDecl::BceWalk(BCE &b) {
     for (auto i : inits) b.Walk(i);
     if (defs.size() == 1 && inits.size() == 1 && defs[0]) {
         auto v = defs[0];
@@ -3481,7 +3465,7 @@ inline bool VarDecl::BceWalk(BCE &b) {
     return true;
 }
 
-inline bool Assign::BceWalk(BCE &b) {
+bool Assign::BceWalk(BCE &b) {
     b.WalkLvalParts(lval);
     b.Walk(rhs);
     if (op == T_DOTASSIGN) {
@@ -3568,7 +3552,7 @@ inline bool Assign::BceWalk(BCE &b) {
     return true;
 }
 
-inline bool IncDec::BceWalk(BCE &b) {
+bool IncDec::BceWalk(BCE &b) {
     b.WalkLvalParts(lval);
     auto lt = lval->exprtype;
     if (lt && lt->kind == TY_REF) {

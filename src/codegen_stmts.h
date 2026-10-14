@@ -8,7 +8,7 @@ namespace goose {
 // A Block's contents without emitting the braces/scope (the caller did).
 // The block is a region a stack it grows outside every loop can be cached
 // over (TopW), rather than the whole body.
-inline void CodeGen::GenBlockInner(Block *b, Dst d, size_t first, int exitscope) {
+void CodeGen::GenBlockInner(Block *b, Dst d, size_t first, int exitscope) {
     auto region = MarkBlockBegin();
     for (auto i = first; i < b->stmts.size(); ++i) GenStmt(b->stmts[i]);
     if (b->tail && !IsVoidT(b->tail->exprtype) && d.k != DK_DISCARD) {
@@ -26,7 +26,7 @@ inline void CodeGen::GenBlockInner(Block *b, Dst d, size_t first, int exitscope)
 // makes its arguments in the caller's: a slice or reference argument can
 // view a temporary, which the call's value may still view after the block
 // exits, through the rest of the statement. Returns how many there are.
-inline size_t CodeGen::GenInlineArgs(Block *b) {
+size_t CodeGen::GenInlineArgs(Block *b) {
     size_t n = 0;
     while (n < b->stmts.size()) {
         auto arg = Is<VarDecl>(b->stmts[n]);
@@ -37,7 +37,7 @@ inline size_t CodeGen::GenInlineArgs(Block *b) {
     return n;
 }
 
-inline void CodeGen::GenStmt(Node *n) {
+void CodeGen::GenStmt(Node *n) {
     PushSc(SC_STMT);
     termjump = false;
     GenStmt2(n);
@@ -54,7 +54,7 @@ inline void CodeGen::GenStmt(Node *n) {
 // the watermarks of declarations it ran past, so the continue label
 // sits after the fallthrough restores rather than sharing them.
 
-inline void CodeGen::GenLoopBody(const function<void()> &condexit, Block *bodyb, Dst d,
+void CodeGen::GenLoopBody(const function<void()> &condexit, Block *bodyb, Dst d,
                                  const string &forhead, Node *cond, size_t first,
                                  vector<const VarDef *> binders) {
     auto divisors = HoistDivisors(bodyb, cond, binders);
@@ -90,7 +90,7 @@ inline void CodeGen::GenLoopBody(const function<void()> &condexit, Block *bodyb,
 // Whether n can compile to straight-line code once its ifs are converted:
 // no loop, call, break, continue or return in it, which is the loop body a C
 // compiler if-converts and vectorizes.
-inline bool CodeGen::StraightCode(Node *n) {
+bool CodeGen::StraightCode(Node *n) {
     if (!n) return true;
     if (Is<While>(n) || Is<ForLoop>(n) || Is<LoopExpr>(n) || Is<Call>(n) || Is<Break>(n) ||
         Is<Continue>(n) || Is<Return>(n))
@@ -102,7 +102,7 @@ inline bool CodeGen::StraightCode(Node *n) {
 
 // Whether the code being emitted is in a loop StraightCode accepts, the
 // innermost one around it in this function.
-inline bool CodeGen::InStraightLoop() {
+bool CodeGen::InStraightLoop() {
     for (auto i = (int)cscopes.size() - 1; i >= 0; i--) {
         if (cscopes[i].kind == SC_LOOP) return cscopes[i].straight;
         if (cscopes[i].kind == SC_FN) return false;
@@ -113,7 +113,7 @@ inline bool CodeGen::InStraightLoop() {
 // An unsigned `/` or `%`, or a signed one BCE found to be of nonnegative
 // operands (Binary::nonneg), by a divisor DivisorKey names, which
 // HoistDivisors may find a loop cannot change.
-inline bool CodeGen::LoopDivisible(Binary *b) {
+bool CodeGen::LoopDivisible(Binary *b) {
     if (b->op != T_DIV && b->op != T_MOD) return false;
     auto t = b->left->exprtype;
     if (!t || t->kind != TY_INT || t->intstorage == IS_VARINT) return false;
@@ -126,7 +126,7 @@ inline bool CodeGen::LoopDivisible(Binary *b) {
 // integer variable, a field of a fixed-size struct variable (or of a field
 // of one, and so on), or an integer conversion of one of those. `root` gets
 // the variable and `path` whether fields lead from it to the value.
-inline string CodeGen::DivisorKey(Node *n, const VarDef **root, bool *path) {
+string CodeGen::DivisorKey(Node *n, const VarDef **root, bool *path) {
     auto isint = [](TypeExpr *t) { return t && t->kind == TY_INT && t->intstorage != IS_VARINT; };
     if (!n || fillvalues.count(n)) return "";
     if (auto id = Is<Ident>(n)) {
@@ -158,7 +158,7 @@ inline string CodeGen::DivisorKey(Node *n, const VarDef **root, bool *path) {
 // The value of a divisor DivisorKey names, computed ahead of a loop without
 // the checks of its conversions: `ok` gets the condition under which none
 // of them would fail (or stays "1"), and the value is used only under it.
-inline string CodeGen::DivisorValue(Node *n, string &ok) {
+string CodeGen::DivisorValue(Node *n, string &ok) {
     auto c = Is<AsCast>(n);
     if (!c) return GenX(n);
     auto x = DivisorValue(c->child, ok);
@@ -188,7 +188,7 @@ inline string CodeGen::DivisorValue(Node *n, string &ok) {
 // `match` binding or a function value's reference parameter is bound to,
 // and of what a user `format` overload is handed (§3.7). An operand that is
 // no path counts every variable it names.
-inline const set<const VarDef *> &CodeGen::RefdLocals() {
+const set<const VarDef *> &CodeGen::RefdLocals() {
     assert(curspec);
     if (refdspec == curspec) return refdlocals;
     refdspec = curspec;
@@ -252,7 +252,7 @@ inline const set<const VarDef *> &CodeGen::RefdLocals() {
 // when one runs. Returns the divisors it adds to divmagic, for the loop to
 // retire. Tail-recursion elimination turns self-calls into a loop that
 // assigns the parameters each round (optimize_tre.h), which is a write.
-inline vector<string> CodeGen::HoistDivisors(Block *loopbody, Node *cond,
+vector<string> CodeGen::HoistDivisors(Block *loopbody, Node *cond,
                                              const vector<const VarDef *> &binders) {
     vector<string> added;
     set<const VarDef *> inner(binders.begin(), binders.end());
@@ -320,7 +320,7 @@ inline vector<string> CodeGen::HoistDivisors(Block *loopbody, Node *cond,
     return added;
 }
 
-inline void CodeGen::GenBreakPath(Node *val) {
+void CodeGen::GenBreakPath(Node *val) {
     auto si = -1;
     for (auto i = (int)cscopes.size() - 1; i >= 0; i--) {
         if (cscopes[i].kind == SC_LOOP || cscopes[i].kind == SC_BLOCK) { si = i; break; }
@@ -340,7 +340,7 @@ inline void CodeGen::GenBreakPath(Node *val) {
 // A local a body copy can declare again under a name of its own: one held
 // in the C frame, which no other function reaches and which is no named
 // result built at the destination.
-inline bool CodeGen::DupLocal(VarDef *v) {
+bool CodeGen::DupLocal(VarDef *v) {
     return !v || (v->type && IsFix(v->type) && !IsLargeFixed(v->type) && !v->captured &&
                   !v->reusable && !nrvo.count(v));
 }
@@ -348,7 +348,7 @@ inline bool CodeGen::DupLocal(VarDef *v) {
 // Whether a body can be emitted twice. Paths to variable-size storage are
 // fine; a value of variable size built in the body, a nested function or a
 // function value, and the locals DupLocal refuses are not.
-inline bool CodeGen::Dupable(Node *n) {
+bool CodeGen::Dupable(Node *n) {
     if (!n) return true;
     if (Is<FunVal>(n) || Is<FnDecl>(n)) return false;
     auto path = Is<Ident>(n) || Is<Dot>(n) || Is<Index>(n);
@@ -368,7 +368,7 @@ inline bool CodeGen::Dupable(Node *n) {
 // The number of iterations a loop's body runs in a block, or 0 where it runs
 // them one at a time. The caller has checked that the iteration count is
 // fixed at entry.
-inline int CodeGen::BlockSize(ForLoop *f) {
+int CodeGen::BlockSize(ForLoop *f) {
     if (!f->stripk && !f->sumred) return 0;
     if (!DupLocal(f->vdef) || !DupLocal(f->idxdef) || !Dupable(f->body)) return 0;
     return f->stripk ? f->stripk : SUMBLOCK;
@@ -378,7 +378,7 @@ inline int CodeGen::BlockSize(ForLoop *f) {
 // type ct, runs below hi: hi - ctr >= k, where the subtraction can overflow
 // neither in C nor in the counter's own type. A counter that started at 0
 // is never negative.
-inline string CodeGen::AtLeastLeft(TypeExpr *ct, const string &hi, const string &ctr, int k,
+string CodeGen::AtLeastLeft(TypeExpr *ct, const string &hi, const string &ctr, int k,
                                    bool fromzero) {
     if (IntBits(ct->intstorage) < 64) return cat("(int64_t)", hi, " - (int64_t)", ctr, " >= ", k);
     if (IsUnsigned(ct->intstorage)) return cat(ctr, " < ", hi, " && ", hi, " - ", ctr, " >= ", k);
@@ -388,7 +388,7 @@ inline string CodeGen::AtLeastLeft(TypeExpr *ct, const string &hi, const string 
 
 // One copy of a loop's body in the C loop the caller opened, ending where a
 // continue in it lands.
-inline void CodeGen::GenBodyCopy(Block *bodyb, int si) {
+void CodeGen::GenBodyCopy(Block *bodyb, int si) {
     for (auto st : bodyb->stmts) GenStmt(st);
     if (bodyb->tail) GenStmt(bodyb->tail);
     EmitRestores(cscopes[si]);
@@ -404,7 +404,7 @@ inline void CodeGen::GenBodyCopy(Block *bodyb, int si) {
 // the value of every `i % k` the body takes. An in-order sum (sumred)
 // computes the block's k terms into a local array, then adds them to the sum
 // one after another, as the loop would have.
-inline void CodeGen::GenBlocked(ForLoop *f, int k, const string &more, const string &step,
+void CodeGen::GenBlocked(ForLoop *f, int k, const string &more, const string &step,
                                 const function<void()> &bind, const string &cond) {
     PushSc(SC_LOOP);
     auto si = (int)cscopes.size() - 1;
@@ -483,7 +483,7 @@ inline void CodeGen::GenBlocked(ForLoop *f, int k, const string &more, const str
 
 // Scope si receives exit values at d: what is open on its stack now, and
 // the point its top on entry gets declared at if an exit needs it.
-inline void CodeGen::EnterDst(int si, const Dst &d) {
+void CodeGen::EnterDst(int si, const Dst &d) {
     auto &s = cscopes[si];
     s.dst = d;
     if (d.k != DK_STACK) return;
@@ -494,14 +494,14 @@ inline void CodeGen::EnterDst(int si, const Dst &d) {
 
 // Declares `name` as stk's top at body offset `at`, where its scope begins,
 // and shifts the offsets recorded by scopes that begin after it.
-inline void CodeGen::DeclareTop0(size_t at, int indent, const string &name, const string &stk) {
+void CodeGen::DeclareTop0(size_t at, int indent, const string &name, const string &stk) {
     string line((size_t)indent * 4, ' ');
     Append(line, "uint8_t *", name, " = ", Top(stk), ";\n");
     body.insert(at, line);
     for (auto &s : cscopes) if (s.topat > at) s.topat += line.size();
 }
 
-inline string CodeGen::ScopeTop0(int si) {
+string CodeGen::ScopeTop0(int si) {
     auto &s = cscopes[si];
     if (s.top0.empty()) {
         s.top0 = T();
@@ -510,7 +510,7 @@ inline string CodeGen::ScopeTop0(int si) {
     return s.top0;
 }
 
-inline string CodeGen::DstTop0(size_t i) {
+string CodeGen::DstTop0(size_t i) {
     if (dsttop0.size() <= i) dsttop0.resize(i + 1);
     if (dsttop0[i].empty()) {
         dsttop0[i] = T();
@@ -522,7 +522,7 @@ inline string CodeGen::DstTop0(size_t i) {
 // An inlined body's named result reaching the destination it was bound to
 // (OpenIbNrvo) is in place already: building it there writes only its
 // count or its prefix. Returns its binding, or null for any other value.
-inline const CodeGen::NrvoDest *CodeGen::NrvoBoundAt(Node *val, const string &stk,
+const CodeGen::NrvoDest *CodeGen::NrvoBoundAt(Node *val, const string &stk,
                                                       const string &lenlv) {
     auto id = Is<Ident>(val);
     if (!id || !id->vdef) return nullptr;
@@ -536,7 +536,7 @@ inline const CodeGen::NrvoDest *CodeGen::NrvoBoundAt(Node *val, const string &st
 // Where an exit's value will start on stk, taken before it is built when a
 // construction opened there since the exit's scope was entered (open0) may
 // have placed something in front of it; "" when none can have.
-inline string CodeGen::ExitStart(Node *val, const string &stk, const string &lenlv, int open0) {
+string CodeGen::ExitStart(Node *val, const string &stk, const string &lenlv, int open0) {
     if (openat[stk] <= open0 || NrvoBoundAt(val, stk, lenlv)) return "";
     auto start = T();
     L("uint8_t *", start, " = ", Top(stk), ";");
@@ -545,7 +545,7 @@ inline string CodeGen::ExitStart(Node *val, const string &stk, const string &len
 
 // The value built from `start` up to stk's top moves down to top0; a frame
 // object's tail header, which lenlv receives, follows its elements.
-inline void CodeGen::LandValue(const string &stk, const string &top0, const string &start,
+void CodeGen::LandValue(const string &stk, const string &top0, const string &start,
                                TypeExpr *t, const string &lenlv) {
     L("if (", start, " != ", top0, ") {");
     ind++;
@@ -562,7 +562,7 @@ inline void CodeGen::LandValue(const string &stk, const string &top0, const stri
 }
 
 // A break's value, or a return's leaving an inlined body, for scope si.
-inline void CodeGen::GenExitValue(Node *val, int si) {
+void CodeGen::GenExitValue(Node *val, int si) {
     auto d = cscopes[si].dst;
     if (d.k != DK_STACK || !NrvoBoundAt(val, d.s, d.lenlv)) NoSelfRelCopy(val);
     auto start = d.k == DK_STACK ? ExitStart(val, d.s, d.lenlv, cscopes[si].open0) : "";
@@ -574,7 +574,7 @@ inline void CodeGen::GenExitValue(Node *val, int si) {
 // ------------------------------------------------------------------
 // Declarations and assignment.
 
-inline void CodeGen::BindLocal(VarDef *d, Node *init, bool forlocal) {
+void CodeGen::BindLocal(VarDef *d, Node *init, bool forlocal) {
     // An alias reads the variable it stands for; its initializer names that
     // variable and does nothing else.
     if (refalias.count(d)) {
@@ -682,7 +682,7 @@ inline void CodeGen::BindLocal(VarDef *d, Node *init, bool forlocal) {
 // A gs_pref value from a &pool expression or another pool reference, or
 // from a construct choosing among pools of one kind (MergeVals keeps the
 // bits they share), which each branch builds into one temporary.
-inline string CodeGen::GenPrefVal(Node *n) {
+string CodeGen::GenPrefVal(Node *n) {
     if (IsCtl(n)) {
         auto t = T();
         L("gs_pref ", t, ";");
@@ -714,7 +714,7 @@ inline string CodeGen::GenPrefVal(Node *n) {
     Fail(n->line, "cannot form a reusable pool reference from this expression");
 }
 
-inline void CodeGen::GenRelAssign(Loc lv, Node *lval, Node *rhs, Line ln) {
+void CodeGen::GenRelAssign(Loc lv, Node *lval, Node *rhs, Line ln) {
     auto rv = GenX(rhs);
     // Varint-width relative references are construction-only (typechecked).
     assert(lv.t->ref->lenstorage != IS_VARINT);
@@ -728,7 +728,7 @@ inline void CodeGen::GenRelAssign(Loc lv, Node *lval, Node *rhs, Line ln) {
     EmitRelStoreAt(BytesAddrOf(lv), lv.t, rv, ln, true, f);
 }
 
-inline void CodeGen::GenRebind(Assign *a, Loc lv) {
+void CodeGen::GenRebind(Assign *a, Loc lv) {
     if (lv.t->kind == TY_REF && lv.t->ref->lenstorage >= 0) {
         GenRelAssign(lv, a->lval, a->rhs, a->line);
         return;
@@ -756,7 +756,7 @@ inline void CodeGen::GenRebind(Assign *a, Loc lv) {
 // is not fixed-size builds its variable-mode ADT in place instead, behind
 // the tag (GenAdtAdapted). Returns each fixed result's C expression, which
 // the caller stores.
-inline vector<string> CodeGen::GenForward(Call *c, const vector<TypeExpr *> &rets,
+vector<string> CodeGen::GenForward(Call *c, const vector<TypeExpr *> &rets,
                                           const vector<Dst> &chans) {
     vector<Dst> dsts;
     vector<Loc> arrived(rets.size());
@@ -816,7 +816,7 @@ inline vector<string> CodeGen::GenForward(Call *c, const vector<TypeExpr *> &ret
     return vals;
 }
 
-inline void CodeGen::GenNormalReturn(const vector<Node *> &vals) {
+void CodeGen::GenNormalReturn(const vector<Node *> &vals) {
     auto sp = curspec;
     assert(sp);
     auto &si = *curinfo;
@@ -900,7 +900,7 @@ inline void CodeGen::GenNormalReturn(const vector<Node *> &vals) {
 // the `count` elements that run from `elems` to the top of `stk`. Fixed
 // widths patch in place; a varint moves the elements up by one or two
 // bytes only when the count outgrew its reserved byte.
-inline void CodeGen::EmitPrefixPatch(const string &pref, IntStorage ls, const string &stk,
+void CodeGen::EmitPrefixPatch(const string &pref, IntStorage ls, const string &stk,
                                      const string &count, const string &elems) {
     if (ls != IS_VARINT) {
         EmitLenCheck(ls, count);
@@ -927,14 +927,14 @@ inline void CodeGen::EmitPrefixPatch(const string &pref, IntStorage ls, const st
 // Completes a named result whose elements are already at the destination:
 // the count goes to the receiving header, or into the prefix reserved in
 // front of the elements when the destination is a value slot.
-inline void CodeGen::EmitNrvoFinish(const NrvoDest &nd) {
+void CodeGen::EmitNrvoFinish(const NrvoDest &nd) {
     if (nd.hdr.empty()) return;   // A packed non-resizable result is complete.
     if (nd.fo) { L(nd.lenlv, " = ", nd.hdr, ";"); return; }
     if (!nd.prefix) { L(nd.lenlv, " = ", nd.hdr, ".len;"); return; }
     EmitPrefixPatch(nd.pref, nd.ls, nd.stk, cat(nd.hdr, ".len"), cat(nd.hdr, ".base"));
 }
 
-inline void CodeGen::Epilogue(const string &retv) {
+void CodeGen::Epilogue(const string &retv) {
     EmitExitRestores(0);
     MarkFlush();   // The caller and every later callee read stack tops from memory.
     for (auto &s : fdstsaves) L(s);
@@ -945,7 +945,7 @@ inline void CodeGen::Epilogue(const string &retv) {
 // The dummy C return value used on propagate paths. `rfval` names the
 // target to propagate to, or is empty when gs_rf already holds it (an
 // intermediate frame passing on a propagation it did not start).
-inline void CodeGen::PropagateReturn(const string &rfval) {
+void CodeGen::PropagateReturn(const string &rfval) {
     EmitExitRestores(0);
     MarkFlush();
     for (auto &s : fdstsaves) L(s);
@@ -962,7 +962,7 @@ inline void CodeGen::PropagateReturn(const string &rfval) {
 
 // Long-distance return site: values into the target's channels, then
 // propagate the discriminant.
-inline void CodeGen::GenFromReturn(Return *r) {
+void CodeGen::GenFromReturn(Return *r) {
     auto t = r->targetspec;
     assert(t);
     auto tid = fromids[t];
@@ -1002,7 +1002,7 @@ inline void CodeGen::GenFromReturn(Return *r) {
     PropagateReturn(cat(tid));
 }
 
-inline void CodeGen::EnsureFromChannels(FnSpec *t) {
+void CodeGen::EnsureFromChannels(FnSpec *t) {
     if (fromemitted.count(t)) return;
     fromemitted.insert(t);
     auto tid = fromids[t];
@@ -1031,7 +1031,7 @@ inline void CodeGen::EnsureFromChannels(FnSpec *t) {
 // of another kind constructs the static-capacity limited array or slice
 // expected. `want` is the receiver's type where it knows it; the call's
 // checked type otherwise.
-inline string CodeGen::CallVal0(Call *c, const string &r0, TypeExpr *want) {
+string CodeGen::CallVal0(Call *c, const string &r0, TypeExpr *want) {
     auto rt = c->rettypes.empty() ? nullptr : c->rettypes[0];
     auto et = want ? want : c->exprtype;
     // copy(x) yields its value in the context's representation already.
@@ -1068,7 +1068,7 @@ inline string CodeGen::CallVal0(Call *c, const string &r0, TypeExpr *want) {
 // The first return value as a location, in the representation its return
 // type arrives in: a header for a resizable, a base pointer for another
 // bytes-class value, a C value otherwise; a reference is its pointee.
-inline CodeGen::Loc CodeGen::CallResLoc(Call *c, const string &r0) {
+CodeGen::Loc CodeGen::CallResLoc(Call *c, const string &r0) {
     auto rt = c->rettypes[0];
     Loc lv;
     if (IsPlainRef(rt)) {

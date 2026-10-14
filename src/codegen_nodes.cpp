@@ -1,0 +1,21 @@
+// Goose compiler — code generation's calls, builtins, rendering, emission and
+// nodes: one of its two translation units (codegen.cpp).
+// two translation units (typecheck_calls.cpp).
+#include "includes.h"
+#include "utils.h"
+#include "small_vector.h"
+#include "flat_map.h"
+#include "lexer.h"
+#include "ast.h"
+#include "dump.h"
+#include "clone.h"
+#include "builtins.h"
+#include "gfx.h"
+#include "typecheck.h"
+#include "codegen.h"
+#include "codegen_calls.h"
+#include "codegen_builtins.h"
+#include "codegen_render.h"
+#include "codegen_emit.h"
+#include "codegen_stacks.h"
+#include "codegen_nodes.h"

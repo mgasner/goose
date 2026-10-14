@@ -13,29 +13,8 @@
 #include "builtins.h"
 #include "gfx.h"
 #include "typecheck.h"
-#include "typecheck_types.h"
-#include "typecheck_exprs.h"
-#include "typecheck_flow.h"
-#include "typecheck_calls.h"
-#include "typecheck_builtins.h"
-#include "typecheck_nodes.h"
-#include "optimize.h"
-#include "optimize_basecase.h"
-#include "optimize_tre.h"
-#include "optimize_loops.h"
-#include "bce.h"
 #include "codegen.h"
-#include "codegen_types.h"
-#include "codegen_frames.h"
-#include "codegen_values.h"
-#include "codegen_construct.h"
-#include "codegen_stmts.h"
-#include "codegen_calls.h"
-#include "codegen_builtins.h"
-#include "codegen_render.h"
-#include "codegen_emit.h"
-#include "codegen_stacks.h"
-#include "codegen_nodes.h"
+#include "phases.h"
 #include "runtime_inline.h"
 #include "jit.h"
 #include "progress.h"
@@ -902,38 +881,9 @@ int Main(int argc, char **argv) {
         }
         if (parseonly) return 0;
         TypeCheckProgram(ast, library, nocgen);
-        Optimizer opt(ast, optlevel);
-        if (specs) {
-            string s;
-            opt.DumpSpecs(s);
-            fputs(s.c_str(), stdout);
-        }
-        fprintf(msgs, "typechecked ok: %d specialization(s), %d struct/%d enum instance(s); "
-                "optimized -O%d: %d inlined, %d base case(s), %d folded, %d propagated, "
-                "%d tail loop(s)\n",
-                (int)ast.fnspecs.size(), (int)ast.structinsts.size(),
-                (int)ast.enuminsts.size(), optlevel, opt.inlined, opt.basecases,
-                opt.folded, opt.propagated, opt.tailloops);
-        BCE bce(ast);
-        if (!nobce) {
-            bce.RunAll();
-            fprintf(msgs, "bce: elided %d/%d index and %d/%d slice checks\n",
-                    bce.idxelided, bce.idxtotal, bce.slelided, bce.sltotal);
-        }
-        // Per-line outcomes, for comparing two builds of the pass.
-        if (bcelines)
-            for (auto &[where, counts] : bce.lineout)
-                fprintf(msgs, "bce-line: %s:%d: %d elided, %d kept\n",
-                        ast.sources[where.first].first.c_str(), where.second,
-                        counts.first, counts.second);
-        if (bcetest) {
-            auto fails = bce.VerifyAnnotations();
-            if (fails) {
-                fprintf(stderr, "bce-test: %d annotation failure(s)\n", fails);
-                return 1;
-            }
-            fprintf(msgs, "bce-test: all annotations verified\n");
-        }
+        if (auto rc = OptimizeAndCheckBounds(ast, optlevel, specs, nobce, bcelines, bcetest, msgs);
+            rc >= 0)
+            return rc;
         // --stacks needs the generated program's bounds, so --check runs
         // the backend for them and writes nothing.
         if (nocgen && !stacks) return 0;

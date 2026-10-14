@@ -476,7 +476,7 @@ struct TailRecursion {
     }
 };
 
-inline void Optimizer::TailRecurse(FnSpec *sp) {
+void Optimizer::TailRecurse(FnSpec *sp) {
     if (!nc) return;   // Off at -O0, like inlining.
     TailRecursion tre { ast, sp, facts, tailloops };
     tre.Run();

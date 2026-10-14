@@ -56,8 +56,17 @@ specialization parameters alone proves that two arrays cannot alias.
 
 ## 1. Pipeline
 
-`main.cpp` runs the phases in this order; each is one or more headers in a
-single translation unit, included in the order the driver lists them.
+`main.cpp` runs the phases in this order; each is one or more headers. The
+typechecker (`typecheck.cpp`, `typecheck_calls.cpp`), the optimizer with BCE
+(`optimize.cpp`) and code generation (`codegen.cpp`, `codegen_nodes.cpp`) are
+translation units of their own, so that they compile in parallel; the driver
+and the rest are `main.cpp`'s. Each unit includes the shared headers
+(`ast.h`, the `TypeCheck` and `CodeGen` declarations in `typecheck.h` and
+`codegen.h`) and then its own, and defines the members in those exactly once:
+they are not `inline`. Member templates the typechecker's units instantiate
+with lambdas of their own are in `typecheck_templates.h`, which both include.
+The optimizer and BCE are reached through `OptimizeAndCheckBounds`
+(`phases.h`).
 
 | Phase | Where | Consumes | Produces |
 |---|---|---|---|

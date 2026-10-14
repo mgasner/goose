@@ -10,7 +10,7 @@ namespace goose {
 // ------------------------------------------------------------------
 // Lvalue paths: names, fields, elements, optionally through references.
 
-inline TypeCheck::LVal TypeCheck::CheckLValue(Node *n) {
+TypeCheck::LVal TypeCheck::CheckLValue(Node *n) {
     NodeScope ns(*this, n);
     // The value the path denotes, recorded as its Check would (Ident::Check,
     // ContainerRead): what the operands evaluated before a later point of
@@ -105,7 +105,7 @@ inline TypeCheck::LVal TypeCheck::CheckLValue(Node *n) {
 // root means static data; a temporary has a root of its own (TempRoot).
 // `cmpview`: the path is the slice `==` compares an operand as (§4.5),
 // which ends with the comparison, so it may view any temporary.
-inline TypeCheck::LVal TypeCheck::LValueBase(Node *n, bool cmpview) {
+TypeCheck::LVal TypeCheck::LValueBase(Node *n, bool cmpview) {
     if (Is<Ident>(n) || Is<Dot>(n) || Is<Index>(n)) return CheckLValue(n);
     auto v = CheckV(n, nullptr);
     NoUntypedEmptyArray(v, n, "an index, slice or field of it");
@@ -125,7 +125,7 @@ inline TypeCheck::LVal TypeCheck::LValueBase(Node *n, bool cmpview) {
 // value comes into existence only where a construction context builds it
 // (§4.2). A statement temporary would have to hold it for a slice or
 // reference to view, where a fixed one is a plain C temporary.
-inline void TypeCheck::NoTemporaryLiteral(Node *n, TypeExpr *t) {
+void TypeCheck::NoTemporaryLiteral(Node *n, TypeExpr *t) {
     if (!Is<ArrayLit>(n) || ClassOf(t) == SC_FIXED) return;
     Error(n, cat("an array literal of variable-size elements is a ", TypeStr(t),
                  ", built only in a construction context (§4.2), never as a temporary "
@@ -135,7 +135,7 @@ inline void TypeCheck::NoTemporaryLiteral(Node *n, TypeExpr *t) {
 // Crossing a reference in a path (auto-deref, §3.8): the storage owner
 // becomes the reference's root, writability its provenance, and the rest of
 // the path lies in its pointee (Prov::reached).
-inline void TypeCheck::DerefLValue(LVal &lv, Node *at) {
+void TypeCheck::DerefLValue(LVal &lv, Node *at) {
     if (lv.type->kind != TY_REF) return;
     if (lv.type->ref->optional)
         Error(at, "optional value must be narrowed (if/guard/assert) before use");
@@ -166,7 +166,7 @@ inline void TypeCheck::DerefLValue(LVal &lv, Node *at) {
 
 // A global is unassigned until the driver reaches its declaration, which
 // is when its initializer runs (§11.1).
-inline void TypeCheck::RequireAssigned(VarDef *vd, Node *at) {
+void TypeCheck::RequireAssigned(VarDef *vd, Node *at) {
     if (vd->assigned) return;
     auto order = vd->isglobal
                      ? cat(": globals initialize in declaration order, imported files first "
@@ -179,7 +179,7 @@ inline void TypeCheck::RequireAssigned(VarDef *vd, Node *at) {
 // Accessing through a slice variable: writes and roots follow the slice
 // value's provenance, not the variable's own var-ness. What is indexed or
 // sliced lies in the elements it views (Prov::reached).
-inline void TypeCheck::SliceProvenance(LVal &lv, Node *at) {
+void TypeCheck::SliceProvenance(LVal &lv, Node *at) {
     if (lv.type->kind != TY_SLICE) return;
     if (!lv.var) {
         if (lv.fromstorage) ReadBackLVal(lv);
@@ -197,7 +197,7 @@ inline void TypeCheck::SliceProvenance(LVal &lv, Node *at) {
 // of it is a read-back, so its root is re-derived (§9.5). Out of a field or
 // an element it is as writable as the slot says (SlotLoadWritable); a slice
 // loaded through a reference is no more writable than the reference.
-inline void TypeCheck::ReadBackLVal(LVal &lv) {
+void TypeCheck::ReadBackLVal(LVal &lv) {
     if (!IsRefOrSlice(lv.type)) return;
     // A byte view can point at any typed storage. Its owner cannot be
     // recovered by enumerating u8 containers. Global slots may have been
@@ -229,14 +229,14 @@ inline void TypeCheck::ReadBackLVal(LVal &lv) {
 // in a `const` slot, and `const` is shallow. But a self-relative reference
 // points within the value or array its slot lies in (§3.9), which is no more
 // writable through it than along the path.
-inline bool TypeCheck::SlotLoadWritable(TypeExpr *t, bool path) {
+bool TypeCheck::SlotLoadWritable(TypeExpr *t, bool path) {
     auto selfrel = t->kind == TY_REF && t->ref->lenstorage >= 0 && !t->ref->pool;
     return !t->cq && (path || !selfrel);
 }
 
 // The value a field or element location yields: the load, which for a
 // reference or slice is a read-back (ReadBackLVal).
-inline Val TypeCheck::ContainerRead(LVal lv) {
+Val TypeCheck::ContainerRead(LVal lv) {
     Val v;
     if (lv.type->kind == TY_SLICE) {
         v.slot = lv;
@@ -276,85 +276,7 @@ inline Val TypeCheck::ContainerRead(LVal lv) {
     return v;
 }
 
-// The operands of n, in evaluation order (§2), each with how n consumes it
-// once its later operands have run. A call consumes its receiver and
-// arguments at the call; print, str and format render each argument just
-// before the next runs (EmitFormatInto, EmitStr), so an earlier argument is
-// nothing afterwards, and only the one being rendered is held (HeldOperands).
-// A condition and a scrutinee are read before the construct's parts run, so
-// they hold nothing over them: a match binder is a variable in scope, which
-// the scans see. A `for` walks its sequence in place, so that is held while
-// the body runs (HoldForSequence).
-template<typename F> void TypeCheck::ForOperands(Node *n, F f) {
-    if (auto c = Is<Call>(n)) {
-        auto builtin = c->builtin >= 0;
-        auto member = builtin && (BuiltinByKind(c->builtin).flags & BF_MEMBER);
-        auto render = builtin && (c->builtin == B_PRINT || c->builtin == B_STR ||
-                                  c->builtin == B_FORMAT);
-        auto first = true;
-        auto kind = [&]() {
-            auto k = member && first ? HK_RECEIVER : render ? HK_NONE : HK_VALUE;
-            first = false;
-            return k;
-        };
-        if (auto d = Is<Dot>(c->callee)) f(d->obj, kind());
-        for (auto a : c->args) f(a, kind());
-        return;
-    }
-    if (auto ix = Is<Index>(n)) {
-        f(ix->obj, HK_ELEMS);
-        f(ix->idx, HK_VALUE);
-        return;
-    }
-    if (auto se = Is<SliceExpr>(n)) {
-        f(se->obj, HK_ELEMS);
-        if (se->lo) f(se->lo, HK_VALUE);
-        if (se->hi) f(se->hi, HK_VALUE);
-        return;
-    }
-    if (auto b = Is<Binary>(n)) {
-        f(b->left, HK_VIEW);
-        f(b->right, HK_VALUE);
-        return;
-    }
-    if (auto a = Is<Assign>(n)) {
-        f(a->lval, HK_LOCATION);
-        f(a->rhs, HK_VALUE);
-        return;
-    }
-    if (auto al = Is<ArrayLit>(n)) {
-        for (auto e : al->elems) f(e, HK_VALUE);
-        if (al->fillval) f(al->fillval, HK_VALUE);
-        if (al->fillcount) f(al->fillcount, HK_VALUE);
-        if (al->capexpr) f(al->capexpr, HK_VALUE);
-        return;
-    }
-    if (auto sl = Is<StructLit>(n)) {
-        for (auto &fi : sl->inits) f(fi.val, HK_VALUE);
-        return;
-    }
-    if (auto r = Is<Return>(n)) {
-        for (auto v : r->vals) f(v, HK_VALUE);
-        return;
-    }
-    if (auto vd = Is<VarDecl>(n)) {
-        for (auto i : vd->inits) f(i, HK_VALUE);
-        return;
-    }
-    if (Is<Unary>(n) || Is<AsCast>(n) || Is<Dot>(n) || Is<IncDec>(n) || Is<Break>(n)) {
-        n->Children([&](Node *ch) { f(ch, HK_VALUE); });
-        return;
-    }
-    // A range's bounds, like a count, are read once, before the first
-    // iteration: they hold nothing.
-    if (auto fl = Is<ForLoop>(n)) {
-        if (!Is<RangeExpr>(fl->iter)) f(fl->iter, HK_SEQUENCE);
-        return;
-    }
-    // Conditions, scrutinees, blocks and bodies: nothing held.
-}
-
-inline int TypeCheck::OperandIndex(Node *parent, Node *child) {
+int TypeCheck::OperandIndex(Node *parent, Node *child) {
     auto idx = -1, i = 0;
     ForOperands(parent, [&](Node *ch, HoldKind) {
         if (ch == child) idx = i;
@@ -366,7 +288,7 @@ inline int TypeCheck::OperandIndex(Node *parent, Node *child) {
 // Enters n, the operand its parent is at, or a node checked on its own (a
 // statement, a path the checker walks itself); the same node entered again
 // on the way, as a path is by its node's Check, stays one entry.
-inline bool TypeCheck::Descend(Node *n) {
+bool TypeCheck::Descend(Node *n) {
     if (!cur.nodepath.empty() && cur.nodepath.back().node == n) return false;
     auto idx = cur.nodepath.empty() ? -1 : OperandIndex(cur.nodepath.back().node, n);
     if (idx >= 0) cur.nodepath.back().pos = idx;
@@ -377,230 +299,19 @@ inline bool TypeCheck::Descend(Node *n) {
 // Leaves the innermost node: as an operand it has been evaluated, so its
 // parent stands past it. An error's unwinding leaves a path a body's check
 // replaced (CheckSpecBody) as it is.
-inline void TypeCheck::Ascend(Node *n) {
+void TypeCheck::Ascend(Node *n) {
     if (cur.nodepath.empty() || cur.nodepath.back().node != n) return;
     auto e = cur.nodepath.back();
     cur.nodepath.pop_back();
     if (e.idx >= 0 && !cur.nodepath.empty()) cur.nodepath.back().pos = e.idx + 1;
 }
 
-// What the operand n of `parent`, whose value is v, holds live: its value
-// where it is a reference or slice; an array's elements where the parent
-// views them (HK_VIEW), or indexes or slices them (HK_ELEMS, the elements the
-// path leads to, a temporary's exactly); the references a holder holds,
-// each as a reference to its pointee; a builtin's receiver as a reference
-// to the array it is, or its elements where the builtin reads them
-// (to_bytes, a slice); an assignment's location as recorded (CheckAssign).
-template<typename F>
-void TypeCheck::HoldAs(Node *n, const Val &v, HoldKind kind, Node *parent, const char *render,
-                       F f) {
-    if (!v.type || kind == HK_NONE) return;
-    auto t = v.type;
-    auto hold = [&](Val hv, bool location = false, bool elems = false) {
-        f(Held { n, std::move(hv), location, render, elems });
-    };
-    switch (kind) {
-        case HK_LOCATION:
-            hold(v, true);
-            return;
-        case HK_ELEMS: {
-            auto d = IsPlainRef(t) ? DecayRef(v) : v;
-            TypeExpr *elem = d.type->kind == TY_ARRAY ? d.type->arr->sub
-                             : d.type->kind == TY_SLICE ? d.type->sub : nullptr;
-            if (!elem) return;
-            if (IsTemp(d.Root())) d.Set(d.Root(), true);
-            d.type = ast.SliceOf(elem, n->line);
-            hold(d, false, true);
-            return;
-        }
-        case HK_RECEIVER: {
-            auto c = (Call *)parent;
-            auto rt = IsPlainRef(t) ? t->ref->sub : t;
-            TypeExpr *elem = rt->kind == TY_ARRAY ? rt->arr->sub
-                             : rt->kind == TY_SLICE ? rt->sub : nullptr;
-            auto held = v;
-            auto elems = c->builtin == B_TO_BYTES || rt->kind == TY_SLICE;
-            if (elems) {
-                if (!elem) return;
-                held.type = ast.SliceOf(elem, n->line);
-            } else if (held.type->kind != TY_REF) {
-                held.type = ast.RefTo(rt, n->line);
-            }
-            if (IsTemp(held.Root()) && t->kind != TY_REF && t->kind != TY_SLICE)
-                held.Set(held.Root(), true);
-            hold(held, false, elems);
-            return;
-        }
-        case HK_SEQUENCE:
-            HoldForSequence((ForLoop *)parent, v, f);
-            return;
-        default: break;
-    }
-    // HK_VALUE and HK_VIEW: values constructed in argument, literal and
-    // result slots own their copies; references, slices and reference fields
-    // still retain borrows, and an array operand viewed as a sequence its
-    // elements until the operation ends.
-    if (IsRefOrSlice(t)) {
-        hold(v);
-        return;
-    }
-    if (kind == HK_VIEW && t->kind == TY_ARRAY && ClassOf(t) != SC_FIXED) {
-        auto view = v;
-        view.type = ast.SliceOf(t->arr->sub, n->line);
-        hold(view, false, true);
-    }
-    if (HoldsPlainRef(t)) {
-        vector<TypeExpr *> pointees;
-        RefPointees(t, pointees);
-        auto held = v;
-        held.TakeAlts(ContentsOf(v));
-        for (auto pt : pointees) {
-            held.type = ast.RefTo(pt, n->line);
-            hold(held);
-        }
-    }
-}
-
-// What a `for` over an array or slice, whose sequence has the value v, reads
-// on every iteration while its body runs (§6.5). Codegen spells the path to
-// the sequence into the loop (ForLoop::CgStmt, GenLoc): each reference or
-// slice the path loads out of a field or element is loaded again, from where
-// it lies, and the sequence is walked in place, as a view of its elements --
-// unless it is a variable, which the loop names and the scans see, or a
-// resizable array, whose length the loop reads again and whose elements
-// never move. A reference to a slice is held as it is: the slice it refers
-// to is read again too (HeldRefsMayPointInto).
-template<typename F> void TypeCheck::HoldForSequence(ForLoop *fl, const Val &v, F f) {
-    if (fl->iterkind != IK_ARRAY && fl->iterkind != IK_SLICE) return;
-    auto hold = [&](Node *n, Val hv, bool reread) {
-        // A temporary is storage of its own, which nothing names to shrink.
-        for (auto &a : hv.alts)
-            if (IsTemp(a.root)) a.exact = true;
-        f(Held { .node = n, .v = std::move(hv), .loop = fl, .reread = reread });
-    };
-    // `&` of a path is that path.
-    auto unwrap = [](Node *n) {
-        auto u = Is<Unary>(n);
-        if (u && u->op == T_BITAND && (Is<Ident>(u->child) || Is<Dot>(u->child) ||
-                                       Is<Index>(u->child)) &&
-            u->child->exprtype && u->child->exprtype->kind != TY_REF)
-            return u->child;
-        return n;
-    };
-    auto path = unwrap(fl->iter);
-    if (!Is<Ident>(path)) {
-        auto seq = v;
-        if (IsPlainRef(seq.type) && seq.type->ref->sub->kind != TY_SLICE) seq = DecayRef(seq);
-        auto st = seq.type;
-        if (st->kind != TY_ARRAY) {
-            hold(fl->iter, seq, false);
-        } else if (ClassOf(st) != SC_RESIZABLE) {
-            seq.type = ast.SliceOf(st->arr->sub, fl->iter->line);
-            hold(fl->iter, seq, false);
-        }
-    }
-    for (auto n = path;;) {
-        Node *obj;
-        if (auto d = Is<Dot>(n); d && !d->variantconst) obj = d->obj;
-        else if (auto ix = Is<Index>(n)) obj = ix->obj;
-        else break;
-        // The slot lies in what obj is, or leads to.
-        auto ov = nodevals.find(obj);
-        if (n->exprtype && IsRefOrSlice(n->exprtype) && ov) {
-            auto slot = DecayRef(*ov);
-            slot.byteview = false;
-            slot.type = ast.SliceOf(LoadType(n->exprtype), n->line);
-            hold(n, slot, true);
-        }
-        n = unwrap(obj);
-    }
-}
-
-// Every value evaluated before the point being checked that is still live:
-// the operands each node on the path has evaluated so far (its parent
-// consumes them after this point), as their parents hold them. A call at
-// the point itself, applying its callee's effects, has consumed its own
-// operands: what the callee does to them its parameters' pairs judge
-// (§5.1, NoteLiveViews). The exception is the argument print, str or format
-// is rendering (`cur.renderarg`): its views, where a struct, enum or array
-// argument lies (`cur.renderwhere`), and the parts the rendering is walking
-// in place (`cur.renderwalks`), which an overload of a part runs in the
-// middle of rendering.
-template<typename F> void TypeCheck::HeldOperands(F f) {
-    for (auto &e : cur.nodepath) {
-        auto own = e.discovering || (&e == &cur.nodepath.back() && Is<Call>(e.node));
-        auto i = 0;
-        ForOperands(e.node, [&](Node *ch, HoldKind kind) {
-            auto at = i++;
-            if (at >= e.pos) return;
-            auto cv = nodevals.find(ch);
-            if (!cv) return;
-            if (ch == cur.renderarg && cur.rendering) {
-                HoldAs(ch, *cv, HK_VIEW, e.node, cur.rendering, f);
-                if (ch == cur.renderwhere) {
-                    auto where = *cv;
-                    where.type = ast.RefTo(where.type, ch->line);
-                    f(Held { ch, std::move(where), false, cur.rendering });
-                }
-                for (auto &w : cur.renderwalks) {
-                    auto walked = w;
-                    walked.type = ast.RefTo(w.type, ch->line);
-                    f(Held { .node = ch, .v = std::move(walked), .render = cur.rendering,
-                             .inplace = true });
-                }
-                return;
-            }
-            if (own) return;
-            HoldAs(ch, *cv, kind, e.node, nullptr, f);
-        });
-    }
-}
-
-// Every part of the statement that runs after the point being checked: the
-// operands each node on the path has not evaluated yet, the one being
-// checked excluded, and where the point is in the head of a construct, the
-// parts the head decides between. Each comes with the frame it is checked in.
-template<typename F> void TypeCheck::LaterOperands(F f) {
-    for (size_t k = 0; k < cur.nodepath.size(); k++) {
-        auto &e = cur.nodepath[k];
-        auto last = k + 1 == cur.nodepath.size();
-        auto i = 0;
-        ForOperands(e.node, [&](Node *ch, HoldKind) {
-            auto at = i++;
-            if (at > e.pos || (last && at == e.pos)) f(ch, e.frame);
-        });
-        if (!last) AfterHead(e.node, cur.nodepath[k + 1].node, [&](Node *p) { f(p, e.frame); });
-    }
-}
-
-// What construct n runs after its head -- an if's condition, a match's
-// scrutinee, a for's sequence, a while's condition -- where `next` is the
-// node being checked inside it: while that is the head, every part the head
-// leads to; while it is one of those parts, nothing more of n, since the
-// other branches do not run.
-template<typename F> void TypeCheck::AfterHead(Node *n, Node *next, F f) {
-    if (auto fi = Is<IfExpr>(n)) {
-        if (next != fi->cond) return;
-        f(fi->thenb);
-        if (fi->elseb) f(fi->elseb);
-    } else if (auto m = Is<MatchExpr>(n)) {
-        if (next != m->scrutinee) return;
-        for (auto &arm : m->arms) f(arm.body);
-    } else if (auto fl = Is<ForLoop>(n)) {
-        auto r = Is<RangeExpr>(fl->iter);
-        if (r && next == r->lo) f(r->hi);
-        if (next == fl->iter || (r && (next == r->lo || next == r->hi))) f(fl->body);
-    } else if (auto w = Is<While>(n)) {
-        if (next == w->cond) f(w->body);
-    }
-}
-
 // The root bounding the references inside a holder value: what was
 // derived for it, else the value's own root (a temporary's outlives nothing).
-inline VarDef *TypeCheck::HolderRootOf(const Val &v) { return ContentsOf(v).Root(); }
+VarDef *TypeCheck::HolderRootOf(const Val &v) { return ContentsOf(v).Root(); }
 
 // Field / builtin-property resolution on an lvalue path.
-inline void TypeCheck::ResolveMemberLValue(LVal &lv, Dot *d) {
+void TypeCheck::ResolveMemberLValue(LVal &lv, Dot *d) {
     auto t = lv.type;
     // Steps the path into the named field of a field run; a frame
     // object's resizable tail has a header of its own to address (C.2).
@@ -643,7 +354,7 @@ inline void TypeCheck::ResolveMemberLValue(LVal &lv, Dot *d) {
 
 // References are transparent: load the pointee unless the destination
 // wants the reference itself. Optionals never decay (narrow first).
-inline Val TypeCheck::DecayRef(const Val &v) {
+Val TypeCheck::DecayRef(const Val &v) {
     if (!IsPlainRef(v.type)) return v;
     Val r;
     r.type = LoadType(v.type->ref->sub);
@@ -685,7 +396,7 @@ inline Val TypeCheck::DecayRef(const Val &v) {
 }
 
 // Does dt consume a reference value as-is (so no decay before fitting)?
-inline bool TypeCheck::KeepsRef(const Val &v, TypeExpr *dt) {
+bool TypeCheck::KeepsRef(const Val &v, TypeExpr *dt) {
     if (!IsPlainRef(v.type)) return true;  // Nothing to decay.
     if (dt->kind == TY_REF) return true;   // Binding (plain/optional/relative).
     // A whole (pointee) array meeting a slice of its element type (§3.10).
@@ -698,7 +409,7 @@ inline bool TypeCheck::KeepsRef(const Val &v, TypeExpr *dt) {
 // sees an ordinary reference argument. `writes`: something may write
 // through the reference, which is not so of an identity comparison's,
 // index_of's, or one bound to a `const T&`.
-inline Node *TypeCheck::AutoRef(Node *n, Val &v, bool writes) {
+Node *TypeCheck::AutoRef(Node *n, Val &v, bool writes) {
     if (!Referenceable(n, v)) NoResizableRef(n);
     if (auto id = Is<Ident>(n); id && id->vdef && writes && v.writable)
         NoteWritableRef(id->vdef, n);
@@ -719,7 +430,7 @@ inline Node *TypeCheck::AutoRef(Node *n, Val &v, bool writes) {
 // `const T&` (§9.5). A field's or an element's slice is writable unless its
 // type says `const`, which a load through the reference sees (SlotView), so
 // there the path alone says.
-inline void TypeCheck::SlotRoots(Val &v) {
+void TypeCheck::SlotRoots(Val &v) {
     if (!v.hasslot || v.type->kind != TY_SLICE) return;
     v.held = v;
     v.hasheld = true;
@@ -734,28 +445,28 @@ inline void TypeCheck::SlotRoots(Val &v) {
 // does (Val::storagebranches), which a reference to it points at: its
 // value's, but for varint storage, whose value is the i64 it decodes to
 // (§3.6).
-inline TypeExpr *TypeCheck::StorageType(const Val &v) {
+TypeExpr *TypeCheck::StorageType(const Val &v) {
     return (v.lvalue || v.storagebranches) && v.isvarint ? ast.inttypes[IS_VARINT] : v.type;
 }
 
-inline bool TypeCheck::BindsRef(const Val &v, TypeExpr *dt) {
+bool TypeCheck::BindsRef(const Val &v, TypeExpr *dt) {
     return dt->kind == TY_REF && v.lvalue && v.type->kind != TY_REF && !v.isnull &&
            TypeEq(StorageType(v), dt->ref->sub);
 }
 
-inline bool TypeCheck::IsNonFixedLValue(const Val &v) {
+bool TypeCheck::IsNonFixedLValue(const Val &v) {
     return v.lvalue && !IsRefOrSlice(v.type) && ClassOf(v.type) != SC_FIXED;
 }
 
 // A reference to a non-fixed value denotes a non-fixed lvalue (§3.8). A
 // varint pointee loads as the i64 it decodes to, a fixed-size value.
-inline bool TypeCheck::IsNonFixedRef(const Val &v) {
+bool TypeCheck::IsNonFixedRef(const Val &v) {
     return IsPlainRef(v.type) && ClassOf(LoadType(v.type->ref->sub)) != SC_FIXED;
 }
 
 // Whether a resizable-valued path has a header of its own to reference
 // (C.2): a variable, or the tail of a frame object.
-inline bool TypeCheck::Referenceable(Node *n, const Val &v) {
+bool TypeCheck::Referenceable(Node *n, const Val &v) {
     if (ClassOf(v.type) != SC_RESIZABLE) return true;
     if (Is<Ident>(n)) return true;
     auto d = Is<Dot>(n);
@@ -766,7 +477,7 @@ inline bool TypeCheck::Referenceable(Node *n, const Val &v) {
 // variable, a reference's pointee, a temporary, or the tail of a frame
 // object held so in turn. As the tail of a value that is not a frame object
 // it is bytes of that value, and its own tail has no header either.
-inline bool TypeCheck::FieldsInFrame(Dot *d) {
+bool TypeCheck::FieldsInFrame(Dot *d) {
     auto ot = d->obj->exprtype;
     if (!ot) return false;
     auto pointee = ot->kind == TY_REF;
@@ -783,7 +494,7 @@ inline bool TypeCheck::FieldsInFrame(Dot *d) {
               "or an ADT payload; reference the owning variable instead");
 }
 
-inline bool TypeCheck::UserRefOf(Node *n) {
+bool TypeCheck::UserRefOf(Node *n) {
     auto u = Is<Unary>(n);
     return u && u->op == T_BITAND && !u->synth;
 }
@@ -792,7 +503,7 @@ inline bool TypeCheck::UserRefOf(Node *n) {
 // explicit copy (§4.1): an lvalue, or a reference to one, is never copied
 // implicitly. A function's own local is moved by `return`, or as its body's
 // final expression.
-inline bool TypeCheck::ImplicitCopy(const Val &v, Node *n, TypeExpr *dt) {
+bool TypeCheck::ImplicitCopy(const Val &v, Node *n, TypeExpr *dt) {
     if (!reachable) return false;
     if (IsRefOrSlice(dt) || dt->kind == TY_VOID) return false;
     if (ClassOf(dt) == SC_FIXED) return false;
@@ -804,7 +515,7 @@ inline bool TypeCheck::ImplicitCopy(const Val &v, Node *n, TypeExpr *dt) {
     return true;
 }
 
-inline void TypeCheck::ImplicitCopyError(Node *n) {
+void TypeCheck::ImplicitCopyError(Node *n) {
     auto u = Is<Unary>(n);
     auto what = ExprStr(u && u->op == T_BITAND ? u->child : n);
     Error(n, cat(what, " is not fixed-size and is not copied implicitly (§4.1): pass copy(",
@@ -812,7 +523,7 @@ inline void TypeCheck::ImplicitCopyError(Node *n) {
 }
 
 // A branch `&x` of a fixed-size x whose construct copies it (§4.1).
-inline void TypeCheck::RefCopyWarning(Node *n) {
+void TypeCheck::RefCopyWarning(Node *n) {
     auto what = ExprStr(Is<Unary>(n)->child);
     Warn(n, cat("redundant &: the construct's value is a copy of ", what, " either way (§4.1); "
                 "a reference-typed binding binds ", what, " without it"));
@@ -826,7 +537,7 @@ inline void TypeCheck::RefCopyWarning(Node *n) {
 // a reference, and on a construct's first check of its branches (joinpath)
 // they may yet join as a slice; `out`, the value the branch gives its
 // construct, notes both for that argument or construct.
-inline void TypeCheck::CheckBranchCopy(const Val &v, Node *n, TypeExpr *dt, Val &out) {
+void TypeCheck::CheckBranchCopy(const Val &v, Node *n, TypeExpr *dt, Val &out) {
     out.storagebranches = v.storagebranches || (v.lvalue && Referenceable(n, v)) ||
                           IsPlainRef(v.type);
     out.implicitcopy = v.implicitcopy;
@@ -837,7 +548,7 @@ inline void TypeCheck::CheckBranchCopy(const Val &v, Node *n, TypeExpr *dt, Val 
 }
 
 // A local of the function being checked, which its return moves (§4.1).
-inline bool TypeCheck::IsOwnLocal(Node *n) {
+bool TypeCheck::IsOwnLocal(Node *n) {
     auto id = Is<Ident>(n);
     return id && id->vdef && !id->vdef->isglobal && id->vdef->ownerspec == frames.back().spec;
 }
@@ -849,7 +560,7 @@ inline bool TypeCheck::IsOwnLocal(Node *n) {
 // function's own local, which the return moves. Storage that does not
 // outlive the function cannot be returned by reference, and a non-fixed
 // value in it is not copied implicitly either.
-inline Val TypeCheck::CheckInferredResult(Node *&n, FnSpec *tspec) {
+Val TypeCheck::CheckInferredResult(Node *&n, FnSpec *tspec) {
     if (auto u = Is<Unary>(n); UserRefOf(n)) {
         auto v = CheckV(n, nullptr);
         n->exprtype = v.type;
@@ -882,7 +593,7 @@ inline Val TypeCheck::CheckInferredResult(Node *&n, FnSpec *tspec) {
 
 // The whole of array-valued n as a slice: `n[..]`, synthesized for an
 // equality between array kinds (§4.5).
-inline Node *TypeCheck::WholeSlice(Node *n) {
+Node *TypeCheck::WholeSlice(Node *n) {
     auto se = ast.New<SliceExpr>(n->line, n);
     se->cmpview = true;
     return se;
@@ -896,7 +607,7 @@ inline Node *TypeCheck::WholeSlice(Node *n) {
 // pointee (§3.8, §4.1). `branchcopy`: n is a branch's value whose construct
 // has no destination type, which copies it (CheckBranchCopy), and `expected`
 // at most the type an earlier break gave the construct.
-inline Val TypeCheck::CheckValue(Node *&n, TypeExpr *expected, bool callsite, bool branchcopy,
+Val TypeCheck::CheckValue(Node *&n, TypeExpr *expected, bool callsite, bool branchcopy,
                                  bool inferred) {
     auto orig = n;
     auto v = CheckV(n, expected);
@@ -945,19 +656,19 @@ inline Val TypeCheck::CheckValue(Node *&n, TypeExpr *expected, bool callsite, bo
 }
 
 // The same, with `d` as the destination the value constructs into.
-inline Val TypeCheck::CheckValueAt(Node *&n, TypeExpr *expected, Dest d, bool callsite) {
+Val TypeCheck::CheckValueAt(Node *&n, TypeExpr *expected, Dest d, bool callsite) {
     DestScope ds(*this, d);
     return CheckValue(n, expected, callsite);
 }
 
 // An operand of an operator: always the pointee.
-inline Val TypeCheck::Operand(Node *n) {
+Val TypeCheck::Operand(Node *n) {
     auto v = DecayRef(CheckV(n, nullptr));
     n->exprtype = v.type;
     return v;
 }
 
-inline void TypeCheck::MustFit(Val &v, Node *n, TypeExpr *dt) {
+void TypeCheck::MustFit(Val &v, Node *n, TypeExpr *dt) {
     auto vt = DecayedType(v);
     if (vt->kind == TY_ARRAY && vt->arr->akind == A_FIXED)
         CheckArrayCount(n, dt, ArraySize(vt->arr));
@@ -1000,7 +711,7 @@ inline void TypeCheck::MustFit(Val &v, Node *n, TypeExpr *dt) {
 // owned by curdst must be rooted at least as shallow (call-site argument
 // slots pass curdst null: parameters always die before their arguments'
 // roots).
-inline bool TypeCheck::FitsAt(Val &v, TypeExpr *dt) {
+bool TypeCheck::FitsAt(Val &v, TypeExpr *dt) {
     auto t = v.type;
     // An lvalue at a reference destination is the reference to it (§4.1),
     // a `const T&` where the lvalue is read-only (§9.5).
@@ -1308,14 +1019,14 @@ inline bool TypeCheck::FitsAt(Val &v, TypeExpr *dt) {
     }
 }
 
-inline string TypeCheck::ConstStr(const Val &v) {
+string TypeCheck::ConstStr(const Val &v) {
     return v.uns ? cat((uint64_t)v.ival) : cat(v.ival);
 }
 
 // Conditions: bool, or an optional (§3.8 truthiness + narrowing). Plain
 // references decay (a bool& condition reads its pointee); an already
 // narrowed optional stays a valid (trivially true) test.
-inline Val TypeCheck::CheckCond(Node *n) {
+Val TypeCheck::CheckCond(Node *n) {
     FlagScope rs(inreturn, false);
     auto v = CheckV(n, nullptr);
     auto id = Is<Ident>(n);
@@ -1330,7 +1041,7 @@ inline Val TypeCheck::CheckCond(Node *n) {
 // Unifies two branch values (literal/f32/root adaptations); null = branch
 // diverged (bottom). Errors when both produce values of unrelated types
 // and a value is wanted.
-inline TypeExpr *TypeCheck::UnifyBranch(TypeExpr *a, TypeExpr *b, Node *at, bool wantvalue) {
+TypeExpr *TypeCheck::UnifyBranch(TypeExpr *a, TypeExpr *b, Node *at, bool wantvalue) {
     if (!a) return b;
     if (!b) return a;
     if (TypeEq(a, b)) return a;
@@ -1347,7 +1058,7 @@ inline TypeExpr *TypeCheck::UnifyBranch(TypeExpr *a, TypeExpr *b, Node *at, bool
     Error(at, cat("branches have mismatched types: ", TypeStr(a), " vs ", TypeStr(b)));
 }
 
-inline Val TypeCheck::VoidVal() {
+Val TypeCheck::VoidVal() {
     Val v;
     v.type = ast.voidtype;
     return v;
@@ -1356,7 +1067,7 @@ inline Val TypeCheck::VoidVal() {
 // &lvalue: reference creation (§3.8) with its restrictions. On a location
 // that itself holds a reference (a reference variable or field), yields
 // the stored reference — there are no references to references.
-inline Val TypeCheck::CheckRefOf(Unary *x) {
+Val TypeCheck::CheckRefOf(Unary *x) {
     auto lv = CheckLValue(x->child);
     if (lv.var) RequireAssigned(lv.var, x);
     // A resizable value has a header of its own only as a whole variable or
@@ -1399,7 +1110,7 @@ inline Val TypeCheck::CheckRefOf(Unary *x) {
 // function checked only once can get past them, and whichever comes second
 // is an error (but for a resize, which is merely unbalanced after the
 // reference).
-inline void TypeCheck::NoteWritableRef(VarDef *d, Node *at) {
+void TypeCheck::NoteWritableRef(VarDef *d, Node *at) {
     if (!d->refwrite) d->refwrite = at;
     if (d->nonneguse)
         Error(at, cat(d->name, " is bound to a writable reference here, through which it may "
@@ -1431,7 +1142,7 @@ inline void TypeCheck::NoteWritableRef(VarDef *d, Node *at) {
 // and so on the `let`s it was read from keeping their initializers'
 // values. Returns one bound to a writable reference (NoteWritableRef),
 // which may not have.
-inline VarDef *TypeCheck::RelyOnNonneg(const Val &v, Node *at) {
+VarDef *TypeCheck::RelyOnNonneg(const Val &v, Node *at) {
     for (auto d = v.nonnegfrom; d; d = d->nonnegfrom) {
         if (d->refwrite) return d;
         if (!d->nonneguse) d->nonneguse = at;
@@ -1444,7 +1155,7 @@ inline VarDef *TypeCheck::RelyOnNonneg(const Val &v, Node *at) {
 // of the one it names, so relies on d keeping that value, which a writable
 // reference to d could change (§4.4). As with a comparison relying on a
 // `let` (RelyOnNonneg), whichever comes second is an error.
-inline void TypeCheck::RelyOnConstant(ConstUse &use, VarDef *d) {
+void TypeCheck::RelyOnConstant(ConstUse &use, VarDef *d) {
     if (d->refwrite)
         Error(use.at, cat("the ", use.what, " relies on ", use.named->name,
                           " keeping its initializer's value",
@@ -1462,7 +1173,7 @@ inline void TypeCheck::RelyOnConstant(ConstUse &use, VarDef *d) {
 // a type other than its own, as a literal would (§3.1): that relies on the
 // named constants it was computed from keeping their initializers' values.
 // A trial relies on nothing.
-inline void TypeCheck::RelyOnNamed(const Val &v, Node *at) {
+void TypeCheck::RelyOnNamed(const Val &v, Node *at) {
     if (unifytrial || !v.constfrom) return;
     ConstUse use { at, "use as a literal", v.constfrom };
     for (auto d = v.constfrom; d; d = d->constfrom) RelyOnConstant(use, d);
@@ -1470,7 +1181,7 @@ inline void TypeCheck::RelyOnNamed(const Val &v, Node *at) {
 
 // Whether d's type fixes its length (`cap`: its capacity), which no
 // assignment or reference can then change (§3.3). Not before d is checked.
-inline bool TypeCheck::TypeFixesExtent(VarDef *d, bool cap) {
+bool TypeCheck::TypeFixesExtent(VarDef *d, bool cap) {
     auto t = d->type;
     if (!t || t->kind != TY_ARRAY) return false;
     return cap ? t->arr->akind == A_LIMITED && t->arr->sizeexpr : t->arr->akind == A_FIXED;
@@ -1488,7 +1199,7 @@ inline bool TypeCheck::TypeFixesExtent(VarDef *d, bool cap) {
 // initializer runs being an error (§11.1), but the use can, while d's type
 // is unknown: a `var`'s declaration checks it then (CheckVarExtent), and a
 // writable reference to a `let` afterwards.
-inline void TypeCheck::RelyOnExtent(ConstUse &use, VarDef *d, bool cap) {
+void TypeCheck::RelyOnExtent(ConstUse &use, VarDef *d, bool cap) {
     if (TypeFixesExtent(d, cap)) return;
     auto what = cap ? "capacity" : "length";
     auto rests = d != use.named ? cat(", which rests on ", d->name, "'s") : string();
@@ -1515,7 +1226,7 @@ inline void TypeCheck::RelyOnExtent(ConstUse &use, VarDef *d, bool cap) {
 // The var global d's declaration, at `at`, has given it its type, after a
 // size took the `.len` or `.cap` its initializer gives (RelyOnExtent), which
 // the type must fix, since an assignment may give d another.
-inline void TypeCheck::CheckVarExtent(VarDef *d, Node *at) {
+void TypeCheck::CheckVarExtent(VarDef *d, Node *at) {
     if (!d->isvar || !d->extentuse || TypeFixesExtent(d, d->extentcap)) return;
     auto what = d->extentcap ? "capacity" : "length";
     Error(at, cat(d->name, " is a var of type ", TypeStr(d->type), ", which does not fix its ",
@@ -1529,7 +1240,7 @@ inline void TypeCheck::CheckVarExtent(VarDef *d, Node *at) {
 // out.type (the unify rules ensured it). A zero divisor aborts at run time,
 // which a constant expression need not wait for; one a named constant gives
 // is left to run time, as a division naming it is in a `for` count (§6.5).
-inline void TypeCheck::FoldInt(TType op, Val &l, Val &r, Val &out, Node *at) {
+void TypeCheck::FoldInt(TType op, Val &l, Val &r, Val &out, Node *at) {
     if (l.ck != CK_INT || r.ck != CK_INT) return;
     auto s = out.type->intstorage;
     if (s == IS_VARINT) return;
@@ -1553,7 +1264,7 @@ inline void TypeCheck::FoldInt(TType op, Val &l, Val &r, Val &out, Node *at) {
 // operand that implicitly widens into the other picks the wider type
 // (§6.1). Returns null for non-numeric pairs, and where a trial finds no
 // common type (unifytrial).
-inline TypeExpr *TypeCheck::UnifyNumeric(Node *at, TType op, Val &lv, Val &rv, TypeExpr *lt,
+TypeExpr *TypeCheck::UnifyNumeric(Node *at, TType op, Val &lv, Val &rv, TypeExpr *lt,
                                          TypeExpr *rt, bool cmp) {
     auto fail = [&](const string &msg) -> TypeExpr * {
         if (!unifytrial) Error(at, msg);
@@ -1670,7 +1381,7 @@ inline TypeExpr *TypeCheck::UnifyNumeric(Node *at, TType op, Val &lv, Val &rv, T
 // a float ct in a node of its own, and a float of literals and integers is
 // computed at ct throughout. Binary unification and scalar broadcasting use
 // the same conversion.
-inline void TypeCheck::RetypeOperand(Node *&n, Val &v, TypeExpr *ct) {
+void TypeCheck::RetypeOperand(Node *&n, Val &v, TypeExpr *ct) {
     if (auto t = LoadType(v.type); ct->kind == TY_FLT && IsIntT(t)) {
         ToFloat(n, t, ct);
     } else {
@@ -1682,19 +1393,19 @@ inline void TypeCheck::RetypeOperand(Node *&n, Val &v, TypeExpr *ct) {
     RetypeVal(v, ct);
 }
 
-inline void TypeCheck::RetypeOperands(Node *&left, Node *&right, Val &lv, Val &rv,
+void TypeCheck::RetypeOperands(Node *&left, Node *&right, Val &lv, Val &rv,
                                       TypeExpr *ct) {
     RetypeOperand(left, lv, ct);
     RetypeOperand(right, rv, ct);
 }
 
 // An operand's value as the unified type ct gives it (RetypeOperands).
-inline void TypeCheck::RetypeVal(Val &v, TypeExpr *ct) {
+void TypeCheck::RetypeVal(Val &v, TypeExpr *ct) {
     if (ct->kind == TY_FLT && IsIntT(LoadType(v.type))) IntToFloat(v, ct);
     else v.type = ct;
 }
 
-inline Val TypeCheck::CheckRefIdentity(Binary *b) {
+Val TypeCheck::CheckRefIdentity(Binary *b) {
     // Reference identity (§4.5): the addresses, never the pointees. Each
     // side is a reference (plain or optional) or null, or storage taken
     // by reference as a `.=` binding takes it; the pointee types agree.
@@ -1720,7 +1431,7 @@ inline Val TypeCheck::CheckRefIdentity(Binary *b) {
     return v;
 }
 
-inline Val TypeCheck::CheckLogical(Binary *b) {
+Val TypeCheck::CheckLogical(Binary *b) {
     CheckCond(b->left);
     auto snap = SaveFlow();
     NarrowCond(b->left, b->op == T_ANDAND);
@@ -1748,7 +1459,7 @@ inline Val TypeCheck::CheckLogical(Binary *b) {
     return v;
 }
 
-inline Val TypeCheck::CheckBinaryResult(Binary *b, Val &lv, Val &rv) {
+Val TypeCheck::CheckBinaryResult(Binary *b, Val &lv, Val &rv) {
     NoUntypedEmptyArray(lv, b->left, TName(b->op));
     NoUntypedEmptyArray(rv, b->right, TName(b->op));
     auto lt = LoadType(lv.type), rt = LoadType(rv.type);
@@ -1835,7 +1546,7 @@ inline Val TypeCheck::CheckBinaryResult(Binary *b, Val &lv, Val &rv) {
 // operands' common type `ct`, which their nodes take, and the result's type
 // and constant. A `trial` changes no node and reports no error: it gives a
 // value of no type where b would be one.
-inline Val TypeCheck::NumericBinary(Binary *b, Val lv, Val rv, TypeExpr *&ct, bool trial) {
+Val TypeCheck::NumericBinary(Binary *b, Val lv, Val rv, TypeExpr *&ct, bool trial) {
     auto op = b->op;
     auto lt = LoadType(lv.type), rt = LoadType(rv.type);
     FlagScope ut(unifytrial, unifytrial || trial);
@@ -1961,7 +1672,7 @@ inline Val TypeCheck::NumericBinary(Binary *b, Val lv, Val rv, TypeExpr *&ct, bo
 // The value of the unary operation u, `-v` or `~v` (§6.2), as NumericBinary's
 // is of a binary one: a trial changes no node, reports no error, and gives a
 // value of no type where u would be one.
-inline Val TypeCheck::NumericUnary(Unary *u, const Val &cv, bool trial) {
+Val TypeCheck::NumericUnary(Unary *u, const Val &cv, bool trial) {
     auto v = cv;
     if (v.notconst && u->op == T_MINUS) {
         v.flexint = v.notconst = false;
@@ -2059,7 +1770,7 @@ inline Val TypeCheck::NumericUnary(Unary *u, const Val &cv, bool trial) {
 // An integer value converted to the float type ft (§6.3): a constant stays
 // one, now of the float's value; a literal parameter is one only where it
 // is an integer.
-inline void TypeCheck::IntToFloat(Val &v, TypeExpr *ft) {
+void TypeCheck::IntToFloat(Val &v, TypeExpr *ft) {
     if (v.ck == CK_INT) {
         v.ck = CK_FLT;
         v.fval = v.uns ? (double)(uint64_t)v.ival : (double)v.ival;
@@ -2080,7 +1791,7 @@ inline void TypeCheck::IntToFloat(Val &v, TypeExpr *ft) {
 // the conversion then survives whatever the optimizer makes of the integer
 // expression, such as an inlined call or a block reduced to its value.
 // `from` is the integer's type.
-inline void TypeCheck::ToFloat(Node *&n, TypeExpr *from, TypeExpr *ft) {
+void TypeCheck::ToFloat(Node *&n, TypeExpr *from, TypeExpr *ft) {
     auto a = Is<AsCast>(n);
     if (!a || !a->implicit) {
         n->exprtype = from;
@@ -2098,7 +1809,7 @@ inline void TypeCheck::ToFloat(Node *&n, TypeExpr *from, TypeExpr *ft) {
 // (RetypeBranches). A constant part keeps its own nodes, which the optimizer
 // folds at full precision before the result rounds to t, as a constant at t
 // is anywhere.
-inline void TypeCheck::RetypeFlex(Node *&n, TypeExpr *t) {
+void TypeCheck::RetypeFlex(Node *&n, TypeExpr *t) {
     n->exprtype = t;
     if (auto b = Is<Binary>(n); b && b->litfloat) {
         RetypeFlex(b->left, t);
@@ -2116,7 +1827,7 @@ inline void TypeCheck::RetypeFlex(Node *&n, TypeExpr *t) {
 // the integer type t its destination or other operand has: each node
 // computing it, a shift's left operand but not its count, down to its
 // constants and constructs of constants.
-inline void TypeCheck::RetypeFlexInt(Node *n, TypeExpr *t) {
+void TypeCheck::RetypeFlexInt(Node *n, TypeExpr *t) {
     n->exprtype = t;
     if (auto b = Is<Binary>(n); b && b->flexint) {
         RetypeFlexInt(b->left, t);
@@ -2141,7 +1852,7 @@ inline void TypeCheck::RetypeFlexInt(Node *n, TypeExpr *t) {
 // parameters or untyped ones, in a function value's body, or in a function
 // or default declared in one -- so that the types around a cast may differ
 // from one specialization to the next (§7.7).
-inline bool TypeCheck::InGenericCode() {
+bool TypeCheck::InGenericCode() {
     auto generic = [](const SFunction *sf) {
         if (!sf) return false;
         if (!sf->generics.empty()) return true;
@@ -2165,7 +1876,7 @@ inline bool TypeCheck::InGenericCode() {
 // (§6.3): FitsAt's rules for numbers, recording nothing. A literal parameter
 // only widens: whether its literal fits a narrower type is each call site's
 // question, which the cast answers at run time.
-inline bool TypeCheck::Converts(const Val &v, TypeExpr *t) {
+bool TypeCheck::Converts(const Val &v, TypeExpr *t) {
     auto vt = LoadType(v.type);
     if (t->kind == TY_INT) {
         if (vt->kind != TY_INT) return false;
@@ -2184,7 +1895,7 @@ inline bool TypeCheck::Converts(const Val &v, TypeExpr *t) {
 
 // Whether two numeric values are the same to whatever consumes them: of one
 // type, the same constant or none, and adapting alike (§6.3).
-inline bool TypeCheck::SameNumVal(const Val &a, const Val &b) {
+bool TypeCheck::SameNumVal(const Val &a, const Val &b) {
     if (!a.type || !b.type || !SameNum(LoadType(a.type), LoadType(b.type))) return false;
     if (a.ck != b.ck || a.litfloat != b.litfloat || a.litint != b.litint ||
         a.flexint != b.flexint || a.unsized != b.unsized || a.notconst != b.notconst)
@@ -2201,7 +1912,7 @@ inline bool TypeCheck::SameNumVal(const Val &a, const Val &b) {
 // a destination gives its type (`typed`) at the one it has -- and converted
 // to the same value, an integer rounding to the cast's float type only where
 // that is `at`.
-inline bool TypeCheck::SameReach(const CastAlt &a, TypeExpr *at, bool typed) {
+bool TypeCheck::SameReach(const CastAlt &a, TypeExpr *at, bool typed) {
     auto &cv = a.operand;
     auto st = LoadType(cv.type), tt = a.cast->totype;
     if ((cv.litfloat && cv.ck == CK_NONE) || cv.litint) return SameNum(st, tt) && SameNum(tt, at);
@@ -2213,7 +1924,7 @@ inline bool TypeCheck::SameReach(const CastAlt &a, TypeExpr *at, bool typed) {
 // Whether a followed value reaches type `at` as the cast's value does: the
 // cast's own operand as SameReach says, a float of literals the deletion
 // leaves where it settles.
-inline bool TypeCheck::Reaches(const CastAlt &a, TypeExpr *at, bool typed) {
+bool TypeCheck::Reaches(const CastAlt &a, TypeExpr *at, bool typed) {
     return a.pending ? !a.settle || SameNum(at, a.settle) : SameReach(a, at, typed);
 }
 
@@ -2221,7 +1932,7 @@ inline bool TypeCheck::Reaches(const CastAlt &a, TypeExpr *at, bool typed) {
 // checker followed to the operand is judged by what x makes of it: where x
 // may go as well, that verdict holds only while x stays. x is followed where
 // its operand converts to its type implicitly, outside generic code.
-inline void TypeCheck::NoteCast(AsCast *x, const Val &raw, const Val &cv, const Val &v) {
+void TypeCheck::NoteCast(AsCast *x, const Val &raw, const Val &cv, const Val &v) {
     auto removable = !InGenericCode() && Converts(cv, x->totype);
     if (auto it = castalts.find(x->child); it != castalts.end()) {
         auto a = it->second;
@@ -2246,7 +1957,7 @@ inline void TypeCheck::NoteCast(AsCast *x, const Val &raw, const Val &cv, const 
 // literals where v is a plain float computes at the type it settles at: n's
 // consumer judges that, as it judges a value that differs from v in no more
 // than how it adapts (a constant). Anything else keeps the cast.
-inline void TypeCheck::FollowCast(Node *n, const CastAlt &a, const Val &tv, const Val &v,
+void TypeCheck::FollowCast(Node *n, const CastAlt &a, const Val &tv, const Val &v,
                                   TypeExpr *at) {
     if (!tv.type) return CastVerdict(a, "");
     auto next = a;
@@ -2283,7 +1994,7 @@ inline void TypeCheck::FollowCast(Node *n, const CastAlt &a, const Val &tv, cons
 // may go where b's value stays the same all three ways; where it does not
 // survive both, one may go, the right one where it can, the left operand
 // keeping the type as the reader meets it first.
-inline void TypeCheck::JudgeBinaryCasts(Binary *b, Node *l, Node *r, const Val &lv,
+void TypeCheck::JudgeBinaryCasts(Binary *b, Node *l, Node *r, const Val &lv,
                                         const Val &rv, const Val &v, TypeExpr *ct) {
     auto cmp = v.type->kind == TY_BOOL;
     auto same = [&](const Val &tv, TypeExpr *tct) {
@@ -2322,7 +2033,7 @@ inline void TypeCheck::JudgeBinaryCasts(Binary *b, Node *l, Node *r, const Val &
 
 // u's operand's followed cast, judged by u's value without it, as an
 // operator's are (JudgeBinaryCasts).
-inline void TypeCheck::JudgeUnaryCast(Unary *u, Node *c, const Val &r) {
+void TypeCheck::JudgeUnaryCast(Unary *u, Node *c, const Val &r) {
     auto it = castalts.find(c);
     if (it == castalts.end()) return;
     auto a = it->second;
@@ -2337,7 +2048,7 @@ inline void TypeCheck::JudgeUnaryCast(Unary *u, Node *c, const Val &r) {
 // with no type is the same. An argument of a builtin its call takes for
 // want of a function of its name is not judged: a function might take it
 // without the cast.
-inline void TypeCheck::JudgeCastAt(Node *n, TypeExpr *dt, const Val &v) {
+void TypeCheck::JudgeCastAt(Node *n, TypeExpr *dt, const Val &v) {
     auto it = castalts.find(n);
     if (it == castalts.end()) return;
     auto a = it->second;
@@ -2358,7 +2069,7 @@ inline void TypeCheck::JudgeCastAt(Node *n, TypeExpr *dt, const Val &v) {
 // Why deleting the cast a follows would leave the program the same, where
 // its operand reaches type `reach` without it; `bycast`: through a cast
 // around it.
-inline string TypeCheck::CastReason(const CastAlt &a, TypeExpr *reach, bool bycast) {
+string TypeCheck::CastReason(const CastAlt &a, TypeExpr *reach, bool bycast) {
     auto &cv = a.operand;
     auto st = LoadType(cv.type), tt = a.cast->totype;
     auto what = ExprStr(a.cast->child);
@@ -2384,7 +2095,7 @@ inline string TypeCheck::CastReason(const CastAlt &a, TypeExpr *reach, bool byca
 // reached at the cast `dependson` holds only while that one stays. It waits
 // as a warning does while the check may be repeated (Warn), and
 // ReportRedundantCasts weighs every check's.
-inline void TypeCheck::CastVerdict(const CastAlt &a, const string &reason,
+void TypeCheck::CastVerdict(const CastAlt &a, const string &reason,
                                    const AsCast *dependson) {
     if (quiet) return;
     Warning w;
@@ -2402,7 +2113,7 @@ inline void TypeCheck::CastVerdict(const CastAlt &a, const string &reason,
 // Once the whole program is checked, a cast warns, in source order, where
 // every verdict on it found it redundant and no cast a verdict was reached at
 // warns itself.
-inline void TypeCheck::ReportRedundantCasts() {
+void TypeCheck::ReportRedundantCasts() {
     FlushWarnings();
     struct Tally {
         size_t first = SIZE_MAX;
@@ -2451,7 +2162,7 @@ inline void TypeCheck::ReportRedundantCasts() {
 // wherever its type is compared, in another scope as often as not. In a
 // parameter default, which names what a top-level declaration would, a name
 // its scope makes something else is an error as well (DefaultScopeName).
-inline void TypeCheck::ConstName(Ident *id, const char *what) {
+void TypeCheck::ConstName(Ident *id, const char *what) {
     if (auto vd = LookupVar(id->name, id->ns); vd && !vd->isglobal)
         Error(id, cat(what, " ", id->name, " names a local variable, not a constant"));
     if (auto kind = ScopeNameKind(id->name))
@@ -2459,7 +2170,7 @@ inline void TypeCheck::ConstName(Ident *id, const char *what) {
     DefaultScopeName(id->name, id, false);
 }
 
-inline void TypeCheck::ConstNames(Node *n, const char *what) {
+void TypeCheck::ConstNames(Node *n, const char *what) {
     ConstExprNames(n, what, [&](Ident *id, const char *w) { ConstName(id, w); });
 }
 
@@ -2468,7 +2179,7 @@ inline void TypeCheck::ConstNames(Node *n, const char *what) {
 // a trailing block's signature. A type that comes from elsewhere -- a
 // field's, one a type parameter is bound to, an alias's -- was checked where
 // it is written.
-inline void TypeCheck::ConstNamesIn(TypeExpr *t) {
+void TypeCheck::ConstNamesIn(TypeExpr *t) {
     SizeNames(t, [&](Ident *id, const char *w) { ConstName(id, w); });
 }
 
@@ -2476,7 +2187,7 @@ inline void TypeCheck::ConstNamesIn(TypeExpr *t) {
 // none of its parameters or type parameters: there the name means the
 // parameter, which holds an argument, or the type parameter, which stands
 // for a type, no constant, and hides the global of the name (§3.3, §11.1).
-inline void TypeCheck::SignatureNames(const vector<Param> &params,
+void TypeCheck::SignatureNames(const vector<Param> &params,
                                       const vector<TypeExpr *> &rets,
                                       const vector<GenericParam> &generics) {
     auto check = [&](TypeExpr *t) {
@@ -2494,7 +2205,7 @@ inline void TypeCheck::SignatureNames(const vector<Param> &params,
 
 // A size in t naming one of the type parameters in `generics`: a function's
 // in its signature, a generic struct's or enum's in its fields' types.
-inline void TypeCheck::TypeParamSizes(TypeExpr *t, const vector<GenericParam> &generics) {
+void TypeCheck::TypeParamSizes(TypeExpr *t, const vector<GenericParam> &generics) {
     SizeNames(t, [&](Ident *id, const char *what) {
         for (auto &g : generics)
             if (g.name == id->name)
@@ -2502,7 +2213,7 @@ inline void TypeCheck::TypeParamSizes(TypeExpr *t, const vector<GenericParam> &g
     });
 }
 
-inline int64_t TypeCheck::FillCount(Node *n) {
+int64_t TypeCheck::FillCount(Node *n) {
     ConstNames(n, "array fill count");
     return ConstIntOrError(n, "array fill count");
 }
@@ -2515,7 +2226,7 @@ inline int64_t TypeCheck::FillCount(Node *n) {
 // or attaching caller-local bindings to the shared expression nodes. A name
 // is the global of the name; where the expression is written, a local of
 // the name is an error (ConstName).
-inline bool TypeCheck::ConstIntValue(Node *n, Val &v, bool &literal,
+bool TypeCheck::ConstIntValue(Node *n, Val &v, bool &literal,
                                      set<VarDecl *> &visiting, ConstUse *use) {
     if (auto i = Is<IntLit>(n)) {
         v.type = ast.inttypes[i->uns ? IS_U64 : IS_I64];
@@ -2626,7 +2337,7 @@ inline bool TypeCheck::ConstIntValue(Node *n, Val &v, bool &literal,
 // the declaration, which may not have been checked yet. A length its written
 // type fixes nothing can change; whether one its initializer gives can, the
 // type that gives the global decides (RelyOnExtent).
-inline bool TypeCheck::ConstExtent(Ident *id, bool cap, int64_t &extent,
+bool TypeCheck::ConstExtent(Ident *id, bool cap, int64_t &extent,
                                    set<VarDecl *> &visiting, ConstUse *use) {
     auto g = ast.LookupGlobal(id->name, id->ns);
     if (!g || g->byref || g->reusable || g->names.size() != 1 || g->inits.size() > 1)
@@ -2670,7 +2381,7 @@ inline bool TypeCheck::ConstExtent(Ident *id, bool cap, int64_t &extent,
 
 // All scalar leaves integers, or all floats; only structs and fixed
 // arrays compose; the value must be fixed-size (a constructed result).
-inline bool TypeCheck::ElementwiseOK(TypeExpr *t) {
+bool TypeCheck::ElementwiseOK(TypeExpr *t) {
     int isint = -1;
     function<bool(TypeExpr *)> rec = [&](TypeExpr *t2) -> bool {
         switch (t2->kind) {
@@ -2699,7 +2410,7 @@ inline bool TypeCheck::ElementwiseOK(TypeExpr *t) {
 }
 
 // An unsigned integer leaf of an elementwise aggregate, or null.
-inline TypeExpr *TypeCheck::UnsignedLeaf(TypeExpr *t) {
+TypeExpr *TypeCheck::UnsignedLeaf(TypeExpr *t) {
     switch (t->kind) {
         case TY_INT: return IsUnsigned(t->intstorage) ? t : nullptr;
         case TY_STRUCT:
@@ -2714,7 +2425,7 @@ inline TypeExpr *TypeCheck::UnsignedLeaf(TypeExpr *t) {
 // Scaling keeps the aggregate's nominal type, so every leaf must accept
 // the same scalar type. Mixed-width aggregates still have their ordinary
 // aggregate/aggregate arithmetic, but no implicit broadcast conversion.
-inline TypeExpr *TypeCheck::ElementwiseScalarType(TypeExpr *t) {
+TypeExpr *TypeCheck::ElementwiseScalarType(TypeExpr *t) {
     if (!ElementwiseOK(t)) return nullptr;
     TypeExpr *leaf = nullptr;
     function<bool(TypeExpr *)> rec = [&](TypeExpr *tt) {
@@ -2730,7 +2441,7 @@ inline TypeExpr *TypeCheck::ElementwiseScalarType(TypeExpr *t) {
     return rec(t) ? leaf : nullptr;
 }
 
-inline Val TypeCheck::CheckVariantConst(Dot *d, SEnum *en) {
+Val TypeCheck::CheckVariantConst(Dot *d, SEnum *en) {
     if (!en->generics.empty())
         Error(d, cat("generic enum ", en->name, " needs type arguments to name a variant"));
     auto t = ast.EnumOf(en, {}, false, d->line);
@@ -2755,7 +2466,7 @@ inline Val TypeCheck::CheckVariantConst(Dot *d, SEnum *en) {
 // Storing a harmless read can still check a destination's capacity, length
 // prefix or relative offset. Be conservative about adaptations; literals'
 // counts have already been checked against their own expression type.
-inline bool TypeCheck::InitOrderStoreSafe(Node *n, TypeExpr *dest) {
+bool TypeCheck::InitOrderStoreSafe(Node *n, TypeExpr *dest) {
     if (!n || !dest || dest->kind == TY_VOID) return true;
     if (HasRelRefT(dest, true)) return Is<NullLit>(n) != nullptr;
     if (auto b = Is<Block>(n)) return InitOrderStoreSafe(b->tail, dest);
@@ -2784,7 +2495,7 @@ inline bool TypeCheck::InitOrderStoreSafe(Node *n, TypeExpr *dest) {
 // Prove that an initializer neither changes observable state nor can abort
 // or leave its enclosing function. Unknown forms/calls are conservative.
 // Two such expressions may read shared mutable state: neither can change it.
-inline bool TypeCheck::InitOrderSafe(Node *n, set<FnSpec *> &visiting, FnSpec *callee) {
+bool TypeCheck::InitOrderSafe(Node *n, set<FnSpec *> &visiting, FnSpec *callee) {
     if (!n) return true;
     auto safe = [&](Node *child) { return InitOrderSafe(child, visiting, callee); };
     if (Is<IntLit>(n) || Is<FltLit>(n) || Is<BoolLit>(n) || Is<StrLit>(n) ||
@@ -2875,7 +2586,7 @@ inline bool TypeCheck::InitOrderSafe(Node *n, set<FnSpec *> &visiting, FnSpec *c
 
 // `selft` is the type of the value this literal constructs (the enum type
 // for a variant literal in fixed enum mode), which is what `self` names.
-inline TypeCheck::LitDeep TypeCheck::CheckInits(StructLit *sl, vector<Field> &fields,
+TypeCheck::LitDeep TypeCheck::CheckInits(StructLit *sl, vector<Field> &fields,
                                                vector<TypeExpr *> &ftypes,
                                                string_view what, TypeExpr *selft) {
     LitDeep deep;
@@ -2983,7 +2694,7 @@ inline TypeCheck::LitDeep TypeCheck::CheckInits(StructLit *sl, vector<Field> &fi
 // relative reference to the very value being constructed (§3.9), which is
 // the one reference to it that exists before the value does. Optional
 // relative references are excluded because offset 0 is their null.
-inline void TypeCheck::CheckSelfInit(Node *n, TypeExpr *ft, TypeExpr *selft) {
+void TypeCheck::CheckSelfInit(Node *n, TypeExpr *ft, TypeExpr *selft) {
     if (ft->kind != TY_REF || ft->ref->lenstorage < 0)
         Error(n, cat("self initializes relative-reference fields (T&<u32> and friends), "
                      "not ", TypeStr(ft)));
@@ -3012,7 +2723,7 @@ inline void TypeCheck::CheckSelfInit(Node *n, TypeExpr *ft, TypeExpr *selft) {
 // ------------------------------------------------------------------
 // Statements.
 
-inline void TypeCheck::CheckStmts(Block *b) {
+void TypeCheck::CheckStmts(Block *b) {
     for (size_t i = 0; i < b->stmts.size(); i++) {
         if (!reachable) {
             b->stmts.resize(i);
@@ -3031,7 +2742,7 @@ inline void TypeCheck::CheckStmts(Block *b) {
 // Whether the code under n names `name`: a variable use, or a call of a
 // nested function whose body does. Syntactic, so a shadowing declaration
 // counts too, which only errs on the safe side.
-inline bool TypeCheck::MentionsName(Node *n, string_view name, set<SFunction *> &seen) {
+bool TypeCheck::MentionsName(Node *n, string_view name, set<SFunction *> &seen) {
     if (!n) return false;
     if (auto id = Is<Ident>(n); id && id->name == name) return true;
     if (auto fd = Is<FnDecl>(n)) {
@@ -3058,7 +2769,7 @@ inline bool TypeCheck::MentionsName(Node *n, string_view name, set<SFunction *> 
 // Whether the code under n has a `continue` that leaves it: one that is not
 // inside a loop's body there, nor in a nested function or a function value,
 // whose loops are their own.
-inline bool TypeCheck::EscapingContinue(Node *n) {
+bool TypeCheck::EscapingContinue(Node *n) {
     if (!n || Is<FnDecl>(n) || Is<FunVal>(n)) return false;
     if (Is<Continue>(n)) return true;
     Node *body = nullptr;
@@ -3074,7 +2785,7 @@ inline bool TypeCheck::EscapingContinue(Node *n) {
 // reference or slice out of v: it names v other than to read a field path
 // whose value holds none, itself or in a nested function it calls. Syntactic,
 // as UsedAfter is: a field path is resolved by name against v's type.
-inline bool TypeCheck::ExposedLater(VarDef *v) {
+bool TypeCheck::ExposedLater(VarDef *v) {
     auto vframe = FrameOfScope(Depth(v) - 1);
     // The type of the field path `n` reads starting at v, or null.
     auto fieldtype = [&](Node *n) -> TypeExpr * {
@@ -3135,7 +2846,7 @@ inline bool TypeCheck::ExposedLater(VarDef *v) {
 // from the shrink: the rest of that block and its tail, and for a `return`
 // everything else of this frame's body, for a `break` everything inside the
 // loop or `block` it ends, that loop's next iteration included.
-inline bool TypeCheck::UsedAfter(VarDef *v) {
+bool TypeCheck::UsedAfter(VarDef *v) {
     set<SFunction *> seen;
     auto vframe = FrameOfScope(Depth(v) - 1);
     auto mentions = [&](Node *n, int fi) {
@@ -3196,7 +2907,7 @@ inline bool TypeCheck::UsedAfter(VarDef *v) {
     return false;
 }
 
-inline void TypeCheck::CheckStmt(Node *n) {
+void TypeCheck::CheckStmt(Node *n) {
     // A statement inside a returned value's block is no part of that value:
     // the function's locals outlive it.
     FlagScope rs(inreturn, false);

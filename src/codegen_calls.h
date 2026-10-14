@@ -16,7 +16,7 @@ namespace goose {
 // where the receiver wanted an element run: the count goes to lenlv and
 // the elements slide down over the prefix, whose bytes the stack top
 // gives back.
-inline void CodeGen::EmitSlidePrefix(const string &base, IntStorage ls, const string &stk,
+void CodeGen::EmitSlidePrefix(const string &base, IntStorage ls, const string &stk,
                                      const string &lenlv) {
     string metasz, count;
     if (ls == IS_VARINT) {
@@ -34,7 +34,7 @@ inline void CodeGen::EmitSlidePrefix(const string &base, IntStorage ls, const st
     L(TopW(stk), " -= ", ms, ";");
 }
 
-inline vector<string> CodeGen::EmitCall(Call *c, Dst d0, vector<Dst> *alldst) {
+vector<string> CodeGen::EmitCall(Call *c, Dst d0, vector<Dst> *alldst) {
     // An element-run destination for a variable-array result: builtins
     // and tag dispatch have no element-run form, so take the value form
     // and slide its length prefix out -- a builtin builds the value in the
@@ -72,7 +72,7 @@ inline vector<string> CodeGen::EmitCall(Call *c, Dst d0, vector<Dst> *alldst) {
 // assigned to its lvalue (a channel the callee wrote itself needs nothing).
 // A reference result whose destination wants the pointee's value (Dst::t,
 // a binding the checker decayed) loads through the reference.
-inline void CodeGen::EmitCallInto(Call *c, vector<Dst> &dsts) {
+void CodeGen::EmitCallInto(Call *c, vector<Dst> &dsts) {
     auto rets = EmitCall(c, dsts.empty() ? Dst {} : dsts[0], &dsts);
     for (size_t i = 0; i < dsts.size() && i < rets.size(); i++) {
         if (dsts[i].k != DK_LVALUE || rets[i].empty()) continue;
@@ -91,7 +91,7 @@ inline void CodeGen::EmitCallInto(Call *c, vector<Dst> &dsts) {
 // A call to an extern fn (§7.10): the C function directly, each argument
 // in its C type, no calling-convention extras; a fixed result lands in
 // a temporary like any other C value.
-inline vector<string> CodeGen::EmitExternCall(Call *c, FnSpec *sp) {
+vector<string> CodeGen::EmitExternCall(Call *c, FnSpec *sp) {
     if (std::find(usedexterns.begin(), usedexterns.end(), sp) == usedexterns.end())
         usedexterns.push_back(sp);
     auto an = CallArgNodes(c, sp->argtypes.size());
@@ -122,7 +122,7 @@ inline vector<string> CodeGen::EmitExternCall(Call *c, FnSpec *sp) {
 }
 
 // The C prototype of an extern fn, from its Goose declaration (§7.10).
-inline string CodeGen::ExternProto(FnSpec *sp) {
+string CodeGen::ExternProto(FnSpec *sp) {
     string s = sp->rets.empty() ? string("void") : CT(sp->rets[0]);
     Append(s, " ", sp->sf->cname, "(");
     for (size_t i = 0; i < sp->argtypes.size(); i++) {
@@ -136,14 +136,14 @@ inline string CodeGen::ExternProto(FnSpec *sp) {
 
 // The arguments the callee's parameters take (Call::ArgNodes): the
 // function-value arguments that follow them are compile-time only.
-inline vector<Node *> CodeGen::CallArgNodes(Call *c, size_t nparams) {
+vector<Node *> CodeGen::CallArgNodes(Call *c, size_t nparams) {
     auto an = c->ArgNodes();
     an.resize(nparams);
     return an;
 }
 
 // One argument by the parameter's calling convention; appends to args.
-inline void CodeGen::EmitArg(FnSpec *sp, size_t i, Node *node, vector<string> &args) {
+void CodeGen::EmitArg(FnSpec *sp, size_t i, Node *node, vector<string> &args) {
     auto pt = sp->argtypes[i];
     if (IsPoolParam(sp, i)) {
         PushArg(args, pt, true, GenPrefVal(node));
@@ -184,7 +184,7 @@ inline void CodeGen::EmitArg(FnSpec *sp, size_t i, Node *node, vector<string> &a
 }
 
 // A free variable of the callee, from the caller's frame (or passed on).
-inline void CodeGen::EmitFvArg(const VarDef *fv, vector<string> &args) {
+void CodeGen::EmitFvArg(const VarDef *fv, vector<string> &args) {
     auto name = VName(fv);
     // gs_init_globals has no curspec, and its locals no ownerspec.
     auto ours = fv->ownerspec == curspec;
@@ -216,7 +216,7 @@ inline void CodeGen::EmitFvArg(const VarDef *fv, vector<string> &args) {
 // Where a bytes-class return value goes: the destination's own stack where
 // it has one, a temporary otherwise, and the address its bytes start at,
 // which is that stack's top before the call writes anything.
-inline string CodeGen::BytesResultBase(const Dst &dd, string &stk) {
+string CodeGen::BytesResultBase(const Dst &dd, string &stk) {
     if (dd.k == DK_STACK) stk = dd.s;
     else BytesTemp(stk);
     auto base = T();
@@ -224,7 +224,7 @@ inline string CodeGen::BytesResultBase(const Dst &dd, string &stk) {
     return base;
 }
 
-inline vector<string> CodeGen::EmitSpecCall(Call *c, FnSpec *sp, Dst d0, vector<Dst> *alldst) {
+vector<string> CodeGen::EmitSpecCall(Call *c, FnSpec *sp, Dst d0, vector<Dst> *alldst) {
     assert(sinfo.count(sp));
     auto &ki = sinfo[sp];
     auto an = CallArgNodes(c, sp->params.size());
@@ -356,7 +356,7 @@ inline vector<string> CodeGen::EmitSpecCall(Call *c, FnSpec *sp, Dst d0, vector<
 // T[] of another length storage (a T[varint] field, say), whose layout the
 // callee cannot write: the slot's prefix goes in front of the elements
 // after the call (EmitReprefix).
-inline bool CodeGen::NeedsReprefix(const Dst &d, TypeExpr *rt) {
+bool CodeGen::NeedsReprefix(const Dst &d, TypeExpr *rt) {
     return d.k == DK_STACK && d.lenlv.empty() && d.t && d.t->kind == TY_ARRAY &&
            d.t->arr->akind == A_VAR && rt->kind == TY_ARRAY && rt->arr->akind == A_VAR &&
            LenStore(d.t->arr) != LenStore(rt->arr);
@@ -368,7 +368,7 @@ inline bool CodeGen::NeedsReprefix(const Dst &d, TypeExpr *rt) {
 // destination wants its own prefix in front of them. The run form only
 // patches the reserved bytes; the value form moves the elements by the
 // difference in prefix sizes, the same cost as the value-form slide.
-inline void CodeGen::EmitReprefix(FnSpec *sp, const Dst &dd, const string &base,
+void CodeGen::EmitReprefix(FnSpec *sp, const Dst &dd, const string &base,
                                   const string &cnt) {
     auto ls = LenStore(dd.t->arr);
     if (!cnt.empty()) {
@@ -403,7 +403,7 @@ inline void CodeGen::EmitReprefix(FnSpec *sp, const Dst &dd, const string &base,
     L(TopW(dd.s), " += ", ms, " - ", oms, ";");
 }
 
-inline void CodeGen::EmitRfCheck(FnSpec *callee) {
+void CodeGen::EmitRfCheck(FnSpec *callee) {
     if (norfcheck) return;
     L("if (gs_rf) {");
     ind++;
@@ -452,7 +452,7 @@ inline void CodeGen::EmitRfCheck(FnSpec *callee) {
 
 // Calling a function value: the checked body instance is spliced inline
 // (§7.6); its parameters are ordinary locals of this function.
-inline vector<string> CodeGen::EmitFvCall(Call *c, Dst d0) {
+vector<string> CodeGen::EmitFvCall(Call *c, Dst d0) {
     auto et = c->fvbody->exprtype;
     auto wantsval = !IsVoidT(et);
     // The call was checked against its destination and the body's value
@@ -531,7 +531,7 @@ inline vector<string> CodeGen::EmitFvCall(Call *c, Dst d0) {
 // Case-function tag dispatch (§8.2): switch on the tag, call the matching
 // specialization with the payload, sharing all other argument slots and
 // return channels across the arms.
-inline vector<string> CodeGen::EmitDispatch(Call *c, Dst d0, vector<Dst> *alldst) {
+vector<string> CodeGen::EmitDispatch(Call *c, Dst d0, vector<Dst> *alldst) {
     auto sp0 = c->dispatch[0];
     auto an = CallArgNodes(c, sp0->params.size());
     auto pos = c->dispatcharg;

@@ -1,0 +1,20 @@
+// Goose compiler — code generation's types, frames, values, construction and
+// statements: one of its two translation units (codegen_nodes.cpp).
+// two translation units (typecheck_calls.cpp).
+#include "includes.h"
+#include "utils.h"
+#include "small_vector.h"
+#include "flat_map.h"
+#include "lexer.h"
+#include "ast.h"
+#include "dump.h"
+#include "clone.h"
+#include "builtins.h"
+#include "gfx.h"
+#include "typecheck.h"
+#include "codegen.h"
+#include "codegen_types.h"
+#include "codegen_frames.h"
+#include "codegen_values.h"
+#include "codegen_construct.h"
+#include "codegen_stmts.h"

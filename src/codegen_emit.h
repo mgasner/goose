@@ -15,7 +15,7 @@ namespace goose {
 // written where the value has to end up, and the `return` only completes
 // the receiving metadata. Applies where the local's raw elements are
 // exactly the ones the destination wants; returns the bound local, or null.
-inline const VarDef *CodeGen::OpenIbNrvo(InlineBlock *ib, const Dst &d) {
+const VarDef *CodeGen::OpenIbNrvo(InlineBlock *ib, const Dst &d) {
     if (d.k != DK_STACK || !ib->spec || ib->spec->rets.size() != 1) return nullptr;
     auto vd = NamedResult(ib->body, ib->sf, 1, 0);
     if (!vd || !IsBytesT(vd->type) || nrvo.count(vd)) return nullptr;
@@ -67,7 +67,7 @@ inline const VarDef *CodeGen::OpenIbNrvo(InlineBlock *ib, const Dst &d) {
 // parameter, an alias, and a captured reference that cannot be rebound hold
 // the same value as long as d is live; a resizable variable's header and
 // stack never move.
-inline const VarDef *CodeGen::AliasTarget(VarDef *d, Node *init, Node *&path) {
+const VarDef *CodeGen::AliasTarget(VarDef *d, Node *init, Node *&path) {
     path = nullptr;
     if (!d || !init || !curspec || d->isvar || d->isglobal || d->reusable || !d->type ||
         !IsFatRef(d->type) || d->type->ref->optional || PrefVar(d) || d->captured ||
@@ -124,7 +124,7 @@ inline const VarDef *CodeGen::AliasTarget(VarDef *d, Node *init, Node *&path) {
 // handed on -- to a call, which syncs whatever it is handed a stack in, into
 // a value, which is passed to calls the same way or read back out of a field
 // (where it counts again), or to an alias, which stands for what it names.
-inline bool CodeGen::HandedRef(Node *n) {
+bool CodeGen::HandedRef(Node *n) {
     auto un = Is<Unary>(n);
     if (!un || un->op != T_BITAND) return false;
     auto c = un->child;
@@ -138,7 +138,7 @@ inline bool CodeGen::HandedRef(Node *n) {
 
 // Every binding of the body that AliasTarget accepts, in source order, so
 // that an alias of an alias resolves to the first one's target.
-inline void CodeGen::FindRefAliases(FnSpec *sp) {
+void CodeGen::FindRefAliases(FnSpec *sp) {
     auto bind = [&](VarDef *d, Node *init) {
         Node *path = nullptr;
         auto t = AliasTarget(d, init, path);
@@ -185,7 +185,7 @@ inline void CodeGen::FindRefAliases(FnSpec *sp) {
 // Own stacks never meet another class: a caller's expressions cannot name
 // them. Of the rest, no two classes that could share a stack are cached
 // together.
-inline void CodeGen::PlanTopClasses(FnSpec *sp) {
+void CodeGen::PlanTopClasses(FnSpec *sp) {
     topown = topglob = topcap = topdst = reftops = false;
     auto &fvs = sinfo[sp].freevars;
     auto isparam = [&](const VarDef *v) {
@@ -259,7 +259,7 @@ inline void CodeGen::PlanTopClasses(FnSpec *sp) {
 //    at one, and the specialization key does not record which), no captured
 //    or by-value resizable, no return destination, no long-distance return
 //    channel.
-inline bool CodeGen::RefTopsOk(FnSpec *sp) {
+bool CodeGen::RefTopsOk(FnSpec *sp) {
     set<const VarDef *> fatparams, classes;
     vector<TypeExpr *> pointees;
     auto concrete = true;
@@ -329,7 +329,7 @@ inline bool CodeGen::RefTopsOk(FnSpec *sp) {
     return ok;
 }
 
-inline void CodeGen::ResetFnState() {
+void CodeGen::ResetFnState() {
     toporder.clear();
     lenslots.clear();
     growth.clear();
@@ -370,7 +370,7 @@ inline void CodeGen::ResetFnState() {
 // The element-run twin of a spec (C.3): same body compiled to emit raw
 // elements at the destination plus a count, instead of a [len][elems]
 // value. Returns its C name, or "" when the spec cannot have one.
-inline string CodeGen::EnsureEr(FnSpec *sp) {
+string CodeGen::EnsureEr(FnSpec *sp) {
     auto it = ernames.find(sp);
     if (it != ernames.end()) return it->second;
     auto rt = sp->rets.size() == 1 ? sp->rets[0] : nullptr;
@@ -395,7 +395,7 @@ inline string CodeGen::EnsureEr(FnSpec *sp) {
 // a loop body, passed to an inlined callee, is exactly that shape. A local
 // declared at function scope is handled correctly, and every name is
 // unique within its function (Unique2), which is what makes the move safe.
-inline string CodeGen::HoistAggregateDecls(string &b) {
+string CodeGen::HoistAggregateDecls(string &b) {
     static const unordered_set<string> keep = {
         "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t",
         "uint64_t", "float", "double", "int", "char", "size_t", "void", "return", "goto",
@@ -461,7 +461,7 @@ inline string CodeGen::HoistAggregateDecls(string &b) {
 // same text, its integer semantics are spelled out, and runtime.h keeps the
 // C compiler from fusing a multiply and an add into one rounding in any of
 // them, which the wider instruction sets would otherwise let it do.
-inline void CodeGen::EmitSimdVersions(FnSpec *sp, const string &name, const string &params,
+void CodeGen::EmitSimdVersions(FnSpec *sp, const string &name, const string &params,
                                       const string &fnbody) {
     // The parameter list is `type name` declarations whose types are
     // typedef names or pointers to them; the names forward the call.
@@ -496,7 +496,7 @@ inline void CodeGen::EmitSimdVersions(FnSpec *sp, const string &name, const stri
     Append(code, "    }\n#endif\n", fnbody, "}\n\n");
 }
 
-inline void CodeGen::EmitSpec(FnSpec *sp, bool er) {
+void CodeGen::EmitSpec(FnSpec *sp, bool er) {
     curspec = sp;
     curinfo = &sinfo[sp];
     emiter = er;
@@ -600,7 +600,7 @@ inline void CodeGen::EmitSpec(FnSpec *sp, bool er) {
 // relative references -- leaving the value to gs_init_globals. A global
 // that is static data itself stands for its initializer, spelled out
 // again, since a C initializer cannot read another object.
-inline bool CodeGen::StaticInitX(Node *n, TypeExpr *t, string &out) {
+bool CodeGen::StaticInitX(Node *n, TypeExpr *t, string &out) {
     if (!n || !t || !IsFix(t) || HasRelRef(t)) return false;
     if (auto id = Is<Ident>(n)) {
         auto it = id->vdef ? gstatic.find(id->vdef) : gstatic.end();
@@ -680,7 +680,7 @@ inline bool CodeGen::StaticInitX(Node *n, TypeExpr *t, string &out) {
     }
 }
 
-inline void CodeGen::EmitGlobalDecls() {
+void CodeGen::EmitGlobalDecls() {
     for (auto g : ast.globals) {
         // The multi-value call form has one initializer for several defs;
         // only the one-init-per-def shape can carry a static initializer.
@@ -737,7 +737,7 @@ inline void CodeGen::EmitGlobalDecls() {
     }
 }
 
-inline void CodeGen::EmitGlobalInit() {
+void CodeGen::EmitGlobalInit() {
     curspec = nullptr;
     curinfo = nullptr;
     ResetFnState();
@@ -799,11 +799,11 @@ inline void CodeGen::EmitGlobalInit() {
 
 // A resizable global's receiving lvalue: its header's count, or the
 // whole frame object.
-inline string CodeGen::GlobalLenLv(VarDef *d) {
+string CodeGen::GlobalLenLv(VarDef *d) {
     return IsFrameObj(d->type) ? gnames[d] : cat(gnames[d], ".len");
 }
 
-inline void CodeGen::InitGlobalStack(VarDef *d) {
+void CodeGen::InitGlobalStack(VarDef *d) {
     auto stk = gstks[d];
     globalregions++;
     L("gs_stack_init(", stk, ");");
@@ -824,7 +824,7 @@ inline void CodeGen::InitGlobalStack(VarDef *d) {
     }
 }
 
-inline void CodeGen::EmitProgramInit() {
+void CodeGen::EmitProgramInit() {
     Append(data, "static int gs_program_initialized;\n");
     // Every function is emitted by now, so the counts are final: the main
     // program's stacks, and the most regions it and any one worker hold.
@@ -861,14 +861,14 @@ inline void CodeGen::EmitProgramInit() {
 }
 
 // The statement that runs fn main(), or nothing for a library without one.
-inline string CodeGen::MainCall() {
+string CodeGen::MainCall() {
     auto mainsf = ast.MainFunction();
     if (!mainsf || mainsf->specs.empty() || !sinfo.count(mainsf->specs[0])) return "";
     auto &mi = sinfo[mainsf->specs[0]];
     return cat("    ", mi.cname, "(", mi.needssp ? "0" : "", ");\n");
 }
 
-inline void CodeGen::EmitExports() {
+void CodeGen::EmitExports() {
     for (auto sf : ast.functions) {
         if (!sf->isexport) continue;
         if (sf->specs.size() != 1 || !sinfo.count(sf->specs[0]))
@@ -912,7 +912,7 @@ inline void CodeGen::EmitExports() {
     }
 }
 
-inline string CodeGen::ExportHeader() {
+string CodeGen::ExportHeader() {
     string header = "#pragma once\n#include <stdint.h>\n"
                     "typedef struct gs_stack gs_stack;\n"
                     "#pragma pack(push, 1)\n";
@@ -925,7 +925,7 @@ inline string CodeGen::ExportHeader() {
     return header;
 }
 
-inline void CodeGen::EmitMain() {
+void CodeGen::EmitMain() {
     Append(code, "int main(int argc, char **argv) {\n    gs_program_init(argc, argv);\n",
            MainCall(), "    gs_rt_stats();\n    return 0;\n}\n");
 }

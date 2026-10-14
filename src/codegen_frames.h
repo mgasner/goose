@@ -16,7 +16,7 @@ namespace goose {
 // The C return value is the first small fixed return, else void; a `return ...
 // from` discriminant travels in the thread-local gs_rf, not the signature.
 
-inline bool CodeGen::IsPoolParam(FnSpec *sp, size_t i) {
+bool CodeGen::IsPoolParam(FnSpec *sp, size_t i) {
     return sp->roots[i].reusable && CarriesPool(sp->argtypes[i]);
 }
 
@@ -25,7 +25,7 @@ inline bool CodeGen::IsPoolParam(FnSpec *sp, size_t i) {
 // of a variable or of a frame object's tail in one, or the one a parameter,
 // an alias or a captured reference holds, none of them rebindable. The
 // stacks it carries, or "" where the expression does not say.
-inline string CodeGen::HandedStacks(Node *n) {
+string CodeGen::HandedStacks(Node *n) {
     auto c = n;
     if (auto un = Is<Unary>(n); un && un->op == T_BITAND) c = un->child;
     while (auto d = Is<Dot>(c)) {
@@ -49,7 +49,7 @@ inline string CodeGen::HandedStacks(Node *n) {
 // What a call to `callee` with these arguments can reach: the argument text
 // (a stack handed over appears in it verbatim), the stacks the reference
 // arguments carry, and the callee's globals.
-inline string CodeGen::SyncReach(FnSpec *callee, const vector<string> &args,
+string CodeGen::SyncReach(FnSpec *callee, const vector<string> &args,
                                  const vector<Node *> &an) {
     if (!cachetops) return "*";
     for (auto fv : sinfo[callee].freevars)
@@ -93,7 +93,7 @@ inline string CodeGen::SyncReach(FnSpec *callee, const vector<string> &args,
     return s;
 }
 
-inline void CodeGen::CollectSpecs() {
+void CodeGen::CollectSpecs() {
     for (auto sp : ast.fnspecs)
         if (sp->live && sp->body) livespecs.push_back(sp);
     // Names: suffix whenever the goose name maps to more than one live
@@ -244,7 +244,7 @@ inline void CodeGen::CollectSpecs() {
 // convention puts in memory the body can alias, and reassembled at entry.
 // The members' C types are the struct's, but for a slice's elements, which
 // take `void *` whatever they are.
-inline vector<pair<string, string>> CodeGen::ParamFields(TypeExpr *t, bool pool) {
+vector<pair<string, string>> CodeGen::ParamFields(TypeExpr *t, bool pool) {
     if (pool)
         return { { "gs_rhdr *", "hdr" }, { "gs_stack *", "stk" }, { "gs_rhdr *", "fl" },
                  { "gs_stack *", "flstk" } };
@@ -255,7 +255,7 @@ inline vector<pair<string, string>> CodeGen::ParamFields(TypeExpr *t, bool pool)
 
 // An argument for a parameter of type t: its members where ParamFields
 // passes it so, read from a temporary unless it is a variable already.
-inline void CodeGen::PushArg(vector<string> &args, TypeExpr *t, bool pool, const string &v) {
+void CodeGen::PushArg(vector<string> &args, TypeExpr *t, bool pool, const string &v) {
     auto fs = ParamFields(t, pool);
     if (fs.empty()) {
         args.push_back(v);
@@ -273,7 +273,7 @@ inline void CodeGen::PushArg(vector<string> &args, TypeExpr *t, bool pool, const
 // registers the parameter VarDefs' names and stack expressions, and, in the
 // declaring form, collects in paramcopies the entry code reassembling the
 // parameters ParamFields passes as members.
-inline string CodeGen::SigParams(FnSpec *sp, bool decls, bool er) {
+string CodeGen::SigParams(FnSpec *sp, bool decls, bool er) {
     auto &si = sinfo[sp];
     string s;
     auto add = [&](const string &d) {
@@ -365,7 +365,7 @@ inline string CodeGen::SigParams(FnSpec *sp, bool decls, bool er) {
     return s;
 }
 
-inline string CodeGen::SigRet(FnSpec *sp) {
+string CodeGen::SigRet(FnSpec *sp) {
     auto &si = sinfo[sp];
     return si.cret >= 0 ? CT(sp->rets[si.cret]) : "void";
 }
@@ -373,7 +373,7 @@ inline string CodeGen::SigRet(FnSpec *sp) {
 // The stacks of the classes PlanTopClasses admitted: each has a single
 // spelling then (see the note above). A caller's stack arriving as a plain
 // `gs_stack *` parameter otherwise never does, and keeps the memory form.
-inline bool CodeGen::CacheableStk(const string &stk) {
+bool CodeGen::CacheableStk(const string &stk) {
     if (!cachetops) return false;
     if (stk.compare(0, 3, "GS(") == 0) return topown;
     if (gstkexprs.count(stk)) return topglob;
@@ -388,14 +388,14 @@ inline bool CodeGen::CacheableStk(const string &stk) {
 }
 
 // A function owns a handful of stacks at most, so these stay linear scans.
-inline int CodeGen::TopIdx(const string &stk) {
+int CodeGen::TopIdx(const string &stk) {
     for (size_t i = 0; i < toporder.size(); i++) if (toporder[i] == stk) return (int)i;
     toporder.push_back(stk);
     return (int)toporder.size() - 1;
 }
 
 // Whether a construction region of stk is open here (MarkConsBegin).
-inline bool CodeGen::InConsOf(const string &stk) {
+bool CodeGen::InConsOf(const string &stk) {
     for (auto id : loopstack) if (loopcons[id] == stk) return true;
     return false;
 }
@@ -404,7 +404,7 @@ inline bool CodeGen::InConsOf(const string &stk) {
 // takes here depends on the regions, and those are only known once the
 // whole body is. A stack no class caches has one only inside a
 // construction at its top.
-inline string CodeGen::Top(const string &stk) {
+string CodeGen::Top(const string &stk) {
     if (!markers || (!CacheableStk(stk) && !InConsOf(stk))) return cat(stk, "->top");
     return cat(TOPMARK, TopIdx(stk), "@@");
 }
@@ -418,7 +418,7 @@ inline string CodeGen::Top(const string &stk) {
 // no local live, and synced at every call, through the rest of it); a
 // construction's counts against that construction where the stack is not
 // otherwise cached.
-inline string CodeGen::TopW(const string &stk) {
+string CodeGen::TopW(const string &stk) {
     if (CacheableStk(stk)) {
         auto loop = -1, block = -1;
         for (auto it = loopstack.rbegin(); it != loopstack.rend() && loop < 0; ++it) {
@@ -437,7 +437,7 @@ inline string CodeGen::TopW(const string &stk) {
 }
 
 // A loop's edges, where the tops it grows are loaded and stored back.
-inline int CodeGen::MarkLoopBegin() {
+int CodeGen::MarkLoopBegin() {
     if (!markers) return -1;
     auto id = (int)loopparent.size();
     loopparent.push_back(loopstack.empty() ? -1 : loopstack.back());
@@ -448,7 +448,7 @@ inline int CodeGen::MarkLoopBegin() {
 }
 
 // A block's edges, likewise (GenBlockInner).
-inline int CodeGen::MarkBlockBegin() {
+int CodeGen::MarkBlockBegin() {
     if (!markers) return -1;
     auto id = (int)loopparent.size();
     loopparent.push_back(loopstack.empty() ? -1 : loopstack.back());
@@ -458,7 +458,7 @@ inline int CodeGen::MarkBlockBegin() {
     return id;
 }
 
-inline void CodeGen::MarkLoopEnd(int id) {
+void CodeGen::MarkLoopEnd(int id) {
     if (id < 0) return;
     assert(loopstack.back() == id);
     loopstack.pop_back();
@@ -472,7 +472,7 @@ inline void CodeGen::MarkLoopEnd(int id) {
 // growth during construction), so no other spelling of it moves its top
 // meanwhile, and a call among the fields' initializers syncs it whatever
 // the call reaches.
-inline int CodeGen::MarkConsBegin(const string &stk) {
+int CodeGen::MarkConsBegin(const string &stk) {
     if (!markers || CacheableStk(stk) || InConsOf(stk)) return -1;
     auto id = (int)loopparent.size();
     loopparent.push_back(loopstack.empty() ? -1 : loopstack.back());
@@ -486,7 +486,7 @@ inline int CodeGen::MarkConsBegin(const string &stk) {
 // against -- the innermost loop around it, or block outside every loop, or
 // construction -- less any of those nested inside another. A growth at the
 // body's top level takes the whole body instead.
-inline CodeGen::TopCachePlan CodeGen::PlanTopCaches() {
+CodeGen::TopCachePlan CodeGen::PlanTopCaches() {
     TopCachePlan plan;
     plan.fnlocals.resize(toporder.size());
     vector<int> fnwide(toporder.size(), 0);
@@ -506,14 +506,14 @@ inline CodeGen::TopCachePlan CodeGen::PlanTopCaches() {
     return plan;
 }
 
-inline bool CodeGen::LineIs(string_view s, const char *pfx) {
+bool CodeGen::LineIs(string_view s, const char *pfx) {
     return s.compare(0, strlen(pfx), pfx) == 0;
 }
 
 // The label a jump on this line targets, or "" -- the conditional form
 // `if (!(c)) goto L;` counts, since a flush placed before it is harmless
 // on the path that does not take it.
-inline string_view CodeGen::GotoTarget(string_view line) {
+string_view CodeGen::GotoTarget(string_view line) {
     auto g = line.find("goto ");
     if (g == string_view::npos) return {};
     auto b = g + 5;
@@ -522,7 +522,7 @@ inline string_view CodeGen::GotoTarget(string_view line) {
 }
 
 // The label this line defines, or "".
-inline string_view CodeGen::LabelHere(string_view line) {
+string_view CodeGen::LabelHere(string_view line) {
     if (line.size() < 3 || line.compare(line.size() - 2, 2, ":;") != 0) return {};
     auto name = line.substr(0, line.size() - 2);
     for (auto c : name)
@@ -532,7 +532,7 @@ inline string_view CodeGen::LabelHere(string_view line) {
 
 // Line `i` of `b` without its indentation, whose width lands in `ind0`;
 // `i` moves on to the next line.
-inline string_view CodeGen::NextLine(const string &b, size_t &i, size_t &ind0) {
+string_view CodeGen::NextLine(const string &b, size_t &i, size_t &ind0) {
     auto eol = b.find('\n', i);
     if (eol == string::npos) eol = b.size();
     auto line = string_view(b).substr(i, eol - i);
@@ -544,7 +544,7 @@ inline string_view CodeGen::NextLine(const string &b, size_t &i, size_t &ind0) {
 
 // The count a growth site writes, for caching with the stack's top when its
 // header qualifies (LenSlot).
-inline void CodeGen::NoteLen(const string &stk, const string &lenlv) {
+void CodeGen::NoteLen(const string &stk, const string &lenlv) {
     string root;
     if (!CacheableStk(stk) || !LenRoot(lenlv, root)) return;
     auto k = TopIdx(stk);
@@ -557,7 +557,7 @@ inline void CodeGen::NoteLen(const string &stk, const string &lenlv) {
 // captured one's `(*v).len` -- and the header's spelling, which any other
 // mention of it shares. A frame object's tail has others (the whole object
 // copied), and a local's header is the C compiler's to keep in registers.
-inline bool CodeGen::LenRoot(const string &lenlv, string &root) {
+bool CodeGen::LenRoot(const string &lenlv, string &root) {
     auto ident = [&](size_t b, size_t e) {
         if (b >= e || isdigit((unsigned char)lenlv[b])) return false;
         for (auto i = b; i < e; i++)
@@ -593,7 +593,7 @@ inline bool CodeGen::LenRoot(const string &lenlv, string &root) {
 // call's flush and reload of the stack; each pass drops the slots it finds
 // mentioned otherwise, until one finds none. A body that cached nothing
 // still has its markers to remove.
-inline string CodeGen::ExpandTopMarkers(const string &b, TopCachePlan &plan) {
+string CodeGen::ExpandTopMarkers(const string &b, TopCachePlan &plan) {
     if (!markers) return b;
     vector<bool> lenok(lenslots.size(), true);
     for (;;) {
@@ -603,7 +603,7 @@ inline string CodeGen::ExpandTopMarkers(const string &b, TopCachePlan &plan) {
     }
 }
 
-inline string CodeGen::ExpandTopMarkers1(const string &b, TopCachePlan &plan,
+string CodeGen::ExpandTopMarkers1(const string &b, TopCachePlan &plan,
                                          vector<bool> &lenok, bool &clean) {
     // A region is the text between its loop's two markers, so a jump stays
     // inside it exactly when the line its label sits on does.
@@ -767,26 +767,26 @@ inline string CodeGen::ExpandTopMarkers1(const string &b, TopCachePlan &plan,
     return out;
 }
 
-inline void CodeGen::PushSc(int kind) {
+void CodeGen::PushSc(int kind) {
     CScope s;
     s.kind = kind;
     s.stkbase = stknext;
     cscopes.push_back(s);
 }
 
-inline void CodeGen::EmitRestores(const CScope &s) {
+void CodeGen::EmitRestores(const CScope &s) {
     for (auto i = (int)s.saves.size() - 1; i >= 0; i--)
         L(Top(s.saves[i].first), " = ", s.saves[i].second, ";");
 }
 
-inline void CodeGen::PopSc() {
+void CodeGen::PopSc() {
     EmitRestores(cscopes.back());
     stknext = cscopes.back().stkbase;
     cscopes.pop_back();
 }
 
 // Restores for exiting down to (and including) scope index `to`.
-inline void CodeGen::EmitExitRestores(int to) {
+void CodeGen::EmitExitRestores(int to) {
     for (auto i = (int)cscopes.size() - 1; i >= to; i--) EmitRestores(cscopes[i]);
 }
 
@@ -796,7 +796,7 @@ inline void CodeGen::EmitExitRestores(int to) {
 // included, which a recursive cycle's scratch locals rely on (§7.8).
 // Returns the stack expression; the caller emits `uint8_t *base = X->top;`
 // and registers it via SaveBase.
-inline string CodeGen::AllocStk(bool forlocal) {
+string CodeGen::AllocStk(bool forlocal) {
     auto k = stknext++;
     stkmax = std::max(stkmax, stknext);
     if (forlocal)
@@ -805,7 +805,7 @@ inline string CodeGen::AllocStk(bool forlocal) {
     return SpIdx(k);
 }
 
-inline void CodeGen::SaveBase(bool forlocal, const string &stk, const string &basevar) {
+void CodeGen::SaveBase(bool forlocal, const string &stk, const string &basevar) {
     for (auto i = (int)cscopes.size() - 1; i >= 0; i--) {
         if (forlocal && cscopes[i].kind == SC_STMT) continue;
         cscopes[i].saves.push_back({ stk, basevar });
@@ -814,7 +814,7 @@ inline void CodeGen::SaveBase(bool forlocal, const string &stk, const string &ba
     assert(false);
 }
 
-inline string CodeGen::PoolBase(const VarDef *pool) {
+string CodeGen::PoolBase(const VarDef *pool) {
     // Global initializers run in declaration order, and a pool's base is
     // only set when its own initializer does: there is no point in the
     // function to hoist a load to, so read the header there.
@@ -828,18 +828,18 @@ inline string CodeGen::PoolBase(const VarDef *pool) {
 // A pool's element region is the same address its `in pool` offsets
 // measure from, so element access reads the local too rather than the
 // header a relative store may have made the C compiler reload.
-inline string CodeGen::PoolBaseOr(const VarDef *vd, const string &hdrbase) {
+string CodeGen::PoolBaseOr(const VarDef *vd, const string &hdrbase) {
     return poolglobals.count(vd) ? PoolBase(vd) : hdrbase;
 }
 
-inline string CodeGen::LocalName(VarDef *vd) {
+string CodeGen::LocalName(VarDef *vd) {
     assert(!vd->isglobal);
     auto it = vnames.find(vd);
     if (it != vnames.end()) return it->second;
     return vnames[vd] = Unique2(Sanitize(vd->name));
 }
 
-inline string CodeGen::VName(const VarDef *vd) {
+string CodeGen::VName(const VarDef *vd) {
     auto it = vnames.find(vd);
     if (it != vnames.end()) return it->second;
     auto git = gnames.find(vd);
@@ -849,7 +849,7 @@ inline string CodeGen::VName(const VarDef *vd) {
 
 // Used names only accumulate within a function. A suffix rejected earlier
 // remains occupied, including one reserved globally or by another base.
-inline string CodeGen::Unique2(const string &base) {
+string CodeGen::Unique2(const string &base) {
     auto name = base;
     if (fnused.count(name) || used.count(name)) {
         auto &next = fnnextsuffix.try_emplace(base, 2).first->second;

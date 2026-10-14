@@ -11,7 +11,7 @@ namespace goose {
 // limited arrays were evaluated during checking; assert rather than
 // re-evaluate.
 
-inline bool CodeGen::TEq(TypeExpr *a, TypeExpr *b) {
+bool CodeGen::TEq(TypeExpr *a, TypeExpr *b) {
     if (a == b) return true;
     if (a->kind != b->kind) return false;
     switch (a->kind) {
@@ -43,7 +43,7 @@ inline bool CodeGen::TEq(TypeExpr *a, TypeExpr *b) {
 
 // Instantiations: the typechecker filled the per-TypeExpr caches for every
 // type it touched; fall back to an argument-equality search for clones.
-inline StructInst *CodeGen::SI(TypeExpr *t) {
+StructInst *CodeGen::SI(TypeExpr *t) {
     assert(t->kind == TY_STRUCT);
     if (t->struc->inst) return t->struc->inst;
     for (auto inst : t->struc->st->insts) {
@@ -57,7 +57,7 @@ inline StructInst *CodeGen::SI(TypeExpr *t) {
     return nullptr;
 }
 
-inline EnumInst *CodeGen::EIOf(TypeExpr *t) {
+EnumInst *CodeGen::EIOf(TypeExpr *t) {
     assert(t->kind == TY_ENUM);
     if (t->enu->inst) return t->enu->inst;
     for (auto inst : t->enu->en->insts) {
@@ -71,12 +71,12 @@ inline EnumInst *CodeGen::EIOf(TypeExpr *t) {
     return nullptr;
 }
 
-inline EnumInst *CodeGen::EIVar(TypeExpr *t) {   // For TY_VARIANT.
+EnumInst *CodeGen::EIVar(TypeExpr *t) {   // For TY_VARIANT.
     assert(t->kind == TY_VARIANT);
     return EIOf(t->var->adt);
 }
 
-inline span<const FieldRun> CodeGen::FieldRuns(TypeExpr *t) {
+span<const FieldRun> CodeGen::FieldRuns(TypeExpr *t) {
     switch (t->kind) {
         case TY_STRUCT: return RunsOf(SI(t));
         case TY_ENUM: return RunsOf(EIOf(t));
@@ -88,7 +88,7 @@ inline span<const FieldRun> CodeGen::FieldRuns(TypeExpr *t) {
     }
 }
 
-inline SizeClass CodeGen::Cls(TypeExpr *t) {
+SizeClass CodeGen::Cls(TypeExpr *t) {
     switch (t->kind) {
         case TY_INT: return t->intstorage == IS_VARINT ? SC_VARIABLE : SC_FIXED;
         case TY_REF: return t->ref->lenstorage == IS_VARINT ? SC_VARIABLE : SC_FIXED;
@@ -111,7 +111,7 @@ inline SizeClass CodeGen::Cls(TypeExpr *t) {
 }
 
 // The innermost tail's gs_rhdr lvalue within frame object `obj`.
-inline string CodeGen::FoTailHdr(TypeExpr *t, const string &obj) {
+string CodeGen::FoTailHdr(TypeExpr *t, const string &obj) {
     auto si = SI(t);
     auto ti = LastRealField(si->st->fields);
     auto s = cat(obj, ".", Sanitize(si->st->fields[ti].name));
@@ -119,7 +119,7 @@ inline string CodeGen::FoTailHdr(TypeExpr *t, const string &obj) {
     return IsFrameObj(ft) ? FoTailHdr(ft, s) : s;
 }
 
-inline TypeExpr *CodeGen::FoTailArr(TypeExpr *t) {
+TypeExpr *CodeGen::FoTailArr(TypeExpr *t) {
     auto si = SI(t);
     auto ft = si->ftypes[LastRealField(si->st->fields)];
     return IsFrameObj(ft) ? FoTailArr(ft) : ft;
@@ -127,13 +127,13 @@ inline TypeExpr *CodeGen::FoTailArr(TypeExpr *t) {
 
 // The bytes of a frame object before its innermost tail header, which is
 // the C struct's last member: the fixed fields at every nesting level.
-inline string CodeGen::FoPrefixSize(TypeExpr *t) {
+string CodeGen::FoPrefixSize(TypeExpr *t) {
     return cat("(sizeof(", CT(t), ") - sizeof(gs_rhdr))");
 }
 
 // Where the innermost tail's elements start in that bytes layout (FoBytes),
 // in which a bare pad inserts nothing, as in any variable-class layout.
-inline int64_t CodeGen::FoBytesPrefix(TypeExpr *t) {
+int64_t CodeGen::FoBytesPrefix(TypeExpr *t) {
     auto si = SI(t);
     int64_t n = 0;
     for (size_t i = 0; i < si->st->fields.size(); i++) {
@@ -147,7 +147,7 @@ inline int64_t CodeGen::FoBytesPrefix(TypeExpr *t) {
     return n;
 }
 
-inline bool CodeGen::IsFatRef(TypeExpr *t) {
+bool CodeGen::IsFatRef(TypeExpr *t) {
     return t->kind == TY_REF && t->ref->lenstorage < 0 && IsResz(t->ref->sub);
 }
 
@@ -158,12 +158,12 @@ inline bool CodeGen::IsFatRef(TypeExpr *t) {
 // (SyncReach). A nominal type reached again on the way
 // through itself has no further fat reference to offer, so `open` cuts the
 // recursion there.
-inline bool CodeGen::HoldsFatRef(TypeExpr *t) {
+bool CodeGen::HoldsFatRef(TypeExpr *t) {
     set<const void *> open;
     return HoldsFatRefIn(t, open);
 }
 
-inline bool CodeGen::HoldsFatRefIn(TypeExpr *t, set<const void *> &open) {
+bool CodeGen::HoldsFatRefIn(TypeExpr *t, set<const void *> &open) {
     switch (t->kind) {
         case TY_REF: return IsFatRef(t) || HoldsFatRefIn(t->ref->sub, open);
         case TY_SLICE: return HoldsFatRefIn(t->sub, open);
@@ -181,7 +181,7 @@ inline bool CodeGen::HoldsFatRefIn(TypeExpr *t, set<const void *> &open) {
 
 // The stored length-field type of an array (A_VAR: declared or u32
 // default; A_LIMITED with static capacity: smallest fitting type).
-inline IntStorage CodeGen::LenStore(TypeArray *a) {
+IntStorage CodeGen::LenStore(TypeArray *a) {
     switch (a->akind) {
         case A_VAR:
             return a->lenstorage < 0 ? IS_U32 : (IntStorage)a->lenstorage;
@@ -195,7 +195,7 @@ inline IntStorage CodeGen::LenStore(TypeArray *a) {
     }
 }
 
-inline const char *CodeGen::IntCT(IntStorage s) {
+const char *CodeGen::IntCT(IntStorage s) {
     switch (s) {
         case IS_I8:  return "int8_t";
         case IS_I16: return "int16_t";
@@ -209,7 +209,7 @@ inline const char *CodeGen::IntCT(IntStorage s) {
 }
 
 // The runtime arithmetic helper suffix per integer type (runtime.h).
-inline const char *CodeGen::IntSfx(IntStorage s) {
+const char *CodeGen::IntSfx(IntStorage s) {
     switch (s) {
         case IS_I8:  return "i8";
         case IS_I16: return "i16";
@@ -226,7 +226,7 @@ inline const char *CodeGen::IntSfx(IntStorage s) {
 // signed for a self-relative offset, which runs both ways from its own
 // field, unsigned for an `in pool` one, which is a distance from the
 // pool's base (§3.9).
-inline const char *CodeGen::RelCT(IntStorage s, bool uns) {
+const char *CodeGen::RelCT(IntStorage s, bool uns) {
     switch (IntSize(s)) {
         case 1: return uns ? "uint8_t" : "int8_t";
         case 2: return uns ? "uint16_t" : "int16_t";
@@ -235,14 +235,14 @@ inline const char *CodeGen::RelCT(IntStorage s, bool uns) {
     }
 }
 
-inline const char *CodeGen::RelCT(TypeExpr *rt) {
+const char *CodeGen::RelCT(TypeExpr *rt) {
     return RelCT((IntStorage)rt->ref->lenstorage, rt->ref->pool != nullptr);
 }
 
 // StructInst / (EnumInst, variant).
 
 // The alignment `pad` (bare form) gives the next field: its scalar width.
-inline int64_t CodeGen::PadAlign(TypeExpr *t) {
+int64_t CodeGen::PadAlign(TypeExpr *t) {
     switch (t->kind) {
         case TY_INT: return t->intstorage == IS_VARINT ? 1 : IntSize(t->intstorage);
         case TY_FLT: return t->fltstorage == FS_F32 ? 4 : 8;
@@ -255,7 +255,7 @@ inline int64_t CodeGen::PadAlign(TypeExpr *t) {
     }
 }
 
-inline CodeGen::Layout CodeGen::LayoutFields(const vector<Field> &fields,
+CodeGen::Layout CodeGen::LayoutFields(const vector<Field> &fields,
                                              const vector<TypeExpr *> &ftypes) {
     Layout lo;
     int64_t off = 0;
@@ -282,21 +282,21 @@ inline CodeGen::Layout CodeGen::LayoutFields(const vector<Field> &fields,
     return lo;
 }
 
-inline const CodeGen::Layout &CodeGen::StructLayout(StructInst *si) {
+const CodeGen::Layout &CodeGen::StructLayout(StructInst *si) {
     auto key = pair<const void *, int>(si, -1);
     auto it = layouts.find(key);
     if (it != layouts.end()) return it->second;
     return layouts[key] = LayoutFields(si->st->fields, si->ftypes);
 }
 
-inline const CodeGen::Layout &CodeGen::VariantLayout(EnumInst *ei, int vi) {
+const CodeGen::Layout &CodeGen::VariantLayout(EnumInst *ei, int vi) {
     auto key = pair<const void *, int>(ei, vi);
     auto it = layouts.find(key);
     if (it != layouts.end()) return it->second;
     return layouts[key] = LayoutFields(ei->en->variants[vi].fields, ei->vftypes[vi]);
 }
 
-inline int64_t CodeGen::FixedSize(TypeExpr *t) {
+int64_t CodeGen::FixedSize(TypeExpr *t) {
     switch (t->kind) {
         case TY_INT:  assert(t->intstorage != IS_VARINT); return IntSize(t->intstorage);
         case TY_FLT:  return t->fltstorage == FS_F32 ? 4 : 8;
@@ -353,7 +353,7 @@ inline int64_t CodeGen::FixedSize(TypeExpr *t) {
 //
 // The one name that crosses into real C untouched is an `extern fn`'s symbol,
 // which is the C name the declaration gives and never comes through here.
-inline string CodeGen::Sanitize(string_view name) {
+string CodeGen::Sanitize(string_view name) {
     string s(name);
     if (s.empty()) s = "_";
     return s + "_g";
@@ -364,12 +364,12 @@ inline string CodeGen::Sanitize(string_view name) {
 // keep the mapping injective -- `a::b_c` and `a_b::c` differ in them, and no
 // global name's C form ends in a digit -- without a list of characters to
 // replace.
-inline string CodeGen::Sanitize(string_view ns, string_view name) {
+string CodeGen::Sanitize(string_view ns, string_view name) {
     if (ns.empty()) return Sanitize(name);
     return cat(ns, "_", name, "_g", ns.size());
 }
 
-inline string CodeGen::Unique(string base) {
+string CodeGen::Unique(string base) {
     if (!used.count(base)) { used.insert(base); return base; }
     for (auto n = 2;; n++) {
         auto s = cat(base, "_", n);
@@ -382,7 +382,7 @@ inline string CodeGen::Unique(string base) {
 // every per-type artifact (typedef, size fn, eq fn); the C name is the
 // uniquified mangle.
 
-inline string CodeGen::Mangle(TypeExpr *t) {
+string CodeGen::Mangle(TypeExpr *t) {
     switch (t->kind) {
         case TY_INT:
             return t->intstorage == IS_VARINT ? "vi" : IntSfx(t->intstorage);
@@ -429,7 +429,7 @@ inline string CodeGen::Mangle(TypeExpr *t) {
     }
 }
 
-inline void CodeGen::EmitCoreTypes() {
+void CodeGen::EmitCoreTypes() {
     if (corebuiltins) return;
     corebuiltins = true;
     // A resizable value is a frame header (C.2): the data pointer (element
@@ -447,7 +447,7 @@ inline void CodeGen::EmitCoreTypes() {
 
 // The C type of a fixed-class value (also refs/slices to anything). Emits
 // the typedef on first use. Never valid for bytes-class values.
-inline string CodeGen::CT(TypeExpr *t) {
+string CodeGen::CT(TypeExpr *t) {
     switch (t->kind) {
         case TY_INT:  assert(t->intstorage != IS_VARINT); return IntCT(t->intstorage);
         case TY_FLT:  return t->fltstorage == FS_F32 ? "float" : "double";
@@ -554,14 +554,14 @@ inline string CodeGen::CT(TypeExpr *t) {
 // forward typedef the moment they are named (NameCT), so a reference to
 // one needs only the name and the body follows when the type is first
 // needed by value or through a pointer (PointeeLv).
-inline bool CodeGen::StructLike(TypeExpr *t) {
+bool CodeGen::StructLike(TypeExpr *t) {
     return t->kind == TY_STRUCT || t->kind == TY_VARIANT ||
            (t->kind == TY_ENUM && !t->enu->varmode);
 }
 
 // The C name of a fixed-class type, assigned (and, for struct-like kinds,
 // forward-declared) on first sight; CT emits the body.
-inline string CodeGen::NameCT(TypeExpr *t) {
+string CodeGen::NameCT(TypeExpr *t) {
     auto m = Mangle(t);
     auto it = ctypes.find(m);
     if (it != ctypes.end()) return it->second;
@@ -572,7 +572,7 @@ inline string CodeGen::NameCT(TypeExpr *t) {
     return name;
 }
 
-inline void CodeGen::EmitCFields(string &d, const vector<Field> &fields,
+void CodeGen::EmitCFields(string &d, const vector<Field> &fields,
                                  const vector<TypeExpr *> &ftypes) {
     // A frame object's tail is not part of the packed layout: it is the
     // tail's own header (or nested frame object) after the fixed fields.
@@ -599,7 +599,7 @@ inline void CodeGen::EmitCFields(string &d, const vector<Field> &fields,
     }
 }
 
-inline void CodeGen::EnsureTagEnum(EnumInst *ei) {
+void CodeGen::EnsureTagEnum(EnumInst *ei) {
     if (tagenums.count(ei)) return;
     tagenums.insert(ei);
     // Use the base (mode-less) mangle as the constant prefix.
@@ -614,12 +614,12 @@ inline void CodeGen::EnsureTagEnum(EnumInst *ei) {
     tdecls += d;
 }
 
-inline string CodeGen::TagConst(EnumInst *ei, int vi) {
+string CodeGen::TagConst(EnumInst *ei, int vi) {
     EnsureTagEnum(ei);
     return cat(tagprefix[ei], "_", Sanitize(ei->en->variants[vi].name), "_k");
 }
 
-inline TypeExpr *CodeGen::VariantType(TypeExpr *enumtype, int vi) {
+TypeExpr *CodeGen::VariantType(TypeExpr *enumtype, int vi) {
     auto ei = EIOf(enumtype);
     auto key = pair<EnumInst *, int>(ei, vi);
     auto it = varianttypes.find(key);
@@ -637,12 +637,12 @@ inline TypeExpr *CodeGen::VariantType(TypeExpr *enumtype, int vi) {
 
 // A C expression for the size of the value of type t at ptr; emits the
 // walker function on demand for dynamic types.
-inline string CodeGen::SizeX(TypeExpr *t, const string &ptr) {
+string CodeGen::SizeX(TypeExpr *t, const string &ptr) {
     if (IsFix(t)) return cat(FixedSize(t));
     return cat(SizeFn(t), "(", ptr, ")");
 }
 
-inline string CodeGen::SizeFn(TypeExpr *t) {
+string CodeGen::SizeFn(TypeExpr *t) {
     auto m = Mangle(t);
     auto name = cat("gs_size_", m);
     if (sizefns.count(m)) return name;
@@ -658,7 +658,7 @@ inline string CodeGen::SizeFn(TypeExpr *t) {
 }
 
 // Appends statements advancing cursor `q` over one value of type t.
-inline void CodeGen::EmitSizeWalk(string &b, TypeExpr *t, const string &q) {
+void CodeGen::EmitSizeWalk(string &b, TypeExpr *t, const string &q) {
     if (IsFix(t)) {
         Append(b, "    ", q, " += ", FixedSize(t), ";\n");
         return;
@@ -727,7 +727,7 @@ inline void CodeGen::EmitSizeWalk(string &b, TypeExpr *t, const string &q) {
     }
 }
 
-inline void CodeGen::EmitSizeElems(string &b, TypeExpr *elem, const string &q) {
+void CodeGen::EmitSizeElems(string &b, TypeExpr *elem, const string &q) {
     if (IsFix(elem)) {
         Append(b, "    ", q, " += n * ", FixedSize(elem), ";\n");
     } else {
@@ -738,7 +738,7 @@ inline void CodeGen::EmitSizeElems(string &b, TypeExpr *elem, const string &q) {
 
 // The size of the all-zeroes minimal value of a type (arrays empty, ADTs
 // at variant 0): what a missed qpoll writes so the value stays valid.
-inline int64_t CodeGen::ZeroSize(TypeExpr *t) {
+int64_t CodeGen::ZeroSize(TypeExpr *t) {
     assert(!IsResz(t));   // Resizable zero values are empty headers.
     if (IsFix(t)) return FixedSize(t);
     switch (t->kind) {
@@ -763,7 +763,7 @@ inline int64_t CodeGen::ZeroSize(TypeExpr *t) {
 
 // The fewest bytes any value of this type can occupy: what bounds the
 // element count a length field may claim, before a single element is walked.
-inline int64_t CodeGen::MinBytes(TypeExpr *t) {
+int64_t CodeGen::MinBytes(TypeExpr *t) {
     if (IsFix(t)) return FixedSize(t);
     switch (t->kind) {
         case TY_INT: case TY_REF: return 1;   // varint / varint-width relative ref
@@ -802,7 +802,7 @@ inline int64_t CodeGen::MinBytes(TypeExpr *t) {
 // Does a value of this type hold a relative reference at any depth? Unlike
 // HasRelRef this looks through variable-size types too, since an image's
 // elements are exactly the types HasRelRef does not reach.
-inline bool CodeGen::HasRelRefAny(TypeExpr *t) {
+bool CodeGen::HasRelRefAny(TypeExpr *t) {
     switch (t->kind) {
         case TY_REF: return t->ref->lenstorage >= 0;
         case TY_ARRAY: return HasRelRefAny(t->arr->sub);
@@ -814,7 +814,7 @@ inline bool CodeGen::HasRelRefAny(TypeExpr *t) {
 // can simply skip its bytes: a fixed value with no ADT tag to range-check,
 // no boolean to validate, limited-array length to bound or relative reference to follow is
 // opaque payload either way.
-inline bool CodeGen::NeedsVerifyWalk(TypeExpr *t) {
+bool CodeGen::NeedsVerifyWalk(TypeExpr *t) {
     if (!IsFix(t)) return true;
     switch (t->kind) {
         case TY_BOOL: return true;
@@ -828,7 +828,7 @@ inline bool CodeGen::NeedsVerifyWalk(TypeExpr *t) {
     }
 }
 
-inline void CodeGen::VNeed(string &b, const string &q, const string &bytes) {
+void CodeGen::VNeed(string &b, const string &q, const string &bytes) {
     Append(b, "    if (n - ", q, " < ", bytes, ") return -1;\n");
 }
 
@@ -837,7 +837,7 @@ inline void CodeGen::VNeed(string &b, const string &q, const string &bytes) {
 // multiples of their size, so their links are checked in the same pass that
 // frames them; variable ones need the framing pass to record the starts in
 // `bm` before a second pass can check a link against them.
-inline string CodeGen::VerifyFn(TypeExpr *elem) {
+string CodeGen::VerifyFn(TypeExpr *elem) {
     auto m = Mangle(elem);
     auto name = cat("gs_verify_", m);
     if (verifyfns.count(m)) return name;
@@ -879,7 +879,7 @@ inline string CodeGen::VerifyFn(TypeExpr *elem) {
 // must be the start of an element of the image, and, where the reference is
 // typed at a variant of the element ADT, an element carrying that tag (§3
 // step 3). Offset 0 is null, and only an optional reference may hold it.
-inline void CodeGen::EmitVerifyLink(string &b, TypeExpr *rt, TypeExpr *elem, const string &q,
+void CodeGen::EmitVerifyLink(string &b, TypeExpr *rt, TypeExpr *elem, const string &q,
                                     const string &off) {
     auto v = VTmp();
     // A reference typed at a variant addresses the *payload*, which is the
@@ -917,7 +917,7 @@ inline void CodeGen::EmitVerifyLink(string &b, TypeExpr *rt, TypeExpr *elem, con
 // A run of fields. `lo` is the packed layout of a fixed struct or variant,
 // whose field offsets may include alignment padding a sequential walk would
 // miss; bytes layouts have none and pass null.
-inline void CodeGen::EmitVerifyFields(string &b, const vector<Field> &fields,
+void CodeGen::EmitVerifyFields(string &b, const vector<Field> &fields,
                                       const vector<TypeExpr *> &ftypes, const Layout *lo,
                                       int64_t total, TypeExpr *elem, const string &q,
                                       bool links) {
@@ -942,7 +942,7 @@ inline void CodeGen::EmitVerifyFields(string &b, const vector<Field> &fields,
 
 // The checks and cursor advance for one value of type t at byte offset `q`
 // of the image; any failure returns -1 from the enclosing verifier.
-inline void CodeGen::EmitVerifyWalk(string &b, TypeExpr *t, TypeExpr *elem, const string &q,
+void CodeGen::EmitVerifyWalk(string &b, TypeExpr *t, TypeExpr *elem, const string &q,
                                     bool links) {
     if (!NeedsVerifyWalk(t)) {
         auto sz = FixedSize(t);
@@ -1140,7 +1140,7 @@ inline void CodeGen::EmitVerifyWalk(string &b, TypeExpr *t, TypeExpr *elem, cons
 
 // Does any field at any depth of a fixed type declare a default value? An
 // empty array has no fields.
-inline bool CodeGen::HasFieldDefaults(TypeExpr *t) {
+bool CodeGen::HasFieldDefaults(TypeExpr *t) {
     switch (t->kind) {
         case TY_STRUCT: case TY_ENUM: case TY_VARIANT: {
             if (t->kind == TY_ENUM && t->enu->varmode) return false;
@@ -1164,7 +1164,7 @@ inline bool CodeGen::HasFieldDefaults(TypeExpr *t) {
 // Writes the default value of fixed type t into the C lvalue lv. A type
 // with a declared field default anywhere in it never gets here: the
 // checker builds its default as a literal (TypeCheck::CheckBuiltin).
-inline void CodeGen::EmitDefaultInto(const string &lv, TypeExpr *t) {
+void CodeGen::EmitDefaultInto(const string &lv, TypeExpr *t) {
     assert(!HasFieldDefaults(t));
     L("memset(&", lv, ", 0, sizeof(", lv, "));");
 }
@@ -1174,7 +1174,7 @@ inline void CodeGen::EmitDefaultInto(const string &lv, TypeExpr *t) {
 // bytes values as pointers. Gap-free fixed types without floats of more
 // than a few scalars shortcut to memcmp.
 
-inline bool CodeGen::BitwiseEq(TypeExpr *t) {
+bool CodeGen::BitwiseEq(TypeExpr *t) {
     if (!IsFix(t)) return false;
     switch (t->kind) {
         case TY_STRUCT: case TY_VARIANT:
@@ -1191,7 +1191,7 @@ inline bool CodeGen::BitwiseEq(TypeExpr *t) {
     }
 }
 
-inline bool CodeGen::ScalarEq(TypeExpr *t) {
+bool CodeGen::ScalarEq(TypeExpr *t) {
     return t->kind == TY_INT || t->kind == TY_FLT || t->kind == TY_BOOL ||
            (t->kind == TY_REF && t->ref->lenstorage < 0 && !IsFatRef(t));
 }
@@ -1199,7 +1199,7 @@ inline bool CodeGen::ScalarEq(TypeExpr *t) {
 // How many scalars an equality test of fixed type t compares, counting
 // no further than cap. A leaf EqX has no comparison of its own for (a
 // relative reference, a function) counts as cap, which keeps memcmp.
-inline int64_t CodeGen::EqScalars(TypeExpr *t, int64_t cap) {
+int64_t CodeGen::EqScalars(TypeExpr *t, int64_t cap) {
     switch (t->kind) {
         case TY_STRUCT: case TY_VARIANT: {
             int64_t n = 0;
@@ -1221,7 +1221,7 @@ inline int64_t CodeGen::EqScalars(TypeExpr *t, int64_t cap) {
 
 // Equality of two values as a C expression; a/b are values (fixed) or
 // byte pointers (bytes-class). May emit an eq function.
-inline string CodeGen::EqX(TypeExpr *t, const string &a, const string &b) {
+string CodeGen::EqX(TypeExpr *t, const string &a, const string &b) {
     if (ScalarEq(t)) return cat("(", a, " == ", b, ")");
     if (t->kind == TY_REF && IsFatRef(t))
         return cat("(", a, ".hdr == ", b, ".hdr)");
@@ -1239,7 +1239,7 @@ inline string CodeGen::EqX(TypeExpr *t, const string &a, const string &b) {
     return cat(EqFn(t), "(", a, ", ", b, ")");
 }
 
-inline string CodeGen::EqFn(TypeExpr *t) {
+string CodeGen::EqFn(TypeExpr *t) {
     auto m = Mangle(t);
     auto name = cat("gs_eq_", m);
     if (eqfns.count(m)) return name;
@@ -1258,7 +1258,7 @@ inline string CodeGen::EqFn(TypeExpr *t) {
     return name;
 }
 
-inline void CodeGen::EmitEqFixed(string &bo, TypeExpr *t) {
+void CodeGen::EmitEqFixed(string &bo, TypeExpr *t) {
     switch (t->kind) {
         case TY_STRUCT: {
             auto si = SI(t);
@@ -1348,7 +1348,7 @@ inline void CodeGen::EmitEqFixed(string &bo, TypeExpr *t) {
     }
 }
 
-inline void CodeGen::EmitEqBytes(string &bo, TypeExpr *t) {
+void CodeGen::EmitEqBytes(string &bo, TypeExpr *t) {
     // Canonical encodings (minimal varints) make bytewise comparison exact
     // for any pad-free, float-free bytes value; walk-compare covers the rest.
     auto bitwise = [&](TypeExpr *tt) {
@@ -1382,7 +1382,7 @@ inline void CodeGen::EmitEqBytes(string &bo, TypeExpr *t) {
 }
 
 // Compares one value at *pa/*pb (advancing both); returns 0 on mismatch.
-inline void CodeGen::EmitEqWalk(string &bo, TypeExpr *t, const string &pa, const string &pb,
+void CodeGen::EmitEqWalk(string &bo, TypeExpr *t, const string &pa, const string &pb,
                                 int depth) {
     auto I = string("    ");
     if (IsFix(t)) {

@@ -10,21 +10,21 @@ namespace goose {
 
 // ---- CgX ------------------------------------------------------------------
 
-inline string IntLit::CgX(CodeGen &) {
+string IntLit::CgX(CodeGen &) {
     // A u64-typed value above i64.max has negative bits; emit it unsigned.
     if (val < 0 && exprtype && exprtype->kind == TY_INT && exprtype->intstorage == IS_U64)
         return cat((uint64_t)val, "ULL");
     return CodeGen::IntStr(val);
 }
 
-inline string FltLit::CgX(CodeGen &) {
+string FltLit::CgX(CodeGen &) {
     return CodeGen::FltStr(val, exprtype && exprtype->kind == TY_FLT &&
                                 exprtype->fltstorage == FS_F32);
 }
 
-inline string BoolLit::CgX(CodeGen &) { return val ? "1" : "0"; }
+string BoolLit::CgX(CodeGen &) { return val ? "1" : "0"; }
 
-inline string NullLit::CgX(CodeGen &cg) {
+string NullLit::CgX(CodeGen &cg) {
     if (exprtype && exprtype->kind == TY_REF && cg.IsResz(exprtype->ref->sub)) {
         auto t = cg.T();
         cg.L("gs_rref ", t, " = { 0, 0 };");
@@ -33,7 +33,7 @@ inline string NullLit::CgX(CodeGen &cg) {
     return "NULL";
 }
 
-inline string StrLit::CgX(CodeGen &cg) {
+string StrLit::CgX(CodeGen &cg) {
     auto et = exprtype;
     if (et->kind == TY_SLICE) {
         auto t = cg.T();
@@ -50,7 +50,7 @@ inline string StrLit::CgX(CodeGen &cg) {
     return t;
 }
 
-inline string Ident::CgX(CodeGen &cg) {
+string Ident::CgX(CodeGen &cg) {
     assert(vdef);   // Named-function values never reach runtime.
     auto x = cg.LoadLoc(cg.VarLoc(vdef), exprtype, line);
     // A literal parameter (§7.7) is passed at its nominal type and read at
@@ -68,7 +68,7 @@ inline string Ident::CgX(CodeGen &cg) {
     return x;
 }
 
-inline string Unary::CgX(CodeGen &cg) {
+string Unary::CgX(CodeGen &cg) {
     if (op == T_BITAND) {
         // Where the checker decayed the reference (an operand, a value
         // destination, a rendered value, a construct's branch with no
@@ -109,7 +109,7 @@ inline string Unary::CgX(CodeGen &cg) {
     }
 }
 
-inline string Binary::CgX(CodeGen &cg) {
+string Binary::CgX(CodeGen &cg) {
     if (op == T_DOTEQ || op == T_DOTNEQ) {
         // Reference identity: the addresses (a fat reference's header
         // pointer); null is the null address.
@@ -293,7 +293,7 @@ inline string Binary::CgX(CodeGen &cg) {
     }
 }
 
-inline string Dot::CgX(CodeGen &cg) {
+string Dot::CgX(CodeGen &cg) {
     if (variantconst) {
         auto et = exprtype;
         auto ei = einst;
@@ -320,12 +320,12 @@ inline string Dot::CgX(CodeGen &cg) {
     return cg.LoadLoc(lv, exprtype, line);
 }
 
-inline string Index::CgX(CodeGen &cg) {
+string Index::CgX(CodeGen &cg) {
     auto lv = cg.GenLoc(this);
     return cg.LoadLoc(lv, exprtype, line);
 }
 
-inline string SliceExpr::CgX(CodeGen &cg) {
+string SliceExpr::CgX(CodeGen &cg) {
     auto s = cg.GenSlice(this);
     if (!cg.IsStaticLimited(exprtype)) return s;
     // The range constructing a static-capacity limited array (§4.2).
@@ -341,7 +341,7 @@ inline string SliceExpr::CgX(CodeGen &cg) {
 // wraps or truncates (§6.3). A conversion to a float is never checked: it
 // rounds like float arithmetic does, and beyond f32's range it is an
 // infinity.
-inline string AsCast::CgX(CodeGen &cg) {
+string AsCast::CgX(CodeGen &cg) {
     auto x = cg.GenX(child);
     auto st = child->exprtype;
     auto tt = totype;
@@ -382,7 +382,7 @@ inline string AsCast::CgX(CodeGen &cg) {
     return cat("(double)(", x, ")");
 }
 
-inline string Call::CgX(CodeGen &cg) {
+string Call::CgX(CodeGen &cg) {
     // A result adapted to an ADT converts into a temporary (CgAny).
     if (cg.AdtFrom(this)) return cg.CtlValX(this);
     auto rets = cg.EmitCall(this, Dst {});
@@ -394,42 +394,42 @@ inline string Call::CgX(CodeGen &cg) {
 // copies from. Values containing relative references are built at their
 // destination instead (FixedLitAt), since offsets from a temporary would
 // not survive the copy.
-inline string StructLit::CgX(CodeGen &cg) {
+string StructLit::CgX(CodeGen &cg) {
     auto tv = cg.T();
     cg.FixedLocal(exprtype, tv, cg.HasUninitSlots(exprtype) ? "{0}" : "");
     cg.StructLitAt(this, tv, false);
     return tv;
 }
 
-inline string ArrayLit::CgX(CodeGen &cg) { return cg.GenFixedArrayLit(this); }
+string ArrayLit::CgX(CodeGen &cg) { return cg.GenFixedArrayLit(this); }
 
-inline string Block::CgX(CodeGen &cg) { return cg.CtlValX(this); }
-inline string IfExpr::CgX(CodeGen &cg) { return cg.CtlValX(this); }
-inline string MatchExpr::CgX(CodeGen &cg) { return cg.CtlValX(this); }
-inline string EarlyBlock::CgX(CodeGen &cg) { return cg.CtlValX(this); }
-inline string LoopExpr::CgX(CodeGen &cg) { return cg.CtlValX(this); }
-inline string InlineBlock::CgX(CodeGen &cg) { return cg.CtlValX(this); }
+string Block::CgX(CodeGen &cg) { return cg.CtlValX(this); }
+string IfExpr::CgX(CodeGen &cg) { return cg.CtlValX(this); }
+string MatchExpr::CgX(CodeGen &cg) { return cg.CtlValX(this); }
+string EarlyBlock::CgX(CodeGen &cg) { return cg.CtlValX(this); }
+string LoopExpr::CgX(CodeGen &cg) { return cg.CtlValX(this); }
+string InlineBlock::CgX(CodeGen &cg) { return cg.CtlValX(this); }
 
 // Statements and compile-time-only nodes have no value expression.
-inline string While::CgX(CodeGen &cg) { cg.Fail(line, "internal: While as value"); }
-inline string ForLoop::CgX(CodeGen &cg) { cg.Fail(line, "internal: ForLoop as value"); }
-inline string Return::CgX(CodeGen &cg) { cg.Fail(line, "internal: Return as value"); }
-inline string Break::CgX(CodeGen &cg) { cg.Fail(line, "internal: Break as value"); }
-inline string Continue::CgX(CodeGen &cg) { cg.Fail(line, "internal: Continue as value"); }
-inline string RangeExpr::CgX(CodeGen &cg) { cg.Fail(line, "internal: RangeExpr as value"); }
-inline string FunVal::CgX(CodeGen &cg) { cg.Fail(line, "internal: FunVal as value"); }
-inline string SelfRef::CgX(CodeGen &cg) { cg.Fail(line, "internal: self as value"); }
-inline string VarDecl::CgX(CodeGen &cg) { cg.Fail(line, "internal: VarDecl as value"); }
-inline string Assign::CgX(CodeGen &cg) { cg.Fail(line, "internal: Assign as value"); }
-inline string IncDec::CgX(CodeGen &cg) { cg.Fail(line, "internal: IncDec as value"); }
-inline string FnDecl::CgX(CodeGen &cg) { cg.Fail(line, "internal: FnDecl as value"); }
-inline string StructDecl::CgX(CodeGen &cg) { cg.Fail(line, "internal: decl as value"); }
-inline string EnumDecl::CgX(CodeGen &cg) { cg.Fail(line, "internal: decl as value"); }
-inline string AliasDecl::CgX(CodeGen &cg) { cg.Fail(line, "internal: decl as value"); }
+string While::CgX(CodeGen &cg) { cg.Fail(line, "internal: While as value"); }
+string ForLoop::CgX(CodeGen &cg) { cg.Fail(line, "internal: ForLoop as value"); }
+string Return::CgX(CodeGen &cg) { cg.Fail(line, "internal: Return as value"); }
+string Break::CgX(CodeGen &cg) { cg.Fail(line, "internal: Break as value"); }
+string Continue::CgX(CodeGen &cg) { cg.Fail(line, "internal: Continue as value"); }
+string RangeExpr::CgX(CodeGen &cg) { cg.Fail(line, "internal: RangeExpr as value"); }
+string FunVal::CgX(CodeGen &cg) { cg.Fail(line, "internal: FunVal as value"); }
+string SelfRef::CgX(CodeGen &cg) { cg.Fail(line, "internal: self as value"); }
+string VarDecl::CgX(CodeGen &cg) { cg.Fail(line, "internal: VarDecl as value"); }
+string Assign::CgX(CodeGen &cg) { cg.Fail(line, "internal: Assign as value"); }
+string IncDec::CgX(CodeGen &cg) { cg.Fail(line, "internal: IncDec as value"); }
+string FnDecl::CgX(CodeGen &cg) { cg.Fail(line, "internal: FnDecl as value"); }
+string StructDecl::CgX(CodeGen &cg) { cg.Fail(line, "internal: decl as value"); }
+string EnumDecl::CgX(CodeGen &cg) { cg.Fail(line, "internal: decl as value"); }
+string AliasDecl::CgX(CodeGen &cg) { cg.Fail(line, "internal: decl as value"); }
 
 // ---- CgAny ----------------------------------------------------------------
 
-inline void Block::CgAny(CodeGen &cg, const Dst &d) {
+void Block::CgAny(CodeGen &cg, const Dst &d) {
     // A self-call's arguments, bound in front of the base case inlined in
     // its place (optimize_basecase.h).
     auto first = cg.GenInlineArgs(this);
@@ -442,7 +442,7 @@ inline void Block::CgAny(CodeGen &cg, const Dst &d) {
     cg.L("}");
 }
 
-inline void IfExpr::CgAny(CodeGen &cg, const Dst &d) {
+void IfExpr::CgAny(CodeGen &cg, const Dst &d) {
     auto c = cg.GenTruth(cond);
     if (flat) {
         // The else cannot complete normally, so the then-block's contents
@@ -499,7 +499,7 @@ inline void IfExpr::CgAny(CodeGen &cg, const Dst &d) {
     if (hoist) ta->nobc = ea->nobc = false;
 }
 
-inline void MatchExpr::CgAny(CodeGen &cg, const Dst &d) {
+void MatchExpr::CgAny(CodeGen &cg, const Dst &d) {
     auto st = scrutinee->exprtype;
     TypeExpr *enumtype = nullptr;
     auto isref = false;
@@ -621,7 +621,7 @@ inline void MatchExpr::CgAny(CodeGen &cg, const Dst &d) {
     cg.termjump = false;
 }
 
-inline void EarlyBlock::CgAny(CodeGen &cg, const Dst &d) {
+void EarlyBlock::CgAny(CodeGen &cg, const Dst &d) {
     cg.PushSc(CodeGen::SC_BLOCK);
     auto si = (int)cg.cscopes.size() - 1;
     cg.cscopes[si].brklbl = cg.Lbl();
@@ -638,12 +638,12 @@ inline void EarlyBlock::CgAny(CodeGen &cg, const Dst &d) {
     cg.termjump = false;
 }
 
-inline void LoopExpr::CgAny(CodeGen &cg, const Dst &d) {
+void LoopExpr::CgAny(CodeGen &cg, const Dst &d) {
     CodeGen::ViewScope vs(cg, hoistrefs, hoistfields);
     cg.GenLoopBody({}, body, d);
 }
 
-inline void InlineBlock::CgAny(CodeGen &cg, const Dst &d) {
+void InlineBlock::CgAny(CodeGen &cg, const Dst &d) {
     // The body delivers the callee's own result type; one the call site
     // adapted to an ADT converts on the way out.
     if (auto from = cg.AdtFrom(this)) {
@@ -684,7 +684,7 @@ inline void InlineBlock::CgAny(CodeGen &cg, const Dst &d) {
     EmitBody(cg, d);
 }
 
-inline void InlineBlock::EmitBody(CodeGen &cg, const Dst &d) {
+void InlineBlock::EmitBody(CodeGen &cg, const Dst &d) {
     auto named = cg.OpenIbNrvo(this, d);
     // The named result's elements sit at d from its declaration on.
     if (named) cg.openat[d.s]++;
@@ -716,7 +716,7 @@ inline void InlineBlock::EmitBody(CodeGen &cg, const Dst &d) {
     cg.termjump = false;
 }
 
-inline void Call::CgAny(CodeGen &cg, const Dst &d) {
+void Call::CgAny(CodeGen &cg, const Dst &d) {
     // A result bound for a stack slot (a branch's value, say) is constructed
     // there as anywhere else, which is what copies in a resizable result
     // built behind a header of its own, or a returned reference's pointee.
@@ -745,15 +745,15 @@ inline void Call::CgAny(CodeGen &cg, const Dst &d) {
     }
 }
 
-inline void IntLit::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
-inline void FltLit::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
-inline void BoolLit::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
-inline void StrLit::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
-inline void NullLit::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
-inline void Ident::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
-inline void ArrayLit::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
-inline void StructLit::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
-inline void Unary::CgAny(CodeGen &cg, const Dst &d) {
+void IntLit::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
+void FltLit::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
+void BoolLit::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
+void StrLit::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
+void NullLit::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
+void Ident::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
+void ArrayLit::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
+void StructLit::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
+void Unary::CgAny(CodeGen &cg, const Dst &d) {
     // An elementwise negation writes its members straight into a plain
     // destination, as Binary's does below.
     if (d.k == DK_LVALUE && op == T_MINUS && exprtype &&
@@ -763,7 +763,7 @@ inline void Unary::CgAny(CodeGen &cg, const Dst &d) {
     }
     cg.LeafAny(this, d);
 }
-inline void Binary::CgAny(CodeGen &cg, const Dst &d) {
+void Binary::CgAny(CodeGen &cg, const Dst &d) {
     // An elementwise result (struct/fixed-array typed, §6.1) writes its
     // members straight into a plain destination — including one that aliases
     // an operand (see GenElemwiseInto).
@@ -778,31 +778,31 @@ inline void Binary::CgAny(CodeGen &cg, const Dst &d) {
     }
     cg.LeafAny(this, d);
 }
-inline void Dot::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
-inline void Index::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
-inline void SliceExpr::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
-inline void AsCast::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
-inline void RangeExpr::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
+void Dot::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
+void Index::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
+void SliceExpr::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
+void AsCast::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
+void RangeExpr::CgAny(CodeGen &cg, const Dst &d) { cg.LeafAny(this, d); }
 
 // Statement nodes reached with a discard destination just emit themselves.
-inline void While::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
-inline void ForLoop::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
-inline void Return::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
-inline void Break::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
-inline void Continue::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
-inline void FunVal::CgAny(CodeGen &cg, const Dst &) { cg.Fail(line, "internal: FunVal emitted"); }
-inline void SelfRef::CgAny(CodeGen &cg, const Dst &) { cg.Fail(line, "internal: self emitted"); }
-inline void VarDecl::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
-inline void Assign::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
-inline void IncDec::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
-inline void FnDecl::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
-inline void StructDecl::CgAny(CodeGen &cg, const Dst &) { cg.Fail(line, "internal: decl emitted"); }
-inline void EnumDecl::CgAny(CodeGen &cg, const Dst &) { cg.Fail(line, "internal: decl emitted"); }
-inline void AliasDecl::CgAny(CodeGen &cg, const Dst &) { cg.Fail(line, "internal: decl emitted"); }
+void While::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
+void ForLoop::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
+void Return::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
+void Break::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
+void Continue::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
+void FunVal::CgAny(CodeGen &cg, const Dst &) { cg.Fail(line, "internal: FunVal emitted"); }
+void SelfRef::CgAny(CodeGen &cg, const Dst &) { cg.Fail(line, "internal: self emitted"); }
+void VarDecl::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
+void Assign::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
+void IncDec::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
+void FnDecl::CgAny(CodeGen &cg, const Dst &) { cg.GenStmt2(this); }
+void StructDecl::CgAny(CodeGen &cg, const Dst &) { cg.Fail(line, "internal: decl emitted"); }
+void EnumDecl::CgAny(CodeGen &cg, const Dst &) { cg.Fail(line, "internal: decl emitted"); }
+void AliasDecl::CgAny(CodeGen &cg, const Dst &) { cg.Fail(line, "internal: decl emitted"); }
 
 // ---- CgStmt ---------------------------------------------------------------
 
-inline void VarDecl::CgStmt(CodeGen &cg) {
+void VarDecl::CgStmt(CodeGen &cg) {
     // Multi-name binding from one call: wire the call's channels straight
     // into the locals.
     if (names.size() > 1 && inits.size() == 1) {
@@ -846,7 +846,7 @@ inline void VarDecl::CgStmt(CodeGen &cg) {
         cg.BindLocal(defs[i], i < inits.size() ? inits[i] : nullptr, !inline_arg);
 }
 
-inline void Assign::CgStmt(CodeGen &cg) {
+void Assign::CgStmt(CodeGen &cg) {
     auto lv = cg.GenLoc(lval);
     if (pointee) cg.DerefLoc(lv);
     // Resolve the destination before the RHS can rebind a reference or
@@ -970,7 +970,7 @@ inline void Assign::CgStmt(CodeGen &cg) {
     cg.GenAny(rhs, Dst { DK_LVALUE, lv.s, lv.t });
 }
 
-inline void IncDec::CgStmt(CodeGen &cg) {
+void IncDec::CgStmt(CodeGen &cg) {
     auto lv = cg.GenLoc(lval);
     if (lv.t->kind == TY_REF) cg.DerefLoc(lv);
     assert(lv.val);
@@ -979,8 +979,8 @@ inline void IncDec::CgStmt(CodeGen &cg) {
          cg.OvfLocArgs(lv.t->intstorage, line), ");");
 }
 
-inline void FnDecl::CgStmt(CodeGen &) {}   // Nested declarations are separate specs.
-inline void While::CgStmt(CodeGen &cg) {
+void FnDecl::CgStmt(CodeGen &) {}   // Nested declarations are separate specs.
+void While::CgStmt(CodeGen &cg) {
     Dst d;
     CodeGen::ViewScope vs(cg, hoistrefs, hoistfields);
     if (countdown) {
@@ -1010,7 +1010,7 @@ inline void While::CgStmt(CodeGen &cg) {
     }, body, d, "", cond);
 }
 
-inline void ForLoop::CgStmt(CodeGen &cg) {
+void ForLoop::CgStmt(CodeGen &cg) {
     auto d = Dst {};
     CodeGen::ViewScope vs(cg, hoistrefs, hoistfields);
     auto iv = vdef ? cg.LocalName(vdef) : cg.T();
@@ -1215,7 +1215,7 @@ inline void ForLoop::CgStmt(CodeGen &cg) {
        nullptr, 0, { vdef, idxdef });
 }
 
-inline void Return::CgStmt(CodeGen &cg) {
+void Return::CgStmt(CodeGen &cg) {
     // Exiting an inlined body?
     for (auto i = (int)cg.cscopes.size() - 1; i >= 0; i--) {
         if (cg.cscopes[i].kind == CodeGen::SC_IB && cg.cscopes[i].ibsf == target) {
@@ -1238,8 +1238,8 @@ inline void Return::CgStmt(CodeGen &cg) {
     cg.GenFromReturn(this);
 }
 
-inline void Break::CgStmt(CodeGen &cg) { cg.GenBreakPath(val); }
-inline void Continue::CgStmt(CodeGen &cg) {
+void Break::CgStmt(CodeGen &cg) { cg.GenBreakPath(val); }
+void Continue::CgStmt(CodeGen &cg) {
     auto si = -1;
     for (auto i = (int)cg.cscopes.size() - 1; i >= 0; i--) {
         if (cg.cscopes[i].kind == CodeGen::SC_LOOP) { si = i; break; }
@@ -1255,32 +1255,32 @@ inline void Continue::CgStmt(CodeGen &cg) {
 }
 
 // Everything else in statement position evaluates for effect.
-inline void IntLit::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void FltLit::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void BoolLit::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void StrLit::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void NullLit::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void Ident::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void ArrayLit::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void StructLit::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void Unary::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void Binary::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void Dot::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void Index::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void SliceExpr::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void AsCast::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void RangeExpr::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void Call::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void Block::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void IfExpr::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void MatchExpr::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void EarlyBlock::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void LoopExpr::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void InlineBlock::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
-inline void FunVal::CgStmt(CodeGen &cg) { cg.Fail(line, "internal: FunVal statement"); }
-inline void SelfRef::CgStmt(CodeGen &cg) { cg.Fail(line, "internal: self statement"); }
-inline void StructDecl::CgStmt(CodeGen &) {}
-inline void EnumDecl::CgStmt(CodeGen &) {}
-inline void AliasDecl::CgStmt(CodeGen &) {}
+void IntLit::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void FltLit::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void BoolLit::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void StrLit::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void NullLit::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void Ident::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void ArrayLit::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void StructLit::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void Unary::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void Binary::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void Dot::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void Index::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void SliceExpr::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void AsCast::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void RangeExpr::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void Call::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void Block::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void IfExpr::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void MatchExpr::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void EarlyBlock::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void LoopExpr::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void InlineBlock::CgStmt(CodeGen &cg) { cg.GenAny(this, Dst {}); }
+void FunVal::CgStmt(CodeGen &cg) { cg.Fail(line, "internal: FunVal statement"); }
+void SelfRef::CgStmt(CodeGen &cg) { cg.Fail(line, "internal: self statement"); }
+void StructDecl::CgStmt(CodeGen &) {}
+void EnumDecl::CgStmt(CodeGen &) {}
+void AliasDecl::CgStmt(CodeGen &) {}
 
 }  // namespace goose

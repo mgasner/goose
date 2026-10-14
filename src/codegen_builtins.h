@@ -5,7 +5,7 @@
 
 namespace goose {
 
-inline string CodeGen::QueueFor(TypeExpr *t) {
+string CodeGen::QueueFor(TypeExpr *t) {
     usesthreads = true;
     auto m = Mangle(t);
     auto it = queues.find(m);
@@ -21,7 +21,7 @@ inline string CodeGen::QueueFor(TypeExpr *t) {
 // into a temporary, anything else to the addresses it names. A stack whose
 // top this body caches is named by a binding nothing rebinds, so it keeps
 // that name.
-inline CodeGen::Loc CodeGen::RecvLoc(Node *n) {
+CodeGen::Loc CodeGen::RecvLoc(Node *n) {
     auto lv = GenLoc(n);
     if (lv.t->kind == TY_REF) {
         auto orig = lv;
@@ -41,14 +41,14 @@ inline CodeGen::Loc CodeGen::RecvLoc(Node *n) {
 }
 
 // The C type a length-field write casts to, per receiver representation.
-inline string CodeGen::LenCast(const Loc &lv) {
+string CodeGen::LenCast(const Loc &lv) {
     auto ak = lv.t->arr->akind;
     if (ak == A_LIMITED) return lv.val ? IntCT(LenStore(lv.t->arr)) : "uint32_t";
     if (ak == A_VAR) return IntCT(LenStore(lv.t->arr));
     return "int64_t";
 }
 
-inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
+vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
     auto an = c->ArgNodes();
     auto ln = c->line;
     switch ((BuiltinKind)c->builtin) {
@@ -427,7 +427,7 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
 // The bytes a literal of fixed type t stores, value-bearing ones only (pads
 // are skipped), when the literal and every part of it is a constant whose
 // image is known here; false otherwise.
-inline bool CodeGen::LiteralBytes(Node *n, TypeExpr *t, vector<uint8_t> &out) {
+bool CodeGen::LiteralBytes(Node *n, TypeExpr *t, vector<uint8_t> &out) {
     if (!n || !t || !IsFix(t)) return false;
     auto put = [&](uint64_t v, int64_t size) {
         for (int64_t i = 0; i < size; i++) out.push_back((uint8_t)(v >> (8 * i)));
@@ -507,7 +507,7 @@ inline bool CodeGen::LiteralBytes(Node *n, TypeExpr *t, vector<uint8_t> &out) {
 
 // Whether every value-bearing byte a fill of literal n stores into slots of
 // type t is the same byte, which a memset can then write.
-inline bool CodeGen::UniformFillByte(Node *n, TypeExpr *t, int &byte) {
+bool CodeGen::UniformFillByte(Node *n, TypeExpr *t, int &byte) {
     vector<uint8_t> img;
     if (!LiteralBytes(n, t, img) || img.empty()) return false;
     for (auto b : img) if (b != img[0]) return false;
@@ -515,7 +515,7 @@ inline bool CodeGen::UniformFillByte(Node *n, TypeExpr *t, int &byte) {
     return true;
 }
 
-inline vector<string> CodeGen::EmitPush(vector<Node *> &an, Line ln) {
+vector<string> CodeGen::EmitPush(vector<Node *> &an, Line ln) {
     auto lv = RecvLoc(an[0]);
     auto v = ArrayView(lv);
     auto elem = v.elem;
@@ -576,7 +576,7 @@ inline vector<string> CodeGen::EmitPush(vector<Node *> &an, Line ln) {
     return { ref };
 }
 
-inline void CodeGen::EmitAppend(vector<Node *> &an, Line ln) {
+void CodeGen::EmitAppend(vector<Node *> &an, Line ln) {
     auto lv = RecvLoc(an[0]);
     auto v = ArrayView(lv);
     auto elem = v.elem;
@@ -671,7 +671,7 @@ inline void CodeGen::EmitAppend(vector<Node *> &an, Line ln) {
     L(v.lenlv, " += ", nn, ";");
 }
 
-inline vector<string> CodeGen::EmitAlloc(Call *c, vector<Node *> &an) {
+vector<string> CodeGen::EmitAlloc(Call *c, vector<Node *> &an) {
     auto lv = RecvLoc(an[0]);
     assert(!lv.fl.empty() && !lv.stk.empty());
     auto v = ArrayView(lv);
@@ -718,7 +718,7 @@ inline vector<string> CodeGen::EmitAlloc(Call *c, vector<Node *> &an) {
 
 // A slice pool (§5.4): the element region grows like any grow-only array's,
 // and the runtime's gs_spans_* keep the freelist of (index, count) spans.
-inline vector<string> CodeGen::EmitSlicePool(Call *c, vector<Node *> &an, Line ln) {
+vector<string> CodeGen::EmitSlicePool(Call *c, vector<Node *> &an, Line ln) {
     auto lv = RecvLoc(an[0]);
     assert(!lv.fl.empty() && !lv.stk.empty());
     auto v = ArrayView(lv);
@@ -807,20 +807,20 @@ inline vector<string> CodeGen::EmitSlicePool(Call *c, vector<Node *> &an, Line l
 // Where a slice pool places a run of n elements: past the end of the array
 // while the freelist is empty, as it stays in a pool nothing is freed from,
 // and otherwise where the runtime finds room.
-inline string CodeGen::PlaceRun(const Loc &lv, const string &n) {
+string CodeGen::PlaceRun(const Loc &lv, const string &n) {
     return cat("(", lv.fl, ".len ? gs_spans_alloc(", SpanArgs(lv), ", ", lv.lenlv, ", ", n,
                ") : ", lv.lenlv, ")");
 }
 
 // The freelist as the gs_spans_* helpers take it: its base, its node count
 // and its stack's top, which they move.
-inline string CodeGen::SpanArgs(const Loc &lv) {
+string CodeGen::SpanArgs(const Loc &lv) {
     return cat(lv.fl, ".base, &", lv.fl, ".len, &(", TopW(lv.flstk), ")");
 }
 
 // A slice pool's length argument, evaluated once. A negative length, or one
 // no data stack could hold, aborts before anything changes.
-inline string CodeGen::SliceLen(Node *n, TypeExpr *elem, Line ln) {
+string CodeGen::SliceLen(Node *n, TypeExpr *elem, Line ln) {
     auto nv = T();
     L("int64_t ", nv, " = (int64_t)(", GenX(n), ");");
     auto esz = FixedSize(elem);
@@ -833,7 +833,7 @@ inline string CodeGen::SliceLen(Node *n, TypeExpr *elem, Line ln) {
 }
 
 // Grows a slice pool's element region to `end` elements where it is shorter.
-inline void CodeGen::EmitSliceExtend(const Loc &lv, const string &end, int64_t esz) {
+void CodeGen::EmitSliceExtend(const Loc &lv, const string &end, int64_t esz) {
     auto ext = T();
     L("int64_t ", ext, " = ", end, " - ", lv.lenlv, ";");
     L("if (", ext, " > 0) {");
@@ -846,7 +846,7 @@ inline void CodeGen::EmitSliceExtend(const Loc &lv, const string &end, int64_t e
 
 // Default values (§4.2) for `count` elements of an array view from index
 // `first`: one clear where the default is all zero bytes, else each built.
-inline void CodeGen::EmitDefaultElems(const ArrView &v, const string &first,
+void CodeGen::EmitDefaultElems(const ArrView &v, const string &first,
                                       const string &count, Node *init) {
     auto esz = FixedSize(v.elem);
     if (!esz) return;
@@ -871,7 +871,7 @@ inline void CodeGen::EmitDefaultElems(const ArrView &v, const string &first,
 // The image of a resizable at the top of `stk`: a frame object's fixed
 // fields are the bytes before its innermost tail header, any other shape's
 // the static prefix EmitRzCopy walks.
-inline void CodeGen::EmitRzImage(Loc src, TypeExpr *t, const string &stk, Line ln) {
+void CodeGen::EmitRzImage(Loc src, TypeExpr *t, const string &stk, Line ln) {
     if (IsFrameObj(t)) {
         if (!src.val) src = FoView(src);
         auto th = FoTailHdr(t, src.s);
@@ -894,7 +894,7 @@ inline void CodeGen::EmitRzImage(Loc src, TypeExpr *t, const string &stk, Line l
 // The globals a thread program can name (CheckThreadGlobals admits flat
 // ones only), in declaration order: read-only static data is not among
 // them, since every instance shares it as it is.
-inline vector<VarDef *> &CodeGen::ThreadGlobals(FnSpec *entry) {
+vector<VarDef *> &CodeGen::ThreadGlobals(FnSpec *entry) {
     auto it = threadglobals.find(entry);
     if (it != threadglobals.end()) return it->second;
     set<FnSpec *> seen;
@@ -925,7 +925,7 @@ inline vector<VarDef *> &CodeGen::ThreadGlobals(FnSpec *entry) {
 // then the worker program's globals as copies of this instance's, each as
 // [int64 size][image] (§11.2); the thunk unpacks them into the worker's
 // fresh instance.
-inline vector<string> CodeGen::EmitThreadSpawn(Call *c, vector<Node *> &an) {
+vector<string> CodeGen::EmitThreadSpawn(Call *c, vector<Node *> &an) {
     usesthreads = true;
     auto sp = c->spec;
     auto thunk = EnsureThreadThunk(sp);
@@ -996,7 +996,7 @@ inline vector<string> CodeGen::EmitThreadSpawn(Call *c, vector<Node *> &an) {
 
 // The worker's entry thunk, by name; its body follows once every thread
 // program's stack count is known (EmitThreadThunk, from EmitProgramInit).
-inline string CodeGen::EnsureThreadThunk(FnSpec *sp) {
+string CodeGen::EnsureThreadThunk(FnSpec *sp) {
     auto it = thunks.find(sp);
     if (it != thunks.end()) return it->second;
     auto name = Unique(cat("gs_tmain_", Sanitize(sp->sf->ns, sp->sf->name)));
@@ -1009,7 +1009,7 @@ inline string CodeGen::EnsureThreadThunk(FnSpec *sp) {
 // stacks, unpacks the arguments, then gives the thread a fresh instance of
 // the globals filled from the spawn image, runs the body, and frees the
 // instance (its stacks are released with the thread's others).
-inline void CodeGen::EmitThreadThunk(FnSpec *sp, int64_t stacks) {
+void CodeGen::EmitThreadThunk(FnSpec *sp, int64_t stacks) {
     auto name = thunks[sp];
     auto &ki = sinfo[sp];
     string b;
@@ -1128,7 +1128,7 @@ inline void CodeGen::EmitThreadThunk(FnSpec *sp, int64_t stacks) {
 // An image is little-endian by definition (§7 of the design), which every
 // target this compiles for is; the test folds away, and exists so that a
 // big-endian host fails loudly rather than writing bytes only it can read.
-inline void CodeGen::EmitLeCheck(Line ln) {
+void CodeGen::EmitLeCheck(Line ln) {
     EmitCoreTypes();
     L("if (!gs_is_le()) gs_abort(GS_E_ENDIAN, ", LocArgs(ln), ");");
 }
@@ -1136,7 +1136,7 @@ inline void CodeGen::EmitLeCheck(Line ln) {
 // The element region of a to_bytes/bytes_of receiver: a byte pointer, and
 // the byte count -- which for variable elements is a walk, since an element
 // count says nothing about the span.
-inline void CodeGen::PayloadOf(Node *n, string &src, string &sz) {
+void CodeGen::PayloadOf(Node *n, string &src, string &sz) {
     auto nt = n->exprtype;
     auto rt = nt->kind == TY_REF ? nt->ref->sub : nt;
     auto elem = rt->kind == TY_SLICE ? rt->sub : rt->arr->sub;
@@ -1168,7 +1168,7 @@ inline void CodeGen::PayloadOf(Node *n, string &src, string &sz) {
 // `n` bytes at `src` appended to a growable u8 array, in the two shapes
 // format appends text to: a resizable writes at its stack top, a limited
 // array copies under a capacity check.
-inline void CodeGen::AppendBytes(const Loc &lv, const string &src, const string &n, Line ln) {
+void CodeGen::AppendBytes(const Loc &lv, const string &src, const string &n, Line ln) {
     auto v = ArrayView(lv);
     if (lv.t->arr->akind == A_LIMITED) {
         auto ol = T();
@@ -1188,7 +1188,7 @@ inline void CodeGen::AppendBytes(const Loc &lv, const string &src, const string 
 // shapes §7.3 admits: the caller's header, a value slot that takes a length
 // prefix in front of the elements, or a fresh temporary when the result has
 // no destination of its own. `elems` is where the elements start.
-inline CodeGen::RzDest CodeGen::OpenRzDest(TypeExpr *t, Dst d0, Line ln, const char *what) {
+CodeGen::RzDest CodeGen::OpenRzDest(TypeExpr *t, Dst d0, Line ln, const char *what) {
     EmitCoreTypes();
     RzDest rd;
     auto resz = IsResz(t);
@@ -1219,7 +1219,7 @@ inline CodeGen::RzDest CodeGen::OpenRzDest(TypeExpr *t, Dst d0, Line ln, const c
     return rd;
 }
 
-inline void CodeGen::CloseRzDest(RzDest &rd, const string &count) {
+void CodeGen::CloseRzDest(RzDest &rd, const string &count) {
     if (!rd.pref.empty()) EmitPrefixPatch(rd.pref, rd.ls, rd.stk, count, rd.elems);
     else L(rd.lenlv, " = ", count, ";");
 }
@@ -1227,7 +1227,7 @@ inline void CodeGen::CloseRzDest(RzDest &rd, const string &count) {
 // bytes_of(a): the element region as a u8[:], no copy. The view is never
 // writable at the language level (§9.5), so the const the payload pointer
 // carries is dropped here rather than expressed in the slice type.
-inline vector<string> CodeGen::EmitBytesOf(Call *c, vector<Node *> &an, Line ln) {
+vector<string> CodeGen::EmitBytesOf(Call *c, vector<Node *> &an, Line ln) {
     EmitLeCheck(ln);
     string src, sz;
     PayloadOf(an[0], src, sz);
@@ -1240,7 +1240,7 @@ inline vector<string> CodeGen::EmitBytesOf(Call *c, vector<Node *> &an, Line ln)
 // as a fresh u8[>..], or appended to a builder the caller owns so that its
 // own header can go in front. Copying rather than viewing keeps the image
 // independent of the array's later growth.
-inline vector<string> CodeGen::EmitToBytes(vector<Node *> &an, Dst d0, Line ln) {
+vector<string> CodeGen::EmitToBytes(vector<Node *> &an, Dst d0, Line ln) {
     EmitLeCheck(ln);
     string src, sz;
     PayloadOf(an[0], src, sz);
@@ -1267,7 +1267,7 @@ inline vector<string> CodeGen::EmitToBytes(vector<Node *> &an, Dst d0, Line ln) 
 // from_bytes<T[...]>(bytes): the framing prefix, then the verifier over the
 // payload, then a copy of it into the result's element region. A rejected
 // image leaves the array empty, and the bool says which happened.
-inline vector<string> CodeGen::EmitFromBytes(Call *c, vector<Node *> &an, Dst d0, Line ln) {
+vector<string> CodeGen::EmitFromBytes(Call *c, vector<Node *> &an, Dst d0, Line ln) {
     EmitLeCheck(ln);
     auto t = c->rettypes[0];
     auto elem = t->arr->sub;

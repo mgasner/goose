@@ -60,6 +60,23 @@ namespace goose {
 // the element count (or the whole frame object) to it. A `pool` lvalue is a
 // gs_pref, which a construct's value choosing among pools reaches as each
 // branch's pool reference (GenPrefVal).
+// Whether index ix is in bounds by the types alone: a fixed array indexed by
+// a constant within it, or by an integer whose type holds no value outside it
+// (a u8 into a [256]). Codegen speculates such an index whatever bounds-check
+// elimination proved about it (CodeGen::Speculatable), and BCE's speculation
+// probe accepts it.
+inline bool IndexInRangeByType(Index *ix) {
+    auto at = ix->obj->exprtype;
+    if (at && IsPlainRef(at)) at = at->ref->sub;
+    if (!at || !IsArrayKind(at, A_FIXED) || at->arr->size <= 0) return false;
+    auto n = at->arr->size;
+    if (auto lit = Is<IntLit>(ix->idx)) return !lit->uns && lit->val >= 0 && lit->val < n;
+    auto it = ix->idx->exprtype;
+    if (!it || !IsIntT(it)) return false;
+    auto [lo, hi] = IntRange(it->intstorage);
+    return lo >= 0 && hi < n;
+}
+
 enum DstKind { DK_DISCARD, DK_LVALUE, DK_STACK };
 struct Dst {
     DstKind k = DK_DISCARD;

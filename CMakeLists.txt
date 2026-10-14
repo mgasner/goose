@@ -12,6 +12,12 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 
 add_executable(goose
     src/main.cpp
+    src/typecheck.cpp
+    src/typecheck_calls.cpp
+    src/optimize.cpp
+    src/codegen.cpp
+    src/codegen_nodes.cpp
+    src/phases.h
     src/process.cpp
     src/process.h
     src/progress.cpp
@@ -35,6 +41,7 @@ add_executable(goose
     src/resolve.h
     src/builtins.h
     src/typecheck.h
+    src/typecheck_templates.h
     src/type_queries.h
     src/typecheck_types.h
     src/typecheck_exprs.h
@@ -146,7 +153,7 @@ if(MSVC AND TARGET goose_gfx)
 endif()
 
 if(MSVC)
-    # /bigobj: the compiler is one translation unit of header-inline
+    # /bigobj: each of the compiler's translation units holds thousands of
     # functions, past the object format's default COMDAT section limit.
     target_compile_options(goose PRIVATE /W4 /permissive- /utf-8 /EHsc /bigobj)
     target_compile_definitions(goose PRIVATE _CRT_SECURE_NO_WARNINGS)

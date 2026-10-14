@@ -222,6 +222,6 @@ struct LoopShaper {
     }
 };
 
-inline void Optimizer::ShapeLoops() { LoopShaper(facts).Run(ast); }
+void Optimizer::ShapeLoops() { LoopShaper(facts).Run(ast); }
 
 }  // namespace goose

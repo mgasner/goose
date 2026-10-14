@@ -736,7 +736,7 @@ struct Inliner {
     }
 };
 
-inline Node *Optimizer::TryInline(Call *c) {
+Node *Optimizer::TryInline(Call *c) {
     if (!caninline || !c->spec || c->builtin >= 0 || !c->dispatch.empty()) return nullptr;
     auto K = c->spec;
     auto &info = inlineinfo[K];
@@ -818,17 +818,17 @@ inline Node *Optimizer::TryInline(Call *c) {
 // kind. Inliner::Cp wraps every call and carries exprtype over; TypeExprs and
 // symbols are shared, VarDefs remap via Inliner::Remap.
 
-inline Node *IntLit::Cp1(Inliner &inl) const { return inl.ast.New<IntLit>(line, val, text, uns); }
-inline Node *FltLit::Cp1(Inliner &inl) const { return inl.ast.New<FltLit>(line, val, text); }
-inline Node *BoolLit::Cp1(Inliner &inl) const { return inl.ast.New<BoolLit>(line, val); }
-inline Node *StrLit::Cp1(Inliner &inl) const {
+Node *IntLit::Cp1(Inliner &inl) const { return inl.ast.New<IntLit>(line, val, text, uns); }
+Node *FltLit::Cp1(Inliner &inl) const { return inl.ast.New<FltLit>(line, val, text); }
+Node *BoolLit::Cp1(Inliner &inl) const { return inl.ast.New<BoolLit>(line, val); }
+Node *StrLit::Cp1(Inliner &inl) const {
     return inl.ast.New<StrLit>(line, val, multiline);
 }
-inline Node *NullLit::Cp1(Inliner &inl) const { return inl.ast.New<NullLit>(line); }
-inline Node *SelfRef::Cp1(Inliner &inl) const { return inl.ast.New<SelfRef>(line); }
-inline Node *Continue::Cp1(Inliner &inl) const { return inl.ast.New<Continue>(line); }
+Node *NullLit::Cp1(Inliner &inl) const { return inl.ast.New<NullLit>(line); }
+Node *SelfRef::Cp1(Inliner &inl) const { return inl.ast.New<SelfRef>(line); }
+Node *Continue::Cp1(Inliner &inl) const { return inl.ast.New<Continue>(line); }
 
-inline Node *Ident::Cp1(Inliner &inl) const {
+Node *Ident::Cp1(Inliner &inl) const {
     if (vdef) {
         // A parameter bound to a constant argument substitutes right here.
         auto it = inl.subst.find(vdef);
@@ -843,7 +843,7 @@ inline Node *Ident::Cp1(Inliner &inl) const {
     return c;
 }
 
-inline Node *ArrayLit::Cp1(Inliner &inl) const {
+Node *ArrayLit::Cp1(Inliner &inl) const {
     auto c = inl.ast.New<ArrayLit>(line);
     for (auto e : elems) c->elems.push_back(inl.Cp(e));
     if (fillval) c->fillval = inl.Cp(fillval);
@@ -852,7 +852,7 @@ inline Node *ArrayLit::Cp1(Inliner &inl) const {
     return c;
 }
 
-inline Node *StructLit::Cp1(Inliner &inl) const {
+Node *StructLit::Cp1(Inliner &inl) const {
     auto c = inl.ast.New<StructLit>(line, type);
     for (auto &fi : inits) c->inits.push_back({ fi.name, inl.Cp(fi.val), fi.fromdefault });
     c->defaultall = defaultall;
@@ -864,15 +864,15 @@ inline Node *StructLit::Cp1(Inliner &inl) const {
     return c;
 }
 
-inline Node *Unary::Cp1(Inliner &inl) const {
+Node *Unary::Cp1(Inliner &inl) const {
     return inl.ast.New<Unary>(line, op, inl.Cp(child));
 }
 
-inline Node *Binary::Cp1(Inliner &inl) const {
+Node *Binary::Cp1(Inliner &inl) const {
     return inl.ast.New<Binary>(line, op, inl.Cp(left), inl.Cp(right));
 }
 
-inline Node *Dot::Cp1(Inliner &inl) const {
+Node *Dot::Cp1(Inliner &inl) const {
     auto c = inl.ast.New<Dot>(line, inl.Cp(obj), name, ns);
     c->fieldidx = fieldidx;
     c->member = member;
@@ -881,7 +881,7 @@ inline Node *Dot::Cp1(Inliner &inl) const {
     return c;
 }
 
-inline Node *Call::Cp1(Inliner &inl) const {
+Node *Call::Cp1(Inliner &inl) const {
     auto c = inl.ast.New<Call>(line, inl.Cp(callee));
     c->tyargs = tyargs;
     for (auto a : args) c->args.push_back(inl.Cp(a));
@@ -908,11 +908,11 @@ inline Node *Call::Cp1(Inliner &inl) const {
     return c;
 }
 
-inline Node *Index::Cp1(Inliner &inl) const {
+Node *Index::Cp1(Inliner &inl) const {
     return inl.ast.New<Index>(line, inl.Cp(obj), inl.Cp(idx));
 }
 
-inline Node *SliceExpr::Cp1(Inliner &inl) const {
+Node *SliceExpr::Cp1(Inliner &inl) const {
     auto c = inl.ast.New<SliceExpr>(line, inl.Cp(obj));
     if (lo) c->lo = inl.Cp(lo);
     if (hi) c->hi = inl.Cp(hi);
@@ -922,32 +922,32 @@ inline Node *SliceExpr::Cp1(Inliner &inl) const {
     return c;
 }
 
-inline Node *AsCast::Cp1(Inliner &inl) const {
+Node *AsCast::Cp1(Inliner &inl) const {
     auto c = inl.ast.New<AsCast>(line, inl.Cp(child), type, unchecked);
     c->implicit = implicit;
     c->totype = totype;
     return c;
 }
 
-inline Node *RangeExpr::Cp1(Inliner &inl) const {
+Node *RangeExpr::Cp1(Inliner &inl) const {
     return inl.ast.New<RangeExpr>(line, inl.Cp(lo), inl.Cp(hi));
 }
 
-inline Node *Block::Cp1(Inliner &inl) const {
+Node *Block::Cp1(Inliner &inl) const {
     auto c = inl.ast.New<Block>(line);
     for (auto st : stmts) c->stmts.push_back(inl.Cp(st));
     if (tail) c->tail = inl.Cp(tail);
     return c;
 }
 
-inline Node *IfExpr::Cp1(Inliner &inl) const {
+Node *IfExpr::Cp1(Inliner &inl) const {
     auto c = inl.ast.New<IfExpr>(line, inl.Cp(cond), inl.CpBlock(thenb),
                                  elseb ? inl.Cp(elseb) : nullptr);
     c->flat = flat;
     return c;
 }
 
-inline Node *MatchExpr::Cp1(Inliner &inl) const {
+Node *MatchExpr::Cp1(Inliner &inl) const {
     auto c = inl.ast.New<MatchExpr>(line, inl.Cp(scrutinee));
     for (auto &arm : arms) {
         MatchArm a;
@@ -965,19 +965,19 @@ inline Node *MatchExpr::Cp1(Inliner &inl) const {
     return c;
 }
 
-inline Node *EarlyBlock::Cp1(Inliner &inl) const {
+Node *EarlyBlock::Cp1(Inliner &inl) const {
     return inl.ast.New<EarlyBlock>(line, inl.CpBlock(body));
 }
 
-inline Node *While::Cp1(Inliner &inl) const {
+Node *While::Cp1(Inliner &inl) const {
     return inl.ast.New<While>(line, inl.Cp(cond), inl.CpBlock(body));
 }
 
-inline Node *LoopExpr::Cp1(Inliner &inl) const {
+Node *LoopExpr::Cp1(Inliner &inl) const {
     return inl.ast.New<LoopExpr>(line, inl.CpBlock(body));
 }
 
-inline Node *ForLoop::Cp1(Inliner &inl) const {
+Node *ForLoop::Cp1(Inliner &inl) const {
     auto c = inl.ast.New<ForLoop>(line, byref, var, idxvar, inl.Cp(iter), inl.CpBlock(body));
     c->vartype = vartype;
     c->idxtype = idxtype;
@@ -987,7 +987,7 @@ inline Node *ForLoop::Cp1(Inliner &inl) const {
     return c;
 }
 
-inline Node *Return::Cp1(Inliner &inl) const {
+Node *Return::Cp1(Inliner &inl) const {
     auto r = inl.ast.New<Return>(line);
     for (auto v : vals) r->vals.push_back(inl.Cp(v));
     r->from = from;
@@ -997,11 +997,11 @@ inline Node *Return::Cp1(Inliner &inl) const {
     return r;
 }
 
-inline Node *Break::Cp1(Inliner &inl) const {
+Node *Break::Cp1(Inliner &inl) const {
     return inl.ast.New<Break>(line, val ? inl.Cp(val) : nullptr);
 }
 
-inline Node *VarDecl::Cp1(Inliner &inl) const {
+Node *VarDecl::Cp1(Inliner &inl) const {
     auto c = inl.ast.New<VarDecl>(line, isvar);
     c->isconst = isconst;
     c->reusable = reusable;
@@ -1015,46 +1015,46 @@ inline Node *VarDecl::Cp1(Inliner &inl) const {
     return c;
 }
 
-inline Node *Assign::Cp1(Inliner &inl) const {
+Node *Assign::Cp1(Inliner &inl) const {
     auto c = inl.ast.New<Assign>(line, op, inl.Cp(lval), inl.Cp(rhs));
     c->pointee = pointee;
     return c;
 }
 
-inline Node *IncDec::Cp1(Inliner &inl) const {
+Node *IncDec::Cp1(Inliner &inl) const {
     return inl.ast.New<IncDec>(line, op, inl.Cp(lval));
 }
 
-inline Node *InlineBlock::Cp1(Inliner &inl) const {
+Node *InlineBlock::Cp1(Inliner &inl) const {
     return inl.ast.New<InlineBlock>(line, sf, spec, inl.CpBlock(body));
 }
 
 // A nested declaration copies inert; its own specializations are separate
 // trees (and any still-called one blocks inlining, see the header comment).
-inline Node *FnDecl::Cp1(Inliner &inl) const { return inl.ast.New<FnDecl>(line, sf); }
+Node *FnDecl::Cp1(Inliner &inl) const { return inl.ast.New<FnDecl>(line, sf); }
 
 // FunVal templates and top-level declarations never appear inside a checked,
 // inlinable body.
-inline Node *FunVal::Cp1(Inliner &) const { assert(false); return const_cast<FunVal *>(this); }
-inline Node *StructDecl::Cp1(Inliner &) const { assert(false); return const_cast<StructDecl *>(this); }
-inline Node *EnumDecl::Cp1(Inliner &) const { assert(false); return const_cast<EnumDecl *>(this); }
-inline Node *AliasDecl::Cp1(Inliner &) const { assert(false); return const_cast<AliasDecl *>(this); }
+Node *FunVal::Cp1(Inliner &) const { assert(false); return const_cast<FunVal *>(this); }
+Node *StructDecl::Cp1(Inliner &) const { assert(false); return const_cast<StructDecl *>(this); }
+Node *EnumDecl::Cp1(Inliner &) const { assert(false); return const_cast<EnumDecl *>(this); }
+Node *AliasDecl::Cp1(Inliner &) const { assert(false); return const_cast<AliasDecl *>(this); }
 
 // ---------------------------------------------------------------------------
 // Opt: fold, propagate, and inline below each node, one override per node
 // kind; each returns the possibly replaced node. Children are optimized
 // first, then constant operands combine bottom-up in the same visit.
 
-inline Node *IntLit::Opt(Optimizer &) { return this; }
-inline Node *FltLit::Opt(Optimizer &) { return this; }
-inline Node *BoolLit::Opt(Optimizer &) { return this; }
-inline Node *StrLit::Opt(Optimizer &) { return this; }
-inline Node *NullLit::Opt(Optimizer &) { return this; }
-inline Node *SelfRef::Opt(Optimizer &) { return this; }
-inline Node *Continue::Opt(Optimizer &) { return this; }
-inline Node *FnDecl::Opt(Optimizer &) { return this; }   // Inert statement.
+Node *IntLit::Opt(Optimizer &) { return this; }
+Node *FltLit::Opt(Optimizer &) { return this; }
+Node *BoolLit::Opt(Optimizer &) { return this; }
+Node *StrLit::Opt(Optimizer &) { return this; }
+Node *NullLit::Opt(Optimizer &) { return this; }
+Node *SelfRef::Opt(Optimizer &) { return this; }
+Node *Continue::Opt(Optimizer &) { return this; }
+Node *FnDecl::Opt(Optimizer &) { return this; }   // Inert statement.
 
-inline Node *Ident::Opt(Optimizer &o) {
+Node *Ident::Opt(Optimizer &o) {
     if (vdef) {
         auto it = o.consts.find(vdef);
         if (it != o.consts.end()) {
@@ -1065,7 +1065,7 @@ inline Node *Ident::Opt(Optimizer &o) {
     return this;
 }
 
-inline Node *Unary::Opt(Optimizer &o) {
+Node *Unary::Opt(Optimizer &o) {
     child = op == T_BITAND ? o.OptViewed(child) : o.Opt(child);
     // - and ~ compute at their operand's type (§6.1); the node's own exprtype
     // is the slot the result lands in, which can be wider.
@@ -1103,7 +1103,7 @@ inline Node *Unary::Opt(Optimizer &o) {
     return this;
 }
 
-inline Node *Binary::Opt(Optimizer &o) {
+Node *Binary::Opt(Optimizer &o) {
     if (op == T_ANDAND || op == T_OROR) {
         left = o.Opt(left);
         if (auto lb = Is<BoolLit>(left)) {
@@ -1191,7 +1191,7 @@ inline Node *Binary::Opt(Optimizer &o) {
     return this;
 }
 
-inline Node *Dot::Opt(Optimizer &o) {
+Node *Dot::Opt(Optimizer &o) {
     obj = IsField() && o.Viewed(this) ? o.OptViewed(obj) : o.Opt(obj);
     if ((member == B_LEN || member == B_CAP) && Is<Ident>(obj)) {
         // .len of a fixed array / .cap of a static-capacity limited array are
@@ -1210,7 +1210,7 @@ inline Node *Dot::Opt(Optimizer &o) {
     return this;
 }
 
-inline Node *Call::Opt(Optimizer &o) {
+Node *Call::Opt(Optimizer &o) {
     // A member builtin works on its receiver where it stands (bytes_of
     // returns a view of it), and print, str and format render an argument
     // where it stands around the user format overloads they run.
@@ -1236,21 +1236,21 @@ inline Node *Call::Opt(Optimizer &o) {
     return this;
 }
 
-inline Node *Index::Opt(Optimizer &o) {
+Node *Index::Opt(Optimizer &o) {
     // The element is read after the index runs.
     obj = o.Viewed(this) || !Optimizer::CodeFree(idx) ? o.OptViewed(obj) : o.Opt(obj);
     idx = o.Opt(idx);
     return this;
 }
 
-inline Node *SliceExpr::Opt(Optimizer &o) {
+Node *SliceExpr::Opt(Optimizer &o) {
     obj = o.OptViewed(obj);
     if (lo) lo = o.Opt(lo);
     if (hi) hi = o.Opt(hi);
     return this;
 }
 
-inline Node *AsCast::Opt(Optimizer &o) {
+Node *AsCast::Opt(Optimizer &o) {
     child = o.Opt(child);
     auto tt = totype;
     if (auto i = Is<IntLit>(child)) {
@@ -1290,13 +1290,13 @@ inline Node *AsCast::Opt(Optimizer &o) {
     return this;
 }
 
-inline Node *RangeExpr::Opt(Optimizer &o) {
+Node *RangeExpr::Opt(Optimizer &o) {
     lo = o.Opt(lo);
     hi = o.Opt(hi);
     return this;
 }
 
-inline Node *ArrayLit::Opt(Optimizer &o) {
+Node *ArrayLit::Opt(Optimizer &o) {
     for (auto &e : elems) e = o.Opt(e);
     if (fillval) fillval = o.OptIn(this, fillval);
     if (fillcount) fillcount = o.Opt(fillcount);
@@ -1304,12 +1304,12 @@ inline Node *ArrayLit::Opt(Optimizer &o) {
     return this;
 }
 
-inline Node *StructLit::Opt(Optimizer &o) {
+Node *StructLit::Opt(Optimizer &o) {
     for (auto &fi : inits) fi.val = o.Opt(fi.val);
     return this;
 }
 
-inline Node *Block::Opt(Optimizer &o) {
+Node *Block::Opt(Optimizer &o) {
     o.OptBlock(this);
     // A statement-less block is just its tail expression. Branch and body
     // slots are typed Block* and optimized in place elsewhere, so this
@@ -1318,7 +1318,7 @@ inline Node *Block::Opt(Optimizer &o) {
     return this;
 }
 
-inline Node *IfExpr::Opt(Optimizer &o) {
+Node *IfExpr::Opt(Optimizer &o) {
     cond = o.Opt(cond);
     if (auto b = Is<BoolLit>(cond)) {
         Node *taken = b->val ? (Node *)thenb : elseb;
@@ -1349,7 +1349,7 @@ inline Node *IfExpr::Opt(Optimizer &o) {
     return this;
 }
 
-inline Node *MatchExpr::Opt(Optimizer &o) {
+Node *MatchExpr::Opt(Optimizer &o) {
     scrutinee = o.Opt(scrutinee);
     if (auto iv = Is<IntLit>(scrutinee)) {
         // An integer match on a constant selects its arm statically (first
@@ -1380,12 +1380,12 @@ inline Node *MatchExpr::Opt(Optimizer &o) {
     return this;
 }
 
-inline Node *EarlyBlock::Opt(Optimizer &o) {
+Node *EarlyBlock::Opt(Optimizer &o) {
     o.OptBlock(body);
     return this;
 }
 
-inline Node *While::Opt(Optimizer &o) {
+Node *While::Opt(Optimizer &o) {
     o.loopdepth++;
     cond = o.OptIn(this, cond);
     if (auto b = Is<BoolLit>(cond); b && !b->val) {
@@ -1398,14 +1398,14 @@ inline Node *While::Opt(Optimizer &o) {
     return this;
 }
 
-inline Node *LoopExpr::Opt(Optimizer &o) {
+Node *LoopExpr::Opt(Optimizer &o) {
     o.loopdepth++;
     o.OptBlock(body);
     o.loopdepth--;
     return this;
 }
 
-inline Node *ForLoop::Opt(Optimizer &o) {
+Node *ForLoop::Opt(Optimizer &o) {
     iter = o.OptViewed(iter);
     o.loopdepth++;
     o.OptBlock(body);
@@ -1413,17 +1413,17 @@ inline Node *ForLoop::Opt(Optimizer &o) {
     return this;
 }
 
-inline Node *Return::Opt(Optimizer &o) {
+Node *Return::Opt(Optimizer &o) {
     for (auto &v : vals) v = o.Opt(v);
     return this;
 }
 
-inline Node *Break::Opt(Optimizer &o) {
+Node *Break::Opt(Optimizer &o) {
     if (val) val = o.Opt(val);
     return this;
 }
 
-inline Node *Assign::Opt(Optimizer &o) {
+Node *Assign::Opt(Optimizer &o) {
     // The lval is safe to walk: written or address-taken variables are never
     // in consts, so their Idents pass through untouched.
     lval = o.Opt(lval);
@@ -1431,22 +1431,22 @@ inline Node *Assign::Opt(Optimizer &o) {
     return this;
 }
 
-inline Node *IncDec::Opt(Optimizer &o) {
+Node *IncDec::Opt(Optimizer &o) {
     lval = o.Opt(lval);
     return this;
 }
 
-inline Node *InlineBlock::Opt(Optimizer &o) {
+Node *InlineBlock::Opt(Optimizer &o) {
     o.OptBlock(body);
     return this;
 }
 
 // VarDecls are handled by Optimizer::OptStmt (they can be dropped, which the
 // return-a-node shape cannot express); the rest never appear inside bodies.
-inline Node *VarDecl::Opt(Optimizer &) { assert(false); return this; }
-inline Node *FunVal::Opt(Optimizer &) { assert(false); return this; }
-inline Node *StructDecl::Opt(Optimizer &) { assert(false); return this; }
-inline Node *EnumDecl::Opt(Optimizer &) { assert(false); return this; }
-inline Node *AliasDecl::Opt(Optimizer &) { assert(false); return this; }
+Node *VarDecl::Opt(Optimizer &) { assert(false); return this; }
+Node *FunVal::Opt(Optimizer &) { assert(false); return this; }
+Node *StructDecl::Opt(Optimizer &) { assert(false); return this; }
+Node *EnumDecl::Opt(Optimizer &) { assert(false); return this; }
+Node *AliasDecl::Opt(Optimizer &) { assert(false); return this; }
 
 }  // namespace goose

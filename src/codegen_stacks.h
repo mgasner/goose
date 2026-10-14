@@ -18,7 +18,7 @@ namespace goose {
 
 // Tarjan's components, callees' before callers', so a component's count can
 // take its external callees' as final.
-inline void CodeGen::BoundStacks() {
+void CodeGen::BoundStacks() {
     unordered_map<FnSpec *, int> index, low;
     vector<FnSpec *> stack;
     unordered_set<FnSpec *> onstack;
@@ -73,14 +73,14 @@ inline void CodeGen::BoundStacks() {
 
 // A program's count: over its entry points, and what runs with gs_sp at 0
 // (the nullptr function: the global initializers and render functions).
-inline int64_t CodeGen::ProgramStacks(const vector<FnSpec *> &roots) {
+int64_t CodeGen::ProgramStacks(const vector<FnSpec *> &roots) {
     auto n = stackneed[nullptr];
     for (auto r : roots) n = std::max(n, stackneed[r]);
     return n;
 }
 
 // Where the main program starts: fn main(), and a library's exports.
-inline vector<FnSpec *> CodeGen::MainRoots() {
+vector<FnSpec *> CodeGen::MainRoots() {
     vector<FnSpec *> roots;
     auto mainsf = ast.MainFunction();
     if (mainsf && !mainsf->specs.empty() && sinfo.count(mainsf->specs[0]))
@@ -93,7 +93,7 @@ inline vector<FnSpec *> CodeGen::MainRoots() {
 
 // The thread programs, by their entry's name: the order the generated C
 // and the report take them in.
-inline vector<pair<string, FnSpec *>> CodeGen::WorkerEntries() {
+vector<pair<string, FnSpec *>> CodeGen::WorkerEntries() {
     vector<pair<string, FnSpec *>> workers;
     for (auto &[sp, name] : thunks) workers.push_back({ string(sp->sf->qname), sp });
     sort(workers.begin(), workers.end());
@@ -102,7 +102,7 @@ inline vector<pair<string, FnSpec *>> CodeGen::WorkerEntries() {
 
 // GS_MAX_STACKS, as the program is configured, is a compile-time limit on a
 // thread program's count: the runtime reserves whatever it is told.
-inline void CodeGen::CheckStackLimit(const string &what, int64_t stacks, Line ln) {
+void CodeGen::CheckStackLimit(const string &what, int64_t stacks, Line ln) {
     if (maxstacks > 0 && stacks > maxstacks)
         Fail(ln, cat(what, " needs ", stacks, " data stacks at once, more than GS_MAX_STACKS (",
                      maxstacks, ") allows; `goose --stacks` shows each function's share"));
@@ -119,7 +119,7 @@ inline string FmtSize(uint64_t bytes) {
     return cat(bytes, " ", units[u]);
 }
 
-inline void CodeGen::StackReport(FILE *out, const StackConfig &cfg) {
+void CodeGen::StackReport(FILE *out, const StackConfig &cfg) {
     auto per = cfg.reserve + cfg.gap;
     uint64_t total = per ? cfg.budget / per : 0;
     fprintf(out, "data stacks: %s reserved per stack, %s guard gap, %s budget: %llu regions, "

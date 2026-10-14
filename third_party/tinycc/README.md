@@ -15,10 +15,16 @@ License: LGPL 2.1 (`COPYING`), with the relicensing notes in `RELICENSING`.
 
 Local changes:
 
-- `arm64-gen.c`: use Apple's natural stack size and alignment for fixed
-  floating-point arguments, including homogeneous float aggregates. This
-  fixes a trailing float being passed at offset 16 instead of 12 after a
-  spilled three-float struct. Variadic arguments retain eight-byte slots.
+- `arm64-gen.c`: lay out named stack arguments as Apple's arm64 ABI does,
+  at their natural size and alignment, where AAPCS64 gives each one an
+  8-byte slot: a trailing float after a spilled three-float struct goes at
+  offset 12, not 16, and a char, short or int past the eighth integer
+  argument takes 1, 2 or 4 bytes. Variadic arguments keep 8-byte slots,
+  starting at the next multiple of 8. Stack offsets in `arm64_pcs_aux`'s
+  `a[]` are stored shifted left by one, since a packed char can sit at an
+  odd offset where bit 0 marks a struct passed by pointer. This is
+  https://github.com/mgasner/tinycc/commit/fbcad52709f2e09c61309cfa65c6739e683f0839,
+  which has tests for TinyCC's `tests/abitest.c` and is not upstream yet.
   `test/packages/pkg_float_abi.goose` checks calls into native C through the
   in-process backend as well as native builds.
 

@@ -700,7 +700,9 @@ class Runner:
         if self.cc and res.dumped:
             with self.into(res.dump):
                 self.dump_program(f, res, built.get("dump"))
-        debug = debug_fixture(f, line)
+        # A fixture using a native module that is not built in only generates
+        # C (programs() reports it skipped), its debug runs as well.
+        debug = debug_fixture(f, line) and all(self.native[m] for m in res.modules)
         if self.cc and debug:
             with self.into(res.debug):
                 self.debug_program(f, res, built.get("debug"))
@@ -1768,7 +1770,7 @@ def main():
     def native_skips():
         skipped = [name for f in tests for name in fixtures[f].result().nativeskips]
         if skipped:
-            r.say(f"skip running {len(set(skipped))} audio, gfx, physics, sqlite, ui or tls test(s) (no "
+            r.say(f"skip running {len(set(skipped))} audio, gfx, http, physics, sqlite, ui or tls test(s) (no "
                   f"layer for them, or no GPU device): " + ", ".join(sorted(set(skipped))))
 
     r.section("generated C, built and run at " + " and ".join(f"-O{ol}" for ol in r.levels))

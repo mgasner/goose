@@ -1355,6 +1355,13 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
             arm64_func_va_list_vr_offs = (a[i] / 2 - 16 +
                                           (hfa ? hfa : 1)) * 16;
         }
+        else if (arm64_hfa(&sym->type, 0) || is_float(sym->type.t))
+            // On the stack, though registers may be left: one that did not
+            // fit in them used them up (AAPCS64 C.3), so va_arg takes none.
+            arm64_func_va_list_vr_offs = 0;
+        else
+            // As above, for the general-purpose registers (C.11).
+            arm64_func_va_list_gr_offs = 0;
 
         // HFAs of float and double need to be written differently:
         if (16 <= a[i] && a[i] < 32 && (sym->type.t & VT_BTYPE) == VT_STRUCT) {
@@ -1484,6 +1491,10 @@ ST_FUNC void gen_va_arg(CType *t)
             o(0x121c6fde); // and w30,w30,#-16
         }
         o(0x310003c0 | r1 | n << 10); // adds w(r1),w30,#(n)
+        // Stored whether or not the argument fits: once one has gone on the
+        // stack, __gr_offs stays positive and the later ones follow it there
+        // (AAPCS64 va_arg), rather than one that would fit taking a register.
+        o(0xb9001800 | r1 | r0 << 5); // str w(r1),[x(r0),#24] // __gr_offs
         o(0x540000ad); // b.le .+20
 #endif
 
@@ -1512,6 +1523,8 @@ ST_FUNC void gen_va_arg(CType *t)
         uint32_t b1, b2;
         o(0xb9401c1e | r0 << 5); // ldr w30,[x(r0),#28] // __vr_offs
         o(0x310003c0 | r1 | rsz << 10); // adds w(r1),w30,#(rsz)
+        // As for __gr_offs above.
+        o(0xb9001c00 | r1 | r0 << 5); // str w(r1),[x(r0),#28] // __vr_offs
         b1 = ind; o(0x5400000d); // b.le lab1
 #endif
         o(ARM64_LDR_X | ARM64_RN(r0) | r1); // ldr x(r1),[x(r0)] // __stack

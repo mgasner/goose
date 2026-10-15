@@ -1,0 +1,953 @@
+{
+ "date": "2026-10-14 19:33",
+ "machine": "Apple M5, 10 cores, macOS 26.6.2",
+ "cc": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+ "goose_commit": "852c6fe",
+ "fork_commit": "a861232",
+ "ujson_commit": "fb996b3",
+ "origin_master": "46356c2",
+ "rounds": 7,
+ "sizes": {
+  "canada.json": 2251051,
+  "citm_catalog.json": 1727204,
+  "twitter.json": 631515,
+  "kostya_25k.json": 2313909,
+  "kostya_524k.json": 48525820
+ },
+ "correctness": {
+  "hash": {
+   "canada.json": {
+    "fork": "values=167179 numbers=111126 strings=4 hash=1201384793893258396",
+    "ujson": "values=167179 numbers=111126 strings=4 hash=1201384793893258396"
+   },
+   "citm_catalog.json": {
+    "fork": "values=37778 numbers=14392 strings=735 hash=10577870904424656164",
+    "ujson": "values=37778 numbers=14392 strings=735 hash=10577870904424656164"
+   },
+   "twitter.json": {
+    "fork": "values=13914 numbers=2109 strings=4754 hash=1785854442453117148",
+    "ujson": "values=13914 numbers=2109 strings=4754 hash=1785854442453117148"
+   },
+   "kostya_25k.json": {
+    "fork": "values=225003 numbers=100000 strings=25001 hash=7750227424693877800",
+    "ujson": "values=225003 numbers=100000 strings=25001 hash=7750227424693877800"
+   },
+   "kostya_524k.json": {
+    "fork": "values=4718595 numbers=2097152 strings=524289 hash=8188905240412140744",
+    "ujson": "values=4718595 numbers=2097152 strings=524289 hash=8188905240412140744"
+   }
+  },
+  "kostya": {
+   "kostya_25k.json": {
+    "fork kostya_dom": "0.4994803623720002 0.4990489106059993 0.5006704355308002",
+    "fork kostya_stream": "0.4994803623720002 0.4990489106059993 0.5006704355308002",
+    "ujson kostya_dom": "0.4994803623720002 0.4990489106059993 0.5006704355308002",
+    "ujson kostya_stream": "0.4994803623720002 0.4990489106059993 0.5006704355308002",
+    "yyjson kostya_dom": "0.49948036237200022 0.49904891060599932 0.50067043553080015"
+   },
+   "kostya_524k.json": {
+    "fork kostya_dom": "0.49995104123003004 0.4999883884593009 0.4999261898815347",
+    "fork kostya_stream": "0.49995104123003004 0.4999883884593009 0.4999261898815347",
+    "ujson kostya_dom": "0.49995104123003004 0.4999883884593009 0.4999261898815347",
+    "ujson kostya_stream": "0.49995104123003004 0.4999883884593009 0.4999261898815347",
+    "yyjson kostya_dom": "0.49995104123003004 0.49998838845930088 0.4999261898815347"
+   }
+  },
+  "roundtrip": {
+   "canada.json": {
+    "fork -> fork": "equal",
+    "fork -> ujson": "equal",
+    "fork bytes": 2090234,
+    "ujson -> fork": "equal",
+    "ujson -> ujson": "equal",
+    "ujson bytes": 2090234,
+    "outputs identical": true
+   },
+   "citm_catalog.json": {
+    "fork -> fork": "equal",
+    "fork -> ujson": "equal",
+    "fork bytes": 500299,
+    "ujson -> fork": "equal",
+    "ujson -> ujson": "equal",
+    "ujson bytes": 500299,
+    "outputs identical": true
+   },
+   "twitter.json": {
+    "fork -> fork": "equal",
+    "fork -> ujson": "equal",
+    "fork bytes": 466906,
+    "ujson -> fork": "equal",
+    "ujson -> ujson": "equal",
+    "ujson bytes": 466906,
+    "outputs identical": true
+   },
+   "kostya_25k.json": {
+    "fork -> fork": "equal",
+    "fork -> ujson": "equal",
+    "fork bytes": 2313912,
+    "ujson -> fork": "equal",
+    "ujson -> ujson": "equal",
+    "ujson bytes": 2313909,
+    "outputs identical": false,
+    "first difference": [
+     "\":0.265625,\"y\":0.03940901,\"z\":0.00000714,\"name\":\"0.2389831 7",
+     "\":0.265625,\"y\":0.03940901,\"z\":7.14e-6,\"name\":\"0.2389831 7491"
+    ]
+   },
+   "kostya_524k.json": {
+    "fork -> fork": "equal",
+    "fork -> ujson": "equal",
+    "fork bytes": 48525831,
+    "ujson -> fork": "equal",
+    "ujson -> ujson": "equal",
+    "ujson bytes": 48525820,
+    "outputs identical": false,
+    "first difference": [
+     "\":0.265625,\"y\":0.03940901,\"z\":0.00000714,\"name\":\"0.2389831 7",
+     "\":0.265625,\"y\":0.03940901,\"z\":7.14e-6,\"name\":\"0.2389831 7491"
+    ]
+   }
+  }
+ },
+ "conformance": {
+  "fork": {
+   "y": [
+    95,
+    95,
+    95
+   ],
+   "n": [
+    188,
+    188,
+    188
+   ],
+   "i_accept": [
+    11,
+    11
+   ],
+   "i_total": 35,
+   "wrong": [],
+   "i": {
+    "i_number_double_huge_neg_exp.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_huge_exp.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_neg_int_huge_exp.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_pos_double_huge_exp.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_real_neg_overflow.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_real_pos_overflow.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_real_underflow.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_too_big_neg_int.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_too_big_pos_int.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_very_big_negative_int.json": [
+     "accept",
+     "accept"
+    ],
+    "i_object_key_lone_2nd_surrogate.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_1st_surrogate_but_2nd_missing.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_1st_valid_surrogate_2nd_invalid.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_UTF-16LE_with_BOM.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_UTF-8_invalid_sequence.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_UTF8_surrogate_U+D800.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_incomplete_surrogate_and_escape_valid.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_incomplete_surrogate_pair.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_incomplete_surrogates_escape_valid.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_invalid_lonely_surrogate.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_invalid_surrogate.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_invalid_utf-8.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_inverted_surrogates_U+1D11E.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_iso_latin_1.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_lone_second_surrogate.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_lone_utf8_continuation_byte.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_not_in_unicode_range.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_overlong_sequence_2_bytes.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_overlong_sequence_6_bytes.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_overlong_sequence_6_bytes_null.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_truncated-utf-8.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_utf16BE_no_BOM.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_utf16LE_no_BOM.json": [
+     "reject",
+     "reject"
+    ],
+    "i_structure_500_nested_arrays.json": [
+     "accept",
+     "accept"
+    ],
+    "i_structure_UTF-8_BOM_empty_object.json": [
+     "reject",
+     "reject"
+    ]
+   }
+  },
+  "ujson": {
+   "y": [
+    95,
+    95,
+    95
+   ],
+   "n": [
+    188,
+    188,
+    188
+   ],
+   "i_accept": [
+    31,
+    31
+   ],
+   "i_total": 35,
+   "wrong": [],
+   "i": {
+    "i_number_double_huge_neg_exp.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_huge_exp.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_neg_int_huge_exp.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_pos_double_huge_exp.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_real_neg_overflow.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_real_pos_overflow.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_real_underflow.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_too_big_neg_int.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_too_big_pos_int.json": [
+     "accept",
+     "accept"
+    ],
+    "i_number_very_big_negative_int.json": [
+     "accept",
+     "accept"
+    ],
+    "i_object_key_lone_2nd_surrogate.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_1st_surrogate_but_2nd_missing.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_1st_valid_surrogate_2nd_invalid.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_UTF-16LE_with_BOM.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_UTF-8_invalid_sequence.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_UTF8_surrogate_U+D800.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_incomplete_surrogate_and_escape_valid.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_incomplete_surrogate_pair.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_incomplete_surrogates_escape_valid.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_invalid_lonely_surrogate.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_invalid_surrogate.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_invalid_utf-8.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_inverted_surrogates_U+1D11E.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_iso_latin_1.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_lone_second_surrogate.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_lone_utf8_continuation_byte.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_not_in_unicode_range.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_overlong_sequence_2_bytes.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_overlong_sequence_6_bytes.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_overlong_sequence_6_bytes_null.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_truncated-utf-8.json": [
+     "accept",
+     "accept"
+    ],
+    "i_string_utf16BE_no_BOM.json": [
+     "reject",
+     "reject"
+    ],
+    "i_string_utf16LE_no_BOM.json": [
+     "reject",
+     "reject"
+    ],
+    "i_structure_500_nested_arrays.json": [
+     "accept",
+     "accept"
+    ],
+    "i_structure_UTF-8_BOM_empty_object.json": [
+     "reject",
+     "reject"
+    ]
+   }
+  }
+ },
+ "timing": {
+  "parse": {
+   "load_before": 4.1357421875,
+   "waited_s": 2054.465444803238,
+   "load_after": 4.26806640625,
+   "noisy": true,
+   "load_peak": 4.26806640625,
+   "seconds": 1586.6312129497528,
+   "cells": {
+    "fork|canada.json": {
+     "median_ns": 1497000.0,
+     "min_ns": 1473000,
+     "iqr_rel": 0.04158316633266533,
+     "n": 210,
+     "mbs": 1503.7080828323312,
+     "bytes": 2251051,
+     "outbytes": 0
+    },
+    "fork|citm_catalog.json": {
+     "median_ns": 376000.0,
+     "min_ns": 364000,
+     "iqr_rel": 0.03856382978723404,
+     "n": 210,
+     "mbs": 4593.627659574468,
+     "bytes": 1727204,
+     "outbytes": 0
+    },
+    "fork|twitter.json": {
+     "median_ns": 250000.0,
+     "min_ns": 245000,
+     "iqr_rel": 0.017,
+     "n": 210,
+     "mbs": 2526.0600000000004,
+     "bytes": 631515,
+     "outbytes": 0
+    },
+    "fork|kostya_25k.json": {
+     "median_ns": 1552000.0,
+     "min_ns": 1450000,
+     "iqr_rel": 0.042686855670103094,
+     "n": 210,
+     "mbs": 1490.9207474226805,
+     "bytes": 2313909,
+     "outbytes": 0
+    },
+    "fork|kostya_524k.json": {
+     "median_ns": 33044000,
+     "min_ns": 31673000,
+     "iqr_rel": 0.08304079409272486,
+     "n": 35,
+     "mbs": 1468.5213654521244,
+     "bytes": 48525820,
+     "outbytes": 0
+    },
+    "ujson|canada.json": {
+     "median_ns": 7030000.0,
+     "min_ns": 6762000,
+     "iqr_rel": 0.011059743954480797,
+     "n": 210,
+     "mbs": 320.2064011379801,
+     "bytes": 2251051,
+     "outbytes": 0
+    },
+    "ujson|citm_catalog.json": {
+     "median_ns": 692000.0,
+     "min_ns": 671000,
+     "iqr_rel": 0.046242774566473986,
+     "n": 210,
+     "mbs": 2495.9595375722542,
+     "bytes": 1727204,
+     "outbytes": 0
+    },
+    "ujson|twitter.json": {
+     "median_ns": 293000.0,
+     "min_ns": 288000,
+     "iqr_rel": 0.020477815699658702,
+     "n": 210,
+     "mbs": 2155.3412969283277,
+     "bytes": 631515,
+     "outbytes": 0
+    },
+    "ujson|kostya_25k.json": {
+     "median_ns": 1553500.0,
+     "min_ns": 1508000,
+     "iqr_rel": 0.023978113936272933,
+     "n": 210,
+     "mbs": 1489.4811715481171,
+     "bytes": 2313909,
+     "outbytes": 0
+    },
+    "ujson|kostya_524k.json": {
+     "median_ns": 33063000,
+     "min_ns": 31944000,
+     "iqr_rel": 0.05994616338505278,
+     "n": 35,
+     "mbs": 1467.6774642349455,
+     "bytes": 48525820,
+     "outbytes": 0
+    },
+    "yyjson|canada.json": {
+     "median_ns": 977000.0,
+     "min_ns": 970000,
+     "iqr_rel": 0.02175025588536336,
+     "n": 210,
+     "mbs": 2304.0440122824975,
+     "bytes": 2251051,
+     "outbytes": 0
+    },
+    "yyjson|citm_catalog.json": {
+     "median_ns": 308000.0,
+     "min_ns": 297000,
+     "iqr_rel": 0.03571428571428571,
+     "n": 210,
+     "mbs": 5607.805194805195,
+     "bytes": 1727204,
+     "outbytes": 0
+    },
+    "yyjson|twitter.json": {
+     "median_ns": 120000.0,
+     "min_ns": 118000,
+     "iqr_rel": 0.016666666666666666,
+     "n": 210,
+     "mbs": 5262.625,
+     "bytes": 631515,
+     "outbytes": 0
+    },
+    "yyjson|kostya_25k.json": {
+     "median_ns": 1038000.0,
+     "min_ns": 963000,
+     "iqr_rel": 0.05491329479768786,
+     "n": 210,
+     "mbs": 2229.199421965318,
+     "bytes": 2313909,
+     "outbytes": 0
+    },
+    "yyjson|kostya_524k.json": {
+     "median_ns": 22860000,
+     "min_ns": 21222000,
+     "iqr_rel": 0.06981627296587926,
+     "n": 35,
+     "mbs": 2122.7392825896763,
+     "bytes": 48525820,
+     "outbytes": 0
+    }
+   }
+  },
+  "kostya_dom": {
+   "load_before": 3.75927734375,
+   "waited_s": 15.001536130905151,
+   "load_after": 3.6181640625,
+   "noisy": false,
+   "load_peak": 3.75927734375,
+   "seconds": 5.581799268722534,
+   "cells": {
+    "fork|kostya_25k.json": {
+     "median_ns": 1843000.0,
+     "min_ns": 1732000,
+     "iqr_rel": 0.041508410200759634,
+     "n": 210,
+     "mbs": 1255.5122083559413,
+     "bytes": 2313909,
+     "outbytes": 0
+    },
+    "fork|kostya_524k.json": {
+     "median_ns": 38429000,
+     "min_ns": 37392000,
+     "iqr_rel": 0.03237138619271904,
+     "n": 35,
+     "mbs": 1262.7395976996538,
+     "bytes": 48525820,
+     "outbytes": 0
+    },
+    "ujson|kostya_25k.json": {
+     "median_ns": 1667000.0,
+     "min_ns": 1609000,
+     "iqr_rel": 0.028194361127774445,
+     "n": 210,
+     "mbs": 1388.0677864427116,
+     "bytes": 2313909,
+     "outbytes": 0
+    },
+    "ujson|kostya_524k.json": {
+     "median_ns": 35797000,
+     "min_ns": 35052000,
+     "iqr_rel": 0.02092354107886136,
+     "n": 35,
+     "mbs": 1355.5834287789478,
+     "bytes": 48525820,
+     "outbytes": 0
+    },
+    "yyjson|kostya_25k.json": {
+     "median_ns": 1113000.0,
+     "min_ns": 1051000,
+     "iqr_rel": 0.04739442946990117,
+     "n": 210,
+     "mbs": 2078.9838274932613,
+     "bytes": 2313909,
+     "outbytes": 0
+    },
+    "yyjson|kostya_524k.json": {
+     "median_ns": 24390000,
+     "min_ns": 23421000,
+     "iqr_rel": 0.038663386633866335,
+     "n": 35,
+     "mbs": 1989.5785157851578,
+     "bytes": 48525820,
+     "outbytes": 0
+    }
+   }
+  },
+  "kostya_stream": {
+   "load_before": 3.6181640625,
+   "waited_s": 9.5367431640625e-07,
+   "load_after": 3.48828125,
+   "noisy": false,
+   "load_peak": 3.6181640625,
+   "seconds": 4.8655171394348145,
+   "cells": {
+    "fork|kostya_25k.json": {
+     "median_ns": 3001000.0,
+     "min_ns": 2912000,
+     "iqr_rel": 0.032489170276574476,
+     "n": 210,
+     "mbs": 771.0459846717761,
+     "bytes": 2313909,
+     "outbytes": 0
+    },
+    "fork|kostya_524k.json": {
+     "median_ns": 63067000,
+     "min_ns": 61541000,
+     "iqr_rel": 0.03413829736629299,
+     "n": 35,
+     "mbs": 769.4328254078996,
+     "bytes": 48525820,
+     "outbytes": 0
+    },
+    "ujson|kostya_25k.json": {
+     "median_ns": 1239000.0,
+     "min_ns": 1218000,
+     "iqr_rel": 0.013115415657788539,
+     "n": 210,
+     "mbs": 1867.5617433414045,
+     "bytes": 2313909,
+     "outbytes": 0
+    },
+    "ujson|kostya_524k.json": {
+     "median_ns": 25879000,
+     "min_ns": 25652000,
+     "iqr_rel": 0.009698983731983461,
+     "n": 35,
+     "mbs": 1875.1041384906682,
+     "bytes": 48525820,
+     "outbytes": 0
+    }
+   }
+  },
+  "write": {
+   "load_before": 3.7412109375,
+   "waited_s": 1988.8404049873352,
+   "load_after": 3.51513671875,
+   "noisy": false,
+   "load_peak": 3.7412109375,
+   "seconds": 2927.241192817688,
+   "cells": {
+    "fork|canada.json": {
+     "median_ns": 2291000.0,
+     "min_ns": 2248000,
+     "iqr_rel": 0.01789611523352248,
+     "n": 210,
+     "mbs": 982.5626364033174,
+     "bytes": 2251051,
+     "outbytes": 2090234
+    },
+    "fork|citm_catalog.json": {
+     "median_ns": 286000.0,
+     "min_ns": 281000,
+     "iqr_rel": 0.017482517482517484,
+     "n": 210,
+     "mbs": 6039.174825174825,
+     "bytes": 1727204,
+     "outbytes": 500299
+    },
+    "fork|twitter.json": {
+     "median_ns": 151000.0,
+     "min_ns": 149000,
+     "iqr_rel": 0.026490066225165563,
+     "n": 210,
+     "mbs": 4182.218543046358,
+     "bytes": 631515,
+     "outbytes": 466906
+    },
+    "fork|kostya_25k.json": {
+     "median_ns": 3200000.0,
+     "min_ns": 3123000,
+     "iqr_rel": 0.01859375,
+     "n": 210,
+     "mbs": 723.0965625,
+     "bytes": 2313909,
+     "outbytes": 2313912
+    },
+    "fork|kostya_524k.json": {
+     "median_ns": 67717000,
+     "min_ns": 66064000,
+     "iqr_rel": 0.03136583132743624,
+     "n": 35,
+     "mbs": 716.5973093905519,
+     "bytes": 48525820,
+     "outbytes": 48525831
+    },
+    "ujson|canada.json": {
+     "median_ns": 27724500.0,
+     "min_ns": 26837000,
+     "iqr_rel": 0.03905390539053905,
+     "n": 210,
+     "mbs": 81.19356525816517,
+     "bytes": 2251051,
+     "outbytes": 2090234
+    },
+    "ujson|citm_catalog.json": {
+     "median_ns": 207000.0,
+     "min_ns": 197000,
+     "iqr_rel": 0.033816425120772944,
+     "n": 210,
+     "mbs": 8343.980676328503,
+     "bytes": 1727204,
+     "outbytes": 500299
+    },
+    "ujson|twitter.json": {
+     "median_ns": 183000.0,
+     "min_ns": 178000,
+     "iqr_rel": 0.08743169398907104,
+     "n": 210,
+     "mbs": 3450.9016393442625,
+     "bytes": 631515,
+     "outbytes": 466906
+    },
+    "ujson|kostya_25k.json": {
+     "median_ns": 1447500.0,
+     "min_ns": 1420000,
+     "iqr_rel": 0.02711571675302245,
+     "n": 210,
+     "mbs": 1598.5554404145078,
+     "bytes": 2313909,
+     "outbytes": 2313909
+    },
+    "ujson|kostya_524k.json": {
+     "median_ns": 30427000,
+     "min_ns": 29955000,
+     "iqr_rel": 0.014986689453445952,
+     "n": 35,
+     "mbs": 1594.8276202057384,
+     "bytes": 48525820,
+     "outbytes": 48525820
+    },
+    "yyjson|canada.json": {
+     "median_ns": 1088000.0,
+     "min_ns": 1067000,
+     "iqr_rel": 0.03791360294117647,
+     "n": 210,
+     "mbs": 2068.9806985294117,
+     "bytes": 2251051,
+     "outbytes": 2090234
+    },
+    "yyjson|citm_catalog.json": {
+     "median_ns": 91000.0,
+     "min_ns": 90000,
+     "iqr_rel": 0.01098901098901099,
+     "n": 210,
+     "mbs": 18980.263736263736,
+     "bytes": 1727204,
+     "outbytes": 500299
+    },
+    "yyjson|twitter.json": {
+     "median_ns": 63000.0,
+     "min_ns": 61000,
+     "iqr_rel": 0.015873015873015872,
+     "n": 210,
+     "mbs": 10024.04761904762,
+     "bytes": 631515,
+     "outbytes": 466906
+    },
+    "yyjson|kostya_25k.json": {
+     "median_ns": 834000.0,
+     "min_ns": 822000,
+     "iqr_rel": 0.021882494004796162,
+     "n": 210,
+     "mbs": 2774.471223021583,
+     "bytes": 2313909,
+     "outbytes": 2313912
+    },
+    "yyjson|kostya_524k.json": {
+     "median_ns": 17449000,
+     "min_ns": 17274000,
+     "iqr_rel": 0.01037308728293885,
+     "n": 35,
+     "mbs": 2781.0086537910483,
+     "bytes": 48525820,
+     "outbytes": 48525853
+    }
+   }
+  },
+  "write_walk": {
+   "load_before": 3.51513671875,
+   "waited_s": 1.9073486328125e-06,
+   "load_after": 3.595703125,
+   "noisy": false,
+   "load_peak": 3.595703125,
+   "seconds": 977.1882510185242,
+   "cells": {
+    "fork|canada.json": {
+     "median_ns": 2638000.0,
+     "min_ns": 2585000,
+     "iqr_rel": 0.02293404094010614,
+     "n": 210,
+     "mbs": 853.3172858225929,
+     "bytes": 2251051,
+     "outbytes": 2090234
+    },
+    "fork|citm_catalog.json": {
+     "median_ns": 333000.0,
+     "min_ns": 328000,
+     "iqr_rel": 0.08408408408408409,
+     "n": 210,
+     "mbs": 5186.798798798799,
+     "bytes": 1727204,
+     "outbytes": 500299
+    },
+    "fork|twitter.json": {
+     "median_ns": 167000.0,
+     "min_ns": 165000,
+     "iqr_rel": 0.059880239520958084,
+     "n": 210,
+     "mbs": 3781.5269461077846,
+     "bytes": 631515,
+     "outbytes": 466906
+    },
+    "fork|kostya_25k.json": {
+     "median_ns": 3703000.0,
+     "min_ns": 3650000,
+     "iqr_rel": 0.013570078314879826,
+     "n": 210,
+     "mbs": 624.874156089657,
+     "bytes": 2313909,
+     "outbytes": 2313912
+    },
+    "fork|kostya_524k.json": {
+     "median_ns": 78308000,
+     "min_ns": 77412000,
+     "iqr_rel": 0.01395770547070542,
+     "n": 35,
+     "mbs": 619.6789600040864,
+     "bytes": 48525820,
+     "outbytes": 48525831
+    }
+   }
+  }
+ },
+ "rss": {
+  "parse|fork|canada.json": 6569984,
+  "parse|fork|citm_catalog.json": 4407296,
+  "parse|fork|twitter.json": 2801664,
+  "parse|fork|kostya_25k.json": 9961472,
+  "parse|fork|kostya_524k.json": 175996928,
+  "parse|ujson|canada.json": 10698752,
+  "parse|ujson|citm_catalog.json": 4833280,
+  "parse|ujson|twitter.json": 2834432,
+  "parse|ujson|kostya_25k.json": 13090816,
+  "parse|ujson|kostya_524k.json": 243531776,
+  "parse|yyjson|canada.json": 8765440,
+  "parse|yyjson|citm_catalog.json": 5996544,
+  "parse|yyjson|twitter.json": 3194880,
+  "parse|yyjson|kostya_25k.json": 12222464,
+  "parse|yyjson|kostya_524k.json": 224444416,
+  "kostya_dom|fork|kostya_25k.json": 9977856,
+  "kostya_dom|fork|kostya_524k.json": 176013312,
+  "kostya_dom|ujson|kostya_25k.json": 13090816,
+  "kostya_dom|ujson|kostya_524k.json": 243531776,
+  "kostya_dom|yyjson|kostya_25k.json": 12222464,
+  "kostya_dom|yyjson|kostya_524k.json": 224460800,
+  "kostya_stream|fork|kostya_25k.json": 7651328,
+  "kostya_stream|fork|kostya_524k.json": 127762432,
+  "kostya_stream|ujson|kostya_25k.json": 3850240,
+  "kostya_stream|ujson|kostya_524k.json": 50053120,
+  "write|fork|canada.json": 8683520,
+  "write|fork|citm_catalog.json": 4915200,
+  "write|fork|twitter.json": 3276800,
+  "write|fork|kostya_25k.json": 12304384,
+  "write|fork|kostya_524k.json": 224542720,
+  "write|ujson|canada.json": 12779520,
+  "write|ujson|citm_catalog.json": 5341184,
+  "write|ujson|twitter.json": 3293184,
+  "write|ujson|kostya_25k.json": 15400960,
+  "write|ujson|kostya_524k.json": 292044800,
+  "write|yyjson|canada.json": 10944512,
+  "write|yyjson|citm_catalog.json": 6569984,
+  "write|yyjson|twitter.json": 3768320,
+  "write|yyjson|kostya_25k.json": 14647296,
+  "write|yyjson|kostya_524k.json": 273088512,
+  "write_walk|fork|canada.json": 8667136,
+  "write_walk|fork|citm_catalog.json": 4898816,
+  "write_walk|fork|twitter.json": 3260416,
+  "write_walk|fork|kostya_25k.json": 12288000,
+  "write_walk|fork|kostya_524k.json": 224526336,
+  "read|fork|canada.json": 3883008,
+  "read|fork|citm_catalog.json": 3358720,
+  "read|fork|twitter.json": 2260992,
+  "read|fork|kostya_25k.json": 3948544,
+  "read|fork|kostya_524k.json": 50151424,
+  "read|ujson|canada.json": 3784704,
+  "read|ujson|citm_catalog.json": 3260416,
+  "read|ujson|twitter.json": 2162688,
+  "read|ujson|kostya_25k.json": 3850240,
+  "read|ujson|kostya_524k.json": 50053120,
+  "read|yyjson|canada.json": 3702784,
+  "read|yyjson|citm_catalog.json": 3145728,
+  "read|yyjson|twitter.json": 2048000,
+  "read|yyjson|kostya_25k.json": 3768320,
+  "read|yyjson|kostya_524k.json": 49971200
+ }
+}

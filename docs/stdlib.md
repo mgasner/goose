@@ -862,7 +862,7 @@ fn pretty_writer<A>(out: A&, indent: i64) -> Writer<A>   // w.string/int/uint/fl
 fn parse(text: const u8[:]) -> Doc                   // d.ok(), d.error { at, message }, d.root() -> Value
 fn cursor(text: const u8[:]) -> Cursor               // c.ok(), c.error, c.root() -> Lazy
 fn reader(text: const u8[:]) -> Reader               // r.members() { k => … }, r.each() { … }, r.float(), r.skip(), r.finish()
-fn write_string<A>(out: A&, s: const u8[:])
+fn write_string<A>(out: A&, s: const u8[:])          fn write_key<A>(out: A&, k: const u8[:])
 fn write_int<A>(out: A&, v: i64)    fn write_uint<A>(out: A&, v: u64)    fn write_float<A>(out: A&, x: f64)
 fn parse_float(s: const u8[:]) -> f64, bool
 ```

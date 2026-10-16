@@ -261,14 +261,21 @@ let kind, bits, end = json::scan_number(s, at)    // NUM_INT / NUM_UINT / NUM_FL
 ```
 
 **Doubles out** are the shortest text that reads back as the same double.
-The digits come from Schubfach. The layout is JavaScript's
-`Number.prototype.toString`:
+A double with a decimal of at most 15 significant digits, as most doubles
+written by people have (`0.1`, `123.25`, `0.03940901`), is found by
+floating point: the double scaled by an exact power of ten, rounded, and
+confirmed by one correctly rounded division back. The rest, and every
+double that check does not settle, get their digits from Schubfach. The
+layout is JavaScript's `Number.prototype.toString`:
 
 * plain notation for decimal exponents from -7 up to 21 (`0.000001`,
   `123.456`, `100000000000000000000`);
 * otherwise `1.5e-7` or `1e+21`.
 
-`-0.0` is written `-0`.
+`-0.0` is written `-0`. JavaScript's layout writes small numbers out in
+full: 7.14e-6 is `0.00000714`, where serde_json writes `7.14e-6`. Both
+read back as the same double; the plain form is what a JavaScript reader
+produces and expects.
 
 **Doubles in** are correctly rounded, the nearest double to the decimal,
 however many digits it has. Three tiers decide it:
@@ -320,6 +327,7 @@ Tips:
 | `json::cursor(text) -> Cursor` | a structural index; `c.ok()`, `c.error`, `c.root()` |
 | `json::reader(text) -> Reader` | a one-pass reader; `r.members()`, `r.each()`, `r.finish()` (§3) |
 | `json::write_string(out, s)` | `s` quoted and escaped |
+| `json::write_key(out, k)` | `k` quoted and escaped, and its colon: an object's key, for writing without a writer |
 | `json::write_int`, `write_uint`, `write_float` | numbers, as §5 |
 | `json::parse_float(s) -> f64, bool` | a whole string as a number |
 | `json::scan_number(s, at) -> kind, bits, end` | the number at `s[at]` |

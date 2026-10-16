@@ -143,11 +143,14 @@ w.object() {
   parent needs, since after a container closes the parent always wants a
   comma before its next item. A second bit says a key was just written,
   so a pretty printer keeps the value on the key's line.
-* **Strings.** The escape loop reads 8 bytes as a word and tests all
-  lanes at once for a byte that needs escaping (`< 0x20`, `"`, `\`). A
-  clean word is skipped whole and a clean run appended at once. At a
-  dirty byte, the run so far is appended and the byte escaped. Non-ASCII
-  bytes pass through unchanged.
+* **Strings.** A scan first finds the first byte that needs escaping
+  (`< 0x20`, `"`, `\`), reading 8 bytes as a word and testing all lanes
+  at once; the last few bytes are one word that overlaps the ones before
+  it, which are known clean. A clean string, as nearly all are, is then
+  appended with its quotes in one piece, which the compiler turns into
+  one bump of the output's end. A string with a byte to escape is copied
+  in clean runs from there, each byte escaped as it comes. Non-ASCII
+  bytes pass through unchanged. `write_key` is the same, with the colon.
 * **Keys known at compile time** can be pre-quoted: `w.raw_key("\"id\":")`
   appends the bytes with no scan.
 * **Integers** are written eight digits at a time into a word (§5), and
@@ -159,7 +162,13 @@ w.object() {
 * **Pretty printing** is `pretty_writer(out, indent)`: newlines and an
   indent per depth.
 * **`w.value(v)`** writes a value of a parsed document, by walking its
-  tape in order with a stack of the containers still open.
+  tape in order with a stack of the containers still open. A compact
+  writer takes a walk of its own (`write_compact`): commas come from
+  whether an item is the first in its container, the innermost open
+  container's end and kind are locals, and floats go out from the tape's
+  bits without being made doubles first. With the string and float
+  changes, `w.value` writes 1.3 (canada.json) to 2.0 (kostya) times as
+  fast as before (§14).
 
 The writer appends to a growable array the caller owns. It never builds a
 tree, so writing has no allocation of its own.
@@ -172,6 +181,26 @@ of ten. The digits are then built eight at a time in a `u64`, in SWAR
 into two pairs, and each pair into two digits, every lane at once, with
 multiplies by reciprocals. The digits land as ASCII bytes in lane order,
 so `bytes_of` on the words is the text, appended with one copy.
+
+**Floats out, short.** Most doubles in JSON were written by people or
+rounded by programs, and have a decimal of at most 15 significant digits.
+For those, floating point finds it (`short_decimal`), as upstream Goose's
+`format_number` does: above the subnormals, 15-digit decimals are more
+than four times further apart than the doubles near them, so at most one
+reads back as x. That one is n, the integer nearest x · 10^s, with s
+chosen from the binary exponent (and one step more if the product lands
+at 10^15 or above) so that n has 15 digits; the two roundings, of x and
+of the product, are each under a fifth of a unit of n. n reads back as x
+exactly when n / 10^s, one correctly rounded division with 10^s exact
+(|s| ≤ 22), is x, and then the shortest decimal is n without its trailing
+zeros, since any shorter one, padded, would be another 15-digit decimal
+reading back as x. x · 10^s is taken from the bits as m · 10^s, rounded
+once, then scaled by 2^e, which is exact here: no conversion from bits to
+a double. n's 15 digits are two `encode8` words; the trailing zeros are
+the high zero lanes of the last nonzero word, one `clz`. Anything else --
+more than 15 digits, below 10^-8 or above 10^36, subnormal -- falls
+through to Schubfach, after a check that costs a few nanoseconds (canada.json,
+almost all 17-digit doubles, writes no slower).
 
 **Floats out.** Schubfach as drachennest's `schubfach_64` implements it.
 It finds the interval of decimals that round to the double, then the

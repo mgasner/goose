@@ -77,10 +77,17 @@ fn main() {
         p.array() { p.int(-2); p.array() {}; p.object() { p.field("c", false); }; };
     };
     print(pretty);
+    var keys: u8[>..] = [];
+    json::write_key(keys, "plain");
+    json::write_key(keys, "quote\" and \\ and \n");
+    json::write_string(keys, "eight by");
+    json::write_string(keys, "nine bytes\"");
+    print(keys);
 
     print("-- floats out");
     for x in [0.0, -0.0, 1.0, -1.5, 0.1, 0.30000000000000004, 123456789.125, 1e21, 1e20, 1.5e-7, 0.000001,
-              5e-324, 1.7976931348623157e308, 2.2250738585072014e-308, 9007199254740993.0, 1.0 / 0.0, 0.0 / 0.0] {
+              5e-324, 1.7976931348623157e308, 2.2250738585072014e-308, 9007199254740993.0, 1.0 / 0.0, 0.0 / 0.0,
+              0.03940901, 7.14e-6, 123456.75, 1e15, 999999999999999.0, 1e-8, 12345678901234.5, 1e36, -0.5] {
         show_float(x);
     }
 

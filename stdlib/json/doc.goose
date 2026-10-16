@@ -526,6 +526,12 @@ struct Close { end: i64, obj: bool }
 // re-serialized compactly (or pretty printed, by a pretty writer).
 fn ::value<A>(w: json::Writer<A>&, v: json::Value) {
     guard v.entry >= 0 else { w.none(); return; }
+    if w.indent == 0 {
+        json::item(w);
+        json::write_compact(w.out, v.doc, v.entry);
+        w.comma = true;
+        return;
+    }
     let d = v.doc;
     var closes: json::Close[>..<] = [];
     let base = 0;
@@ -559,5 +565,50 @@ fn ::value<A>(w: json::Writer<A>&, v: json::Value) {
     while closes.len > base {
         let c = closes.pop();
         json::close(w, if c.obj { '}' } else { ']' });
+    }
+}
+
+// Entry `at` of a document and everything in it, compactly: the commas
+// come from where an item is -- first in its container or not -- and the
+// container open around the walk is kept in locals, the ones around it on
+// a stack.
+fn write_compact<A>(out: A&, d: const Doc&, at: i64) {
+    let end = next(d, at);
+    var closes: Close[>..<] = [];
+    var cend = end;              // where the innermost open container ends
+    var cobj = false;            // and whether it is an object
+    var first = true;
+    var i = at;
+    loop {
+        while i == cend && closes.len > 0 {
+            out.push(if cobj { '}' } else { ']' });
+            let c = closes.pop();
+            cend = c.end;
+            cobj = c.obj;
+            first = false;
+        }
+        if i >= end { return; }
+        if !first { out.push(','); }
+        first = false;
+        if cobj {
+            write_key(out, text_of(d, i));
+            i += 1;
+        }
+        let h = d.tape[i].head;
+        let k = (h & 15) as i64;
+        if k == K_OBJECT || k == K_ARRAY {
+            out.push(if k == K_OBJECT { '{' } else { '[' });
+            closes.push(Close { end: cend, obj: cobj });
+            cend = d.tape[i].data as i64;
+            cobj = k == K_OBJECT;
+            first = true;
+        } else if k == K_STRING { write_string(out, text_of(d, i)); }
+        else if k == K_FLOAT { write_float_bits(out, d.tape[i].data); }
+        else if k == K_INT { write_int(out, d.tape[i].data as! i64); }
+        else if k == K_UINT { write_uint(out, d.tape[i].data); }
+        else if k == K_TRUE { out.append("true"); }
+        else if k == K_FALSE { out.append("false"); }
+        else { out.append("null"); }
+        i += 1;
     }
 }

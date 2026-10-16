@@ -10,6 +10,7 @@
     }
   ]
 }
+"plain":"quote\" and \\ and \n":"eight by""nine bytes\""
 -- floats out
 0
 -0
@@ -28,6 +29,15 @@
 9007199254740992
 null
 null
+0.03940901
+0.00000714
+123456.75
+1000000000000000
+999999999999999
+1e-8
+12345678901234.5
+1e+36
+-0.5
 -- numbers in
 0 -> kind 3 int 0 true uint 0 true float 0
 -0 -> kind 3 int 0 true uint 0 true float 0

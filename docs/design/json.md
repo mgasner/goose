@@ -276,9 +276,15 @@ struct Val { head: u64, data: u64 }
   Strings with escapes are unescaped into the text area.
 * **Skipping** a container is `i = data`: O(1).
 * **Navigation:**
-  * `v.get(key)` scans the object's keys, comparing the length (in the
-    head word) first, then the bytes. It returns the first match;
-    duplicate keys are kept as they appear.
+  * `v.get(key)` scans the object's keys. A key's head word -- kind,
+    flags and length -- is compared with the one the key would have in one
+    compare; only on a match are the bytes compared, in the source, or as
+    unescaped text for a key with escapes. It returns the first match;
+    duplicate keys are kept as they appear. `get`, `kind` and `try_float`
+    are `inline`: called from a user's loop, they were calls, and field
+    access on kostya's coordinates cost twice what it did on upstream
+    Goose's linked tree (§14). A key's first byte in the head word, so that
+    one-byte keys never touch the source, was tried and measured no faster.
   * `v.at(i)` walks `i` siblings, each step O(1) by the skip.
   * `v.each() { x => … }` and `v.members() { k, x => … }` take blocks:
     Goose has no iterator objects.

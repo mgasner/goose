@@ -67,7 +67,7 @@ fn bits_of(x: f64) -> u64 {
 // The double with these IEEE bits, built by exact arithmetic: a value that
 // is representable is reached through scalings by powers of two that each
 // stay exact. NaN payloads are not kept.
-fn f64_of(bits: u64) -> f64 {
+inline fn f64_of(bits: u64) -> f64 {
     let neg = bits >> 63 != 0;
     let be = ((bits >> 52) & 0x7ff) as i64;
     let frac = bits & 0xfffffffffffff;

@@ -376,7 +376,7 @@ fn ::root(d: const json::Doc&) -> json::Value {
     json::Value { doc: d, entry: if d.error.ok && d.ntape > 0 { 0 } else { -1 } }
 }
 
-fn ::kind(v: json::Value) -> i64 {
+inline fn ::kind(v: json::Value) -> i64 {
     if v.entry < 0 { return json::K_MISSING; }
     return (v.doc.tape[v.entry].head & 15) as i64;
 }
@@ -412,17 +412,24 @@ fn ::count(v: json::Value) -> i64 {
     return (v.doc.tape[v.entry].head >> 8) as i64;
 }
 
-// The value of an object's first member with this key.
-fn ::get(v: json::Value, key: const u8[:]) -> json::Value {
-    if v.kind() != json::K_OBJECT { return json::Value { doc: v.doc, entry: -1 }; }
+// The value of an object's first member with this key. A key's entry is
+// tested by its head first: kind, flags and length in one compare for a
+// key without escapes, whose bytes are then compared in the source.
+inline fn ::get(v: json::Value, key: const u8[:]) -> json::Value {
     let d = v.doc;
+    guard v.entry >= 0 && d.tape[v.entry].head & 15 == json::K_OBJECT else { return json::Value { doc: d, entry: -1 }; }
     let end = d.tape[v.entry].data as i64;
     var i = v.entry + 1;
-    let want: u64 = (key.len as u64) << 8;
+    let want: u64 = ((key.len as u64) << 8) | json::K_STRING;
+    let src = d.src;
     while i < end {
         let h = d.tape[i].head;
-        if h & 0xffffffffffffff00 == want && json::text_of(d, i) == key { return json::Value { doc: d, entry: i + 1 }; }
-        i = json::next(d, i + 1);
+        if h == want {
+            let at = d.tape[i].data as i64;
+            if src[at..at + key.len] == key { return json::Value { doc: d, entry: i + 1 }; }
+        } else if h == want | json::F_ESC && json::text_of(d, i) == key { return json::Value { doc: d, entry: i + 1 }; }
+        let vh = d.tape[i + 1].head;
+        i = if vh & 15 >= json::K_ARRAY { d.tape[i + 1].data as i64 } else { i + 2 };
     }
     return json::Value { doc: d, entry: -1 };
 }
@@ -485,7 +492,7 @@ fn ::try_uint(v: json::Value) -> u64, bool {
     return 0, false;
 }
 
-fn ::try_float(v: json::Value) -> f64, bool {
+inline fn ::try_float(v: json::Value) -> f64, bool {
     let k = v.kind();
     if k == json::K_FLOAT { return json::f64_of(v.doc.tape[v.entry].data), true; }
     if k == json::K_INT { return v.doc.tape[v.entry].data as! i64, true; }

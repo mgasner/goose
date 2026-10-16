@@ -243,8 +243,8 @@ beyond their brackets. This is simdjson's On-Demand contract. Where the
 whole text must be valid, use a document.
 
 **When it pays.** The cursor wins when a program reads a small part of a
-large text, in any order. canada.json's one key at its end comes back
-twice as fast as from a document, and a fifth faster than through a
+large text, in any order. canada.json's one key at its end comes back 1.6
+times as fast as from a document, and a fifth faster than through a
 reader, because the numbers in between are neither parsed nor checked.
 On text that is mostly strings (twitter.json, citm_catalog.json), a reader
 that skips to the key is faster than the cursor and checks the whole text
@@ -296,12 +296,16 @@ machine and run:
 
 | | twitter.json | citm_catalog.json | canada.json |
 |---|---|---|---|
-| parse | 2.2 GB/s (45%) | 3.9 GB/s (79%) | 1.2 GB/s (60%) |
-| parse and read everything | 1.9 GB/s (47%) | 3.1 GB/s (75%) | 1.0 GB/s (59%) |
-| write | 2.2 GB/s (31%) | 1.5 GB/s (32%) | 0.7 GB/s (42%) |
+| parse | 2.7 GB/s (50%) | 4.4 GB/s (78%) | 1.6 GB/s (69%) |
+| parse and read everything | 2.3 GB/s (54%) | 3.7 GB/s (77%) | 1.3 GB/s (68%) |
+| write | 4.4 GB/s (59%) | 2.9 GB/s (52%) | 1.1 GB/s (57%) |
 
-Per double, writing takes 21 ns and reading 11 ns. Both are dominated by
-the 128-bit multiplies that pure Goose builds from four 64-bit ones.
+Per double of canada.json, almost all with 16 or 17 digits, writing takes
+15 ns and reading 9 ns, both dominated by the 128-bit multiplies that pure
+Goose builds from four 64-bit ones. A double of up to 15 digits is written
+in about 9 ns. A reader reading every coordinate of kostya's benchmark
+text runs at 1.75 GB/s, a document then reading them at 1.3 GB/s, and a
+cursor at 0.78 GB/s.
 `bench/json/results.md` has the full tables. Run
 `python bench/json/json_bench.py` to remeasure.
 

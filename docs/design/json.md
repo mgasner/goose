@@ -468,7 +468,7 @@ this library's: the same reads as a document's values (`int`, `float`,
 
 **Against the cursor.** The cursor (§7) indexes the whole text before
 reading anything and checks only what it reads; the reader checks
-everything it passes. Reading everything once, the reader is 2.5 times
+everything it passes. Reading everything once, the reader is 2.2 times
 the cursor's speed, and faster than a document. Looking up one value near
 the end of a file, the reader, which skips and checks everything before
 it and finishes, is faster than the cursor on twitter.json and
@@ -740,10 +740,10 @@ the parity hoped for.
 Goose costs most here. Each is a candidate for a builtin or an
 optimization, not a change to make in this library:
 
-1. **`ctz`/`clz`/`popcount` as intrinsics.** `std`'s versions are loops,
-   and the library's branch-free ones cost a multiply and a load each.
-   Stage 1 extracts every position with one, and the writer and parser
-   use them per string.
+1. **`ctz`/`clz`/`popcount` as intrinsics.** Done since, in `std` (the
+   runtime's, one instruction under clang, gcc and MSVC); the library
+   uses them. They were loops, and the library's branch-free ones cost a
+   multiply and a load each.
 2. **A 64×64→128 multiply** (`mulhi`). It is the core of both double
    conversions: four multiplies and carry handling instead of one
    instruction (§11, kernel 2).
@@ -757,4 +757,31 @@ optimization, not a change to make in this library:
    help every writer of text, not just this one.
 4. **A bit cast between `f64` and `u64`.** `bytes_of` on a one-element
    array works and costs nothing after clang, but the reverse direction
-   has to be done by exact arithmetic.
+   has to be done by exact arithmetic (`f64_of`, a conversion and a
+   multiply). It is most of what a document's field access still costs
+   over upstream Goose's tree, which stores doubles as doubles: about
+   2 ns per double read.
+
+**Against upstream Goose's json (October 2026).** Upstream's module
+(aardappel/goose fb996b3: a linked tree, a pull `Reader`, `format_*`)
+was measured against this one with `bench/json_compare` on the
+`json-bench` branch, before and after the reader (§8), the field access
+change (§6) and the writer changes (§4, §5). Apple M5, clang -O2, load
+2.9–3.5, 7 interleaved rounds, medians in MB/s of input:
+
+| Task | Input | before | after | upstream |
+|---|---|---|---|---|
+| parse | canada / citm / twitter | 1427 / 4373 / 2438 | 1460 / 4463 / 2599 | 308 / 2396 / 2057 |
+| parse | kostya 25k / 524k | 1409 / 1402 | 1435 / 1443 | 1399 / 1428 |
+| kostya_dom | kostya 25k / 524k | 1211 / 1204 | 1274 / 1295 | 1315 / 1290 |
+| kostya_stream | kostya 25k / 524k | 717 / 720 (cursor) | 1753 / 1736 (reader) | 1744 / 1754 (Reader) |
+| write | canada / citm / twitter | 930 / 5682 / 3922 | 1177 / 8949 / 5794 | 76 / 7923 / 3255 |
+| write | kostya 25k / 524k | 684 / 685 | 1345 / 1344 | 1509 / 1508 |
+
+Peak RSS on the 50 MB kostya input: parse 176 MB (upstream 244), the
+reader 50 MB, the size of the text (the cursor 128 MB; upstream's Reader
+50 MB). Output is byte-identical to before on every input; documents,
+averages and round trips agree across all three. What is left: writing
+kostya is 11% behind, all of it in the doubles (with doubles written as a
+constant, the two writers are level); and kostya_dom on the small input
+is 3% behind, the bit cast above.

@@ -34,26 +34,10 @@ fn lanes_lt(x: u64, n: u64) -> u64 { (x - n * ONES) & ~x & HIGHS }
 // The index of the lowest flagged lane of a nonzero lane mask.
 fn first_lane(m: u64) -> i64 { ctz64(m) >> 3 }
 
-const DEBRUIJN: u8[64] = [
-    0, 1, 56, 2, 57, 49, 28, 3, 61, 58, 42, 50, 38, 29, 17, 4, 62, 47, 59, 36, 45, 43, 51, 22, 53, 39, 33, 30, 24, 18, 12, 5,
-    63, 55, 48, 27, 60, 41, 37, 16, 46, 35, 44, 21, 52, 32, 23, 11, 54, 26, 40, 15, 34, 20, 31, 10, 25, 14, 19, 9, 13, 8, 7, 6,
-];
-
-// Trailing zero bits of a nonzero x, without a loop.
-fn ctz64(x: u64) -> i64 { DEBRUIJN[((x & (0 - x)) * 0x03f79d71b4ca8b09) >> 58] }
-
-// Leading zero bits of a nonzero x, by halving.
-fn clz64(x: u64) -> i64 {
-    var v = x;
-    var n = 0;
-    if v >> 32 == 0 { n += 32; v = v << 32; }
-    if v >> 48 == 0 { n += 16; v = v << 16; }
-    if v >> 56 == 0 { n += 8; v = v << 8; }
-    if v >> 60 == 0 { n += 4; v = v << 4; }
-    if v >> 62 == 0 { n += 2; v = v << 2; }
-    if v >> 63 == 0 { n += 1; }
-    return n;
-}
+// Trailing and leading zero bits of a nonzero x: std's, one instruction
+// where the C compiler has one.
+fn ctz64(x: u64) -> i64 { ctz(x) }
+fn clz64(x: u64) -> i64 { clz(x) }
 
 // The 128-bit product of a and b: high word, low word.
 fn mul128(a: u64, b: u64) -> u64, u64 {

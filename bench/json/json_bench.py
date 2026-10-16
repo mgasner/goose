@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""JSON benchmarks and conformance (docs/design/json.md, section 12).
+"""JSON benchmarks and conformance (docs/design/json.md, section 13).
 
 Builds bench/json/json_bench.goose and conformance.goose with the Goose
 compiler and a C toolchain, and the yyjson baseline from
@@ -76,29 +76,33 @@ def run(exe, *args):
 
 
 def conformance(exe):
+    """Each file through the document, a fully walked cursor, a reader reading
+    every value and a reader that only finishes (conformance.goose)."""
     files = sorted(SUITE.glob("*.json"))
     code, out, err = tc.run_capture([exe, *map(str, files)])
     if code != 0:
         sys.exit(f"conformance failed: {err or out}")
+    ways = ("document", "cursor", "reader", "reader skip")
     rows = {}
     for line in out.splitlines():
-        name, doc, cur = line.rsplit(" ", 2)
-        rows[Path(name).name] = (doc, cur)
+        name, *got = line.rsplit(" ", len(ways))
+        rows[Path(name).name] = got
     res = {"y": [0, 0], "n": [0, 0], "i": {}, "wrong": []}
-    for name, (doc, cur) in sorted(rows.items()):
+    for name, got in sorted(rows.items()):
         kind = name[:1]
+        said = ", ".join(f"{w} {g}" for w, g in zip(ways, got))
         if kind == "y":
-            res["y"][0] += doc == "accept"
+            res["y"][0] += got[0] == "accept"
             res["y"][1] += 1
-            if doc != "accept" or cur != "accept":
-                res["wrong"].append(f"{name}: document {doc}, cursor {cur}")
+            if any(g != "accept" for g in got):
+                res["wrong"].append(f"{name}: {said}")
         elif kind == "n":
-            res["n"][0] += doc == "reject"
+            res["n"][0] += got[0] == "reject"
             res["n"][1] += 1
-            if doc != "reject" or cur != "reject":
-                res["wrong"].append(f"{name}: document {doc}, cursor {cur}")
+            if any(g != "reject" for g in got):
+                res["wrong"].append(f"{name}: {said}")
         else:
-            res["i"][name] = doc if doc == cur else f"{doc} (cursor {cur})"
+            res["i"][name] = got[0] if len(set(got)) == 1 else said
     return res
 
 
@@ -132,14 +136,17 @@ def render(r):
         "## The cursor (MB/s)",
         "",
         "`index` is stage 1 alone. `find` is a cursor, then one lookup near the "
-        "end of the text; `find (document)` is a whole parse, then the same lookup.",
+        "end of the text; `find (document)` is a whole parse, then the same lookup; "
+        "`find (reader)` is a reader making the same lookup and then `finish`, "
+        "so that the whole text is checked.",
         "",
-        "| File | Lookup | Index | Find | Find (document) |",
-        "|---|---|---|---|---|",
+        "| File | Lookup | Index | Find | Find (document) | Find (reader) |",
+        "|---|---|---|---|---|---|",
     ]
     for f in r["files"]:
         g = f["goose"]
-        lines.append(f"| {f['file']} | `{f['key1']}.{f['key2']}` | {g['index']} | {g['find']} | {g['find_doc']} |")
+        lines.append(f"| {f['file']} | `{f['key1']}.{f['key2']}` | {g['index']} | {g['find']} | {g['find_doc']} | "
+                     f"{g.get('find_reader', '–')} |")
     lines += [
         "",
         "## Doubles (ns each)",
@@ -158,7 +165,7 @@ def render(r):
         "",
         f"* `y_` (must accept): {c['y'][0]}/{c['y'][1]} accepted.",
         f"* `n_` (must reject): {c['n'][0]}/{c['n'][1]} rejected.",
-        "* Document and fully walked cursor disagree with the suite on: "
+        "* Document, fully walked cursor, reader and skipping reader disagree with the suite on: "
         + (", ".join(c["wrong"]) if c["wrong"] else "nothing") + ".",
         "",
         "`i_` (either is allowed):",

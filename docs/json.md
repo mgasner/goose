@@ -6,15 +6,30 @@ with no C of its own, and it is built for speed: on one core it parses at
 [`design/json.md`](design/json.md) records the design and the plan for
 SIMD and typed decoding.
 
-There are three ways in, each usable on its own:
+There are four ways in, each usable on its own:
 
 | You want to | Use | Section |
 |---|---|---|
 | produce JSON: a response, a file, a log line | a **writer** | §1 |
-| read a whole document and walk it | **`json::parse`**, a document | §2 |
-| pull a few values out of a large text | **`json::cursor`** | §3 |
+| read a whole document and walk it, in any order, as often as you like | **`json::parse`**, a document | §2 |
+| read a text once, in order, into your own values | **`json::reader`** | §3 |
+| look at a few values of a large text, in any order, checking only those | **`json::cursor`** | §4 |
 
-Numbers are exact in both directions (§4).
+Numbers are exact in both directions (§5).
+
+**Which reader.** A document and a reader both check the whole text, to
+the same rules (§2): they accept and reject exactly the same texts. A
+document costs a tape of 16 bytes per value and key, and gives random
+access: `get`, `at`, `count`, any order, any number of times. A reader
+costs nothing beyond the text and reads each value once, in text order;
+reading everything once, it is the faster of the two, and on a large input
+it is the only one whose memory does not grow with the input. A cursor
+indexes the whole text first (4 bytes per value) and then reads values in
+any order, checking only what it reads. For pulling a few values out of a
+large text, a reader that skips the rest is as fast or faster on text with
+strings in it and checks everything; the cursor is faster where most of the
+text is numbers it never reads, or where values are visited out of order
+or more than once (§6).
 
 ---
 
@@ -56,7 +71,7 @@ The writer does not check structure. A key outside an object, or two
 values in a row inside one, is written as asked. Strings are escaped as
 JSON requires: `"`, `\` and control characters. Bytes from 0x80 up pass
 through unchanged, so the text must already be UTF-8. Floats are written
-as §4 describes. NaN and the infinities, which JSON cannot express, are
+as §5 describes. NaN and the infinities, which JSON cannot express, are
 written as `null`.
 
 The writer works on a `u8[>..]` or a `u8[>..<]`, and keeps two flags and
@@ -133,7 +148,74 @@ surrogate`. Parsing never aborts on bad input.
 
 `json::max_depth` (1024) bounds nesting.
 
-## 3. The cursor
+## 3. The reader
+
+`json::reader(text)` reads the text in one pass, front to back, as the
+program asks for values. It builds nothing: a value is parsed when it is
+read, and passed over, and checked, when it is not.
+
+```goose
+struct Point { x: f64 = 0.0, y: f64 = 0.0 }
+
+var r = json::reader(body);
+var points: Point[>..] = [];
+r.members() { k =>
+    if k == "points" {
+        r.each() {
+            var p = Point {};
+            r.members() { f =>
+                if f == "x" { p.x = r.float(); }
+                else if f == "y" { p.y = r.float(); }
+            };                                  // other members: skipped
+            points.push(p);
+        };
+    }
+};
+guard r.finish() else { print("bad JSON at byte ", r.error.at, ": ", r.error.message); return; }
+```
+
+| Call | Does |
+|---|---|
+| `r.members() { k => … }` | each member of the object at the reader, in order, duplicates included; the block reads the member's value from `r` |
+| `r.each() { … }` | each item of the array at the reader; the block reads the item from `r` |
+| `r.int()`, `r.uint()`, `r.float()`, `r.string()`, `r.boolean()` | the value at the reader, which it moves past; the kind's default if it is not one |
+| `r.try_int()`, `r.try_uint()`, `r.try_float()`, `r.try_string()`, `r.try_boolean()` | the same, and whether the value was one |
+| `r.kind()`, `r.is_null()` | what the next value is (§2's kinds), without moving; `K_MISSING` at the end or after an error |
+| `r.skip()` | moves past the value, checking it |
+| `r.raw()` | the value's exact text, checked and moved past |
+| `r.finish()` | reads the root value if nothing did, then checks that only whitespace follows: true when the whole text was JSON |
+| `r.ok()`, `r.error` | whether anything was wrong, and what (§2) |
+
+* **Reading.** A read of the right kind takes the value and moves past
+  it. A read of another kind leaves the value where it is and gives the
+  default, as a document's values do, so a program can try one kind and
+  then another. Numbers convert as a document's do: `float()` takes any
+  number, `int()` a whole double in range.
+* **Skipping.** Inside `members` and `each`, a value the block did not
+  take is skipped. So a block reads what it wants and ignores the rest.
+* **Checking.** Everything the reader moves past, read or skipped, is
+  checked exactly as `parse` checks it: grammar, UTF-8, escapes and
+  surrogates, `max_depth`. A program that ends with `r.finish()` has
+  checked the whole text, and the two agree on every file of
+  JSONTestSuite.
+* **Errors.** The first error is kept in `r.error`, with the byte where
+  the text stopped being JSON. It stops the reader: every read after it
+  gives the default, and every `members` and `each` loop ends. Check once,
+  with `finish`, at the end.
+* **Strings** without escapes are views of the text. Strings and keys
+  with escapes are unescaped into the reader's own buffer, so a reader
+  must be a `var`; their views stay valid as long as the reader does.
+* **One root.** After the root value, a read of another value is an
+  error, as text after the root is for `parse`.
+* **Leaving early.** Returning out of a `members` or `each` block leaves
+  the reader inside the container: `finish` then fails. To stop reading,
+  return from the function the reader belongs to and drop the reader.
+
+Memory is the text alone, plus the unescaped strings. A reader is the
+cheapest way to load JSON into a program's own structs, and the only way
+to read an input larger than memory allows a tape for.
+
+## 4. The cursor
 
 `json::cursor(text)` makes one fast pass over the text, finding where
 every structural character, string and scalar is. It parses nothing.
@@ -161,12 +243,16 @@ beyond their brackets. This is simdjson's On-Demand contract. Where the
 whole text must be valid, use a document.
 
 **When it pays.** The cursor wins when a program reads a small part of a
-large text. canada.json's one key at its end comes back twice as fast as
-from a document, because the numbers in between are never parsed. To read
-everything, a document is about twice as fast, since the cursor finds
-each value through its index and parses it on the way.
+large text, in any order. canada.json's one key at its end comes back
+twice as fast as from a document, and a fifth faster than through a
+reader, because the numbers in between are neither parsed nor checked.
+On text that is mostly strings (twitter.json, citm_catalog.json), a reader
+that skips to the key is faster than the cursor and checks the whole text
+besides (§6). To read everything, a document is about twice as fast as a
+cursor, and a reader faster still, since the cursor finds each value
+through its index and parses it on the way.
 
-## 4. Numbers
+## 5. Numbers
 
 ```goose
 json::write_int(out, i)        json::write_uint(out, u)       json::write_float(out, x)
@@ -196,7 +282,7 @@ Both directions are tested against Python's correctly rounded conversions
 on several million values, including every hard case near a rounding
 boundary.
 
-## 5. Performance
+## 6. Performance
 
 On one core (Apple arm64, clang -O2), against yyjson 0.13 on the same
 machine and run:
@@ -216,13 +302,15 @@ Tips:
 
 * Parse straight from the buffer you read into; the document will not copy
   it.
-* For request bodies, where a handler wants a few fields, a cursor is the
-  cheaper reader. For data a program walks whole, use a document.
+* For request bodies and files read into a program's own structs, use a
+  reader: it checks everything and builds nothing. For data a program
+  walks whole, or out of order, use a document. For a few values of a
+  large text, mostly numbers, that need not all be checked, a cursor.
 * Pre-quote constant keys with `raw_key` in hot writers.
 * Each worker of a pool parses its own requests; a document is too cheap
   to make to be worth splitting across workers.
 
-## 6. Reference
+## 7. Reference
 
 | Function | |
 |---|---|
@@ -230,12 +318,14 @@ Tips:
 | `json::pretty_writer(out, indent) -> Writer<A>` | one item per line |
 | `json::parse(text) -> Doc` | a checked document; `d.ok()`, `d.error`, `d.root()` |
 | `json::cursor(text) -> Cursor` | a structural index; `c.ok()`, `c.error`, `c.root()` |
+| `json::reader(text) -> Reader` | a one-pass reader; `r.members()`, `r.each()`, `r.finish()` (§3) |
 | `json::write_string(out, s)` | `s` quoted and escaped |
-| `json::write_int`, `write_uint`, `write_float` | numbers, as §4 |
+| `json::write_int`, `write_uint`, `write_float` | numbers, as §5 |
 | `json::parse_float(s) -> f64, bool` | a whole string as a number |
 | `json::scan_number(s, at) -> kind, bits, end` | the number at `s[at]` |
 | `json::index(text, out: u32[>..]&) -> bool` | the cursor's stage 1 alone: positions of structure and values |
-| `json::max_depth` | the deepest nesting `parse` accepts (1024) |
+| `json::max_depth` | the deepest nesting `parse` and a reader accept (1024) |
 | `json::Error { ok, at, message }` | what went wrong, and where |
 
-The writer's calls are listed in §1, and a value's calls in §2.
+The writer's calls are listed in §1, a value's calls in §2 and a reader's
+in §3.

@@ -6,6 +6,7 @@
 //   index      the cursor's stage 1 alone, MB/s
 //   find       json::cursor, then root.get(key1).get(key2), MB/s
 //   find_doc   json::parse, then the same lookup, MB/s
+//   find_reader  json::reader, the same lookup, then finish (the whole text checked), MB/s
 //   fwrite     json::write_float on the file's doubles, ns each
 //   fread      json::scan_number on that text, ns each
 // bench/json/json_bench.py builds and runs it.
@@ -24,6 +25,17 @@ recursive fn walk(v: json::Value) -> i64 {
 }
 
 fn mbs(bytes: i64, ns: i64) -> i64 { bytes * 1000 / max(ns, 1) }
+
+// root.get(k1).get(k2) through a reader, which skips and checks the rest.
+fn find_reader(text: const u8[:], k1: const u8[:], k2: const u8[:]) -> i64 {
+    var r = json::reader(text);
+    var v = 0;
+    r.members() { a =>
+        if a == k1 { r.members() { b => if b == k2 { v = r.int(); } }; }
+    };
+    if !r.finish() { abort("reader failed"); }
+    return v;
+}
 
 fn main() {
     let a = args();
@@ -55,6 +67,8 @@ fn main() {
         let d2 = json::parse(text);
         sink += d2.root().get(k1).get(k2).int();
         let t6 = clock_ns();
+        sink += find_reader(text, k1, k2);
+        let t7 = clock_ns();
         outlen = out.len;
         best[0] = min(best[0], t1 - t0);
         best[1] = min(best[1], t2 - t1);
@@ -62,6 +76,7 @@ fn main() {
         best[3] = min(best[3], t4 - t3);
         best[4] = min(best[4], t5 - t4);
         best[5] = min(best[5], t6 - t5);
+        best[6] = min(best[6], t7 - t6);
     }
     // The doubles alone.
     let d = json::parse(text);
@@ -94,6 +109,6 @@ fn main() {
     let n = text.len;
     print("bytes=", n, " entries=", d.ntape, " doubles=", xs.len,
           " parse=", mbs(n, best[0]), " walk=", mbs(n, best[0] + best[1]), " write=", mbs(outlen, best[2]),
-          " index=", mbs(n, best[3]), " find=", mbs(n, best[4]), " find_doc=", mbs(n, best[5]),
+          " index=", mbs(n, best[3]), " find=", mbs(n, best[4]), " find_doc=", mbs(n, best[5]), " find_reader=", mbs(n, best[6]),
           " fwrite_ps=", fw, " fread_ps=", fr, " sink=", sink % 2);
 }

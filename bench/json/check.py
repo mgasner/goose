@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Correctness checks for the json module beyond the test fixture
-(docs/design/json.md, sections 5 and 12).
+(docs/design/json.md, sections 5 and 13).
 
 1. Doubles: writes several million cases from Python's correctly rounded
    repr() and float() -- random bit patterns, subnormals and extremes,

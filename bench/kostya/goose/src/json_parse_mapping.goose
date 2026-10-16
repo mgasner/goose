@@ -20,24 +20,31 @@ fn new_json_parse_mapping() -> JsonParseMapping {
     JsonParseMapping { n: config_i64("Json::ParseMapping", "coords"), result_val: 0, text: [] }
 }
 
-// What serde's derived Deserialize reads for each type: the fields it knows,
-// with any other members passed over.
+// A number at the reader; the text is ours, so anything else is a bug, as
+// it is an error to serde.
+fn number(r: json::Reader&) -> f64 {
+    let v, ok = r.try_float();
+    if !ok { abort(str("json: expected a number at byte ", r.pos)); }
+    return v;
+}
+
+// What serde's derived Deserialize reads for each type: the fields it knows;
+// a member the block does not read is passed over, and checked, by the
+// reader.
 fn read_coordinate_data(r: json::Reader&) -> CoordinateData {
     var c = CoordinateData { x: 0.0, y: 0.0, z: 0.0 };
-    json::each_member(r) { key =>
-        if key == "x" { c.x = json::read_number(r); }
-        else if key == "y" { c.y = json::read_number(r); }
-        else if key == "z" { c.z = json::read_number(r); }
-        else { json::skip(r); }
+    r.members() { key =>
+        if key == "x" { c.x = number(r); }
+        else if key == "y" { c.y = number(r); }
+        else if key == "z" { c.z = number(r); }
     };
     return c;
 }
 
 fn read_coordinates(r: json::Reader&) -> Coordinates {
     var data = Coordinates { coordinates: [] };
-    json::each_member(r) { key =>
-        if key == "coordinates" { json::each_element(r) { data.coordinates.push(read_coordinate_data(r)); }; }
-        else { json::skip(r); }
+    r.members() { key =>
+        if key == "coordinates" { r.each() { data.coordinates.push(read_coordinate_data(r)); }; }
     };
     return data;
 }
@@ -45,7 +52,7 @@ fn read_coordinates(r: json::Reader&) -> Coordinates {
 fn calc(s: JsonParseMapping&, text: u8[:]) -> CoordinateData {
     var r = json::reader(text);
     let data = read_coordinates(r);
-    if !json::finish(r) { abort(json::message(r)); }
+    if !r.finish() { abort(str("json: ", r.error.message, " at byte ", r.error.at)); }
     let len: f64 = data.coordinates.len;
 
     var x = 0.0;

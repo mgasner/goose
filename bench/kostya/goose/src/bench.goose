@@ -16,33 +16,33 @@ import helper;
 // --- the configuration --------------------------------------------------------
 
 // run.js / test.js: a JSON array of objects, each naming a benchmark and its
-// parameters, parsed into a document tree whose root is its first node.
+// parameters, parsed into a document whose strings are views of the text.
 var cfg_text: u8[>..];
-var cfg_doc: json::Node[>..];
-var cfg_decoded: u8[>..];
+var cfg_doc: json::Doc;
 
 fn load_config(path: const u8[:]) {
     if !read_file(path, cfg_text) { abort(str("cannot read config ", path)); }
-    let root, err = json::parse(cfg_text, cfg_doc, cfg_decoded);
-    guard root else { abort(err); }
+    cfg_doc = json::parse(cfg_text);
+    guard cfg_doc.ok() else { abort(str("json: ", cfg_doc.error.message, " at byte ", cfg_doc.error.at)); }
 }
 
-fn config_entry(bench: u8[:]) -> json::Node? {
-    json::each(cfg_doc[0]) { entry =>
-        let name, ok = json::as_string(json::member(entry, "name"));
-        if ok && name == bench { return entry; }
+// The entry naming this benchmark; missing if there is none, and a
+// lookup in a missing value finds nothing, so that lookups chain.
+fn config_entry(bench: u8[:]) -> json::Value {
+    cfg_doc.root().each() { entry =>
+        if entry.get("name").string() == bench { return entry; }
     };
-    return null;
+    return json::Value { doc: cfg_doc, entry: -1 };
 }
 
 fn config_i64(bench: u8[:], key: u8[:]) -> i64 {
-    let v, ok = json::as_i64(json::member(config_entry(bench), key));
+    let v, ok = config_entry(bench).get(key).try_int();
     if !ok { print("Config not found for ", bench, ", field: ", key); return 0; }
     return v;
 }
 
 fn config_s(bench: u8[:], key: u8[:]) -> const u8[:] {
-    let v, ok = json::as_string(json::member(config_entry(bench), key));
+    let v, ok = config_entry(bench).get(key).try_string();
     if !ok { print("Config not found for ", bench, ", field: ", key); return ""; }
     return v;
 }
@@ -53,7 +53,7 @@ struct Bench { name: const u8[:], iterations: i64, warmup: i64, time: f64 }
 
 fn make_bench(name: const u8[:]) -> Bench {
     let iterations = config_i64(name, "iterations");
-    let w, has_warmup = json::as_i64(json::member(config_entry(name), "warmup_iterations"));
+    let w, has_warmup = config_entry(name).get("warmup_iterations").try_int();
     let warmup = if has_warmup { w } else { max((iterations * 0.2) as! i64, 1) };
     return Bench { name: name, iterations: iterations, warmup: warmup, time: 0.0 };
 }
@@ -99,8 +99,12 @@ fn run_main<D>() {
     var summary = 0.0;
     var ok = 0;
     var fails = 0;
-    json::each(cfg_doc[0]) { entry =>
-        let name, named = json::as_string(json::member(entry, "name"));
+    cfg_doc.root().each() { entry =>
+        let text, named = entry.get("name").try_string();
+        // The name, copied out of the document: the borrow checker does not
+        // accept a view of it held across a benchmark's run (§5.2).
+        var name: u8[..64] = [];
+        name.append(text[..min(text.len, 64)]);
         if named && (filter.len == 0 || find(lower(name), filter) >= 0) {
             var b = make_bench(name);
             reset();

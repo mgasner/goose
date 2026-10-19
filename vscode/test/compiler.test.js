@@ -112,8 +112,9 @@ test('a module part checks through its root, and the part\'s errors stay in the 
 test('a real compiler error without a location keeps its message for the checked file', options, async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'goose vscode unlocated '));
     try {
-        const file = path.join(dir, 'main.goose');
-        fs.writeFileSync(file, 'import .missing;\nfn main() { }\n');
+        // An import that finds nothing is an error at the import; an entry
+        // file that is not there has no line to be at.
+        const file = path.join(dir, 'missing.goose');
         const result = await runCompiler(config(file)).promise;
         assert.ok(result.error);
         assert.deepEqual(parseDiagnostics(result.output, root), []);

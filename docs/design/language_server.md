@@ -257,7 +257,12 @@ today, and cleared for files a root no longer reaches.
 
 **Roots.** `initialize` brings the configured entries per workspace
 folder; `didOpen` of a file no analysis reaches makes it a root of its
-own, dropped again when closed; a file reached from several roots belongs
+own, dropped again when closed. A part of a module split across files,
+`<dir>/<name>/<part>.goose`, uses what the other parts declare and does not
+check alone, so where `<dir>/<name>.goose` imports it (directly or through
+the module's other files) that root file stands for it instead, one module
+up in turn (`Workspace::ModuleRoot`), as the extension's check-on-save mode
+does (`moduleRoot` in `vscode/src/config.js`). A file reached from several roots belongs
 to the first configured one for queries, and all of them re-analyze when
 it changes. The standard library is parsed by every root that imports it,
 which the measurements say is affordable (parsing is a tenth of a check).

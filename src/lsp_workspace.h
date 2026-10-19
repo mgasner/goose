@@ -23,6 +23,9 @@ struct Document {
 struct Root {
     string path, key;               // CanonicalPath and PathKey.
     bool configured = false;        // An entry file the editor configured, else an open file.
+    // The open files it stands for: its own, or the parts of its module
+    // (ModuleRoot) the editor has open. An open-file root goes when none is.
+    set<string> openkeys;
     unique_ptr<Analysis> analysis;  // The latest that got past resolution, which queries read.
     set<string> files;              // Keys of the files the latest attempt reached.
     set<string> published;          // URIs the latest attempt published diagnostics to.
@@ -145,9 +148,102 @@ struct Workspace {
             auto &r = *roots[i];
             auto reached = false;
             for (auto &o : roots) if (o.get() != &r && o->files.count(r.key)) reached = true;
-            if (!r.configured && (reached || !open.count(r.key))) RemoveRoot(&r);
+            auto isopen = open.count(r.key) != 0;
+            for (auto &k : r.openkeys) isopen = isopen || open.count(k);
+            if (!r.configured && (reached || !isopen)) RemoveRoot(&r);
             else i++;
         }
+    }
+
+    // The imports of a file that name a file of this program, `import a.b;`
+    // and `import .a.b;` at its top level (not those of a package, with
+    // `from`): each as a path relative to the root's directory, or to the
+    // file's own where relative. Read from the editor's text if it has the
+    // file open. Empty for a file that cannot be read or lexed.
+    vector<pair<string, bool>> PlainImports(const string &path) {
+        vector<pair<string, bool>> result;
+        string text;
+        if (auto t = TextOf(path)) text = *t;
+        else if (!LoadSource(path, text)) return result;
+        try {
+            Lexer lex(path, text.c_str());
+            auto depth = 0;
+            while (lex.tok != T_EOF) {
+                if (lex.tok == T_LCURLY) depth++;
+                if (lex.tok == T_RCURLY) depth--;
+                if (depth != 0 || lex.tok != T_IMPORT) {
+                    lex.Next();
+                    continue;
+                }
+                lex.Next();
+                auto relative = lex.tok == T_DOT;
+                if (relative) lex.Next();
+                string imp;
+                while (lex.tok == T_IDENT) {
+                    if (!imp.empty()) imp += "/";
+                    imp += lex.attr;
+                    lex.Next();
+                    if (lex.tok != T_DOT) break;
+                    lex.Next();
+                }
+                if (!imp.empty() && lex.tok == T_SEMI) result.push_back({ imp, relative });
+            }
+        } catch (CompileError &) {
+        }
+        return result;
+    }
+
+    // Whether `root`, compiled as the program's root file, loads `target`:
+    // what it imports, and what those import in turn, as ParseProgram
+    // resolves them. Only files of the module's own directory (`<dir>/<name>/`
+    // beside `<dir>/<name>.goose`) are followed.
+    bool Loads(const string &root, const string &target) {
+        auto moduledir = root.substr(0, root.size() - strlen(".goose")) + "/";
+        auto targetkey = PathKey(target);
+        vector<string> queue = { root };
+        set<string> seen = { PathKey(root) };
+        for (size_t i = 0; i < queue.size() && seen.size() < 512; i++) {
+            auto file = queue[i];
+            for (auto &[imp, relative] : PlainImports(file)) {
+                auto imported = CanonicalPath(cat(DirOf(relative ? file : root), imp, ".goose"));
+                auto key = PathKey(imported);
+                if (key == targetkey) return true;
+                if (imported.rfind(moduledir, 0) == 0 && seen.insert(key).second)
+                    queue.push_back(imported);
+            }
+        }
+        return false;
+    }
+
+    // A file of a module split across several, `<dir>/<name>/<part>.goose`,
+    // does not check alone: it uses what the other parts declare. Its
+    // module's root file, `<dir>/<name>.goose`, imports the parts and
+    // stands for it, and a root without `fn main()` checks. A root that is
+    // itself a part of a module one directory up stands for that one's
+    // root in turn. Anything else is its own root.
+    string ModuleRoot(const string &file) {
+        auto current = CanonicalPath(file);
+        for (auto depth = 0; depth < 32; depth++) {
+            auto dir = DirOf(current);
+            if (dir.size() < 2) break;
+            dir.pop_back();
+            if (DirOf(dir).empty() || DirOf(dir) == dir) break;
+            auto root = dir + ".goose";
+            if (!TextOf(root) && !PathExists(root)) break;
+            if (!Loads(root, current)) break;
+            current = root;
+        }
+        return current;
+    }
+
+    // The root an open file no root reaches stands under: its module's, or
+    // its own.
+    void AddOpenRoot(const string &path, const string &key) {
+        auto rootpath = ModuleRoot(path);
+        auto r = FindRoot(PathKey(rootpath));
+        if (!r) r = AddRoot(rootpath, false);
+        else Dirty(*r, DEBOUNCE_MS);
+        r->openkeys.insert(key);
     }
 
     void Dirty(Root &r, int delayms) {
@@ -165,7 +261,7 @@ struct Workspace {
                 reached = true;
             }
         if (!reached)
-            if (auto it = open.find(key); it != open.end()) AddRoot(it->second.path, false);
+            if (auto it = open.find(key); it != open.end()) AddOpenRoot(it->second.path, key);
     }
 
     void Open(const string &uri, const string &text) {
@@ -186,8 +282,10 @@ struct Workspace {
     void Close(const string &uri) {
         auto key = PathKey(PathOfUri(uri));
         open.erase(key);
+        for (auto &r : roots) r->openkeys.erase(key);
         if (auto r = FindRoot(key); r && !r->configured) RemoveRoot(r);
         else Touch(key);   // Its text is the disk's again.
+        PruneUnreached();
     }
 
     // The next moment an analysis is due, if any root is dirty.

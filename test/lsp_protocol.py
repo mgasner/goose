@@ -371,6 +371,22 @@ def check_lsp_protocol(exe, base):
                      HERE / "errors_tc" / "recovery" / "exemplar_unchecked.goose"):
         etext = exemplar.read_text(encoding="utf-8")
         queries(exemplar, etext, open_fixture(exemplar, etext))
+    # A part of a module, opened alone, which uses what another part
+    # declares: it is checked through the module's root file, which imports
+    # both, and its own errors are published in it.
+    part = fixtures / "parts" / "api.goose"
+    ptext = part.read_text(encoding="utf-8")
+    part_uri = uri_of(part)
+    diags = open_fixture(part, ptext)
+    if diags:
+        fail("diagnostics of a module's part checked through its root", diags)
+    client.send("textDocument/didChange", {"textDocument": {"uri": part_uri, "version": 2},
+                                           "contentChanges": [{"text": ptext.replace("f.name", "f.missing")}]},
+                request=False)
+    diags = client.diagnostics_for(part_uri, lambda d: len(d) > 0)
+    if len(diags) != 1 or diags[0]["severity"] != 1 or diags[0]["range"]["start"]["line"] != 4:
+        fail("diagnostics after an edit of a module's part into an error", diags)
+    client.send("textDocument/didClose", {"textDocument": {"uri": part_uri}}, request=False)
     client.request("shutdown", None)
     client.send("exit", request=False)
     code = client.p.wait(timeout=30)

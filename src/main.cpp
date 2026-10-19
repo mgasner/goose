@@ -777,7 +777,8 @@ rename, document and workspace symbols, semantic highlighting, signature
 help, completion, inlay hints, folding and selection ranges, and code
 lenses. It analyzes the programs whose entry files the editor configures
 (the initializationOptions' entryFiles, with the standard library's
-directory as stdlib) and every open file none of them imports; the
+directory as stdlib) and every open file none of them imports, a part of a
+module through the module's root file; the
 initializationOptions' commands are the client's own commands a code lens
 may name (goose.run, goose.showInstantiations). It fetches nothing: a
 package not fetched is an error at its import, which goose fetch resolves.

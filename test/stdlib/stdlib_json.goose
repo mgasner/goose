@@ -1,5 +1,6 @@
 // The json module: the writer, number text both ways, the document parser
-// and its accessors, errors with their positions, and the cursor.
+// and its accessors, errors with their positions, the cursor and the
+// reader.
 import std;
 import json;
 
@@ -19,6 +20,36 @@ fn show_doc(text: const u8[:]) {
     var w = json::writer(out);
     w.value(d.root());
     print(out);
+}
+
+// Every value through the reader, as text: what it does not take it skips.
+recursive fn echo(r: json::Reader&, out: u8[>..]&) {
+    let k = r.kind();
+    if k == json::K_ARRAY {
+        out.push('[');
+        r.each() { echo(r, out); out.push(' '); };
+        out.push(']');
+    } else if k == json::K_OBJECT {
+        out.push('{');
+        r.members() { key => json::write_string(out, key); out.push(':'); echo(r, out); out.push(' '); };
+        out.push('}');
+    } else if k == json::K_STRING { json::write_string(out, r.string()); }
+    else if k == json::K_INT { format(out, r.int()); }
+    else if k == json::K_UINT { format(out, r.uint()); }
+    else if k == json::K_FLOAT { json::write_float(out, r.float()); }
+    else if k == json::K_TRUE || k == json::K_FALSE { format(out, r.boolean()); }
+    else { out.append("~"); r.skip(); }
+}
+
+fn show_reader(text: const u8[:]) {
+    var r = json::reader(text);
+    var out: u8[>..] = [];
+    echo(r, out);
+    let ok = r.finish();
+    var skipped = json::reader(text);
+    let sok = skipped.finish();
+    if ok { print(out, if sok { "" } else { "  (but skipping it fails)" }); }
+    else { print("error at ", r.error.at, ": ", r.error.message, if sok { "  (but skipping it passes)" } else { "" }); }
 }
 
 fn main() {
@@ -46,10 +77,17 @@ fn main() {
         p.array() { p.int(-2); p.array() {}; p.object() { p.field("c", false); }; };
     };
     print(pretty);
+    var keys: u8[>..] = [];
+    json::write_key(keys, "plain");
+    json::write_key(keys, "quote\" and \\ and \n");
+    json::write_string(keys, "eight by");
+    json::write_string(keys, "nine bytes\"");
+    print(keys);
 
     print("-- floats out");
     for x in [0.0, -0.0, 1.0, -1.5, 0.1, 0.30000000000000004, 123456789.125, 1e21, 1e20, 1.5e-7, 0.000001,
-              5e-324, 1.7976931348623157e308, 2.2250738585072014e-308, 9007199254740993.0, 1.0 / 0.0, 0.0 / 0.0] {
+              5e-324, 1.7976931348623157e308, 2.2250738585072014e-308, 9007199254740993.0, 1.0 / 0.0, 0.0 / 0.0,
+              0.03940901, 7.14e-6, 123456.75, 1e15, 999999999999999.0, 1e-8, 12345678901234.5, 1e36, -0.5] {
         show_float(x);
     }
 
@@ -113,4 +151,48 @@ fn main() {
     }
     var bad = json::cursor("[1, tru, 3]");
     print("bad literal kind ", bad.root().at(1).kind(), ", others ", bad.root().at(0).int(), " ", bad.root().at(2).int());
+
+    print("-- reader");
+    var rd = json::reader(text);
+    var users = 0;
+    var names: u8[>..] = [];
+    var count = 0;
+    rd.members() { k =>
+        if k == "users" {
+            rd.each() {
+                users += 1;
+                rd.members() { f =>
+                    if f == "name" { names.append(rd.string()); names.push(' '); }
+                    else if f == "age" { format(names, rd.int(), " "); }
+                };
+            };
+        } else if k == "count" { count = rd.int(); }
+    };
+    print("users ", users, ", count ", count, ", ", names, "finish ", rd.finish());
+    var wrong = json::reader("[\"a\", 2, [3], {\"k\": 4}]");
+    wrong.each() {
+        let x, ok = wrong.try_int();
+        print("  int ", x, " ", ok, ", kind left ", wrong.kind());
+    };
+    print("finish ", wrong.finish());
+    var raw = json::reader("{\"q\": \"x\", \"v\": {\"a\": [1, 2.5]}, \"esc\": \"t\\u00e9\\n\"}");
+    raw.members() { k =>
+        if k == "v" { print("  raw ", raw.raw()); }
+        else if k == "esc" { print("  esc bytes ", raw.string().len); }
+    };
+    print("finish ", raw.finish());
+    var two = json::reader("1 2");
+    print("first ", two.int(), ", second ", two.int(), ", finish ", two.finish(), ": ", two.error.message);
+    var empty = json::reader("   ");
+    print("empty: kind ", empty.kind(), ", finish ", empty.finish(), ": ", empty.error.message);
+    for t in ["{\"a\": [1, -2.5e3, true, null, \"x\\ty\"], \"b\": {}, \"c\": 18446744073709551615}", "[]", " 7 ",
+              "", "[1,]", "{\"a\" 1}", "{\"a\":1,}", "[1 2]", "[\"abc", "\"\\x\"", "\"\\ud800\"", "\"\t\"",
+              "[1]x", "tru", "{1:2}", "\"\xff\"", "[[[]]", "\xef\xbb\xbf{}", "[01]", "[1.]", "{\"\\ud800\": 1}"] {
+        show_reader(t);
+    }
+    json::max_depth = 3;
+    show_reader("[[[1]]]");
+    show_reader("[[[[1]]]]");
+    show_reader("[{\"a\": [[1]]}]");
+    json::max_depth = 1024;
 }

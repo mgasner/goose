@@ -33,7 +33,7 @@ fn writer<A>(out: A&) -> Writer<A> { Writer<A> { out: out } }
 // spaces per level.
 fn pretty_writer<A>(out: A&, indent: i64) -> Writer<A> { Writer<A> { out: out, indent: indent } }
 
-fn item<A>(w: Writer<A>&) {
+inline fn item<A>(w: Writer<A>&) {
     if w.keyed { w.keyed = false; return; }
     if w.comma { w.out.push(','); }
     if w.indent > 0 && w.depth > 0 { newline(w); }
@@ -44,14 +44,14 @@ fn newline<A>(w: Writer<A>&) {
     for i in w.depth * w.indent { w.out.push(' '); }
 }
 
-fn open<A>(w: Writer<A>&, c: u8) {
+inline fn open<A>(w: Writer<A>&, c: u8) {
     item(w);
     w.out.push(c);
     w.comma = false;
     w.depth += 1;
 }
 
-fn close<A>(w: Writer<A>&, c: u8) {
+inline fn close<A>(w: Writer<A>&, c: u8) {
     w.depth -= 1;
     if w.indent > 0 && w.comma { newline(w); }
     w.out.push(c);
@@ -72,10 +72,9 @@ fn ::array<A, F>(w: json::Writer<A>&) {
     json::close(w, ']');
 }
 
-fn ::key<A>(w: json::Writer<A>&, k: const u8[:]) {
+inline fn ::key<A>(w: json::Writer<A>&, k: const u8[:]) {
     json::item(w);
-    json::write_string(w.out, k);
-    w.out.push(':');
+    json::write_key(w.out, k);
     if w.indent > 0 { w.out.push(' '); }
     w.comma = false;
     w.keyed = true;
@@ -160,12 +159,39 @@ fn write_escape<A>(out: A&, c: u8) {
     }
 }
 
-// s as a JSON string. Clean runs are found eight bytes at a time and
-// appended whole; bytes from 0x80 up pass through unchanged.
-fn write_string<A>(out: A&, s: const u8[:]) {
-    out.push('"');
-    var run = 0;
+// The index of the first byte of s that needs escaping, or s.len: eight
+// bytes at a time, and the last few in one word that overlaps the ones
+// before it, which are known to be clean.
+fn escape_at(s: const u8[:]) -> i64 {
     var i = 0;
+    while i + 8 <= s.len {
+        let x = load8(s, i);
+        let m = lanes_eq(x, '"') | lanes_eq(x, '\\') | lanes_lt(x, 0x20);
+        if m != 0 { return i + first_lane(m); }
+        i += 8;
+    }
+    if i == s.len { return i; }
+    if s.len >= 8 {
+        let x = load8(s, s.len - 8);
+        let m = lanes_eq(x, '"') | lanes_eq(x, '\\') | lanes_lt(x, 0x20);
+        if m != 0 { return s.len - 8 + first_lane(m); }
+        return s.len;
+    }
+    while i < s.len {
+        let c = s[i];
+        if c == '"' || c == '\\' || c < 0x20 { return i; }
+        i += 1;
+    }
+    return i;
+}
+
+// s from its first byte that needs escaping, at s[at], escaped: clean runs
+// are found eight bytes at a time and appended whole.
+fn write_escaped<A>(out: A&, s: const u8[:], at: i64) {
+    out.append(s[..at]);
+    write_escape(out, s[at]);
+    var run = at + 1;
+    var i = at + 1;
     while i + 8 <= s.len {
         let x = load8(s, i);
         let m = lanes_eq(x, '"') | lanes_eq(x, '\\') | lanes_lt(x, 0x20);
@@ -186,5 +212,34 @@ fn write_string<A>(out: A&, s: const u8[:]) {
         i += 1;
     }
     out.append(s[run..]);
+}
+
+// s as a JSON string. A string with nothing to escape, as most are, is
+// appended with its quotes in one piece; bytes from 0x80 up pass through
+// unchanged.
+fn write_string<A>(out: A&, s: const u8[:]) {
+    let at = escape_at(s);
+    if at == s.len {
+        out.push('"');
+        out.append(s);
+        out.push('"');
+        return;
+    }
     out.push('"');
+    write_escaped(out, s, at);
+    out.push('"');
+}
+
+// k as an object's key: the string and its colon.
+fn write_key<A>(out: A&, k: const u8[:]) {
+    let at = escape_at(k);
+    if at == k.len {
+        out.push('"');
+        out.append(k);
+        out.append("\":");
+        return;
+    }
+    out.push('"');
+    write_escaped(out, k, at);
+    out.append("\":");
 }

@@ -1,13 +1,14 @@
 # JSON — Design
 
-Status: phases 1–4 (§12) are implemented in pure Goose in `stdlib/json/`,
-with `bench/json/` and the `stdlib_json` fixture. [`../json.md`](../json.md)
-is the user's guide. SIMD kernels (§10) and typed decoding (§11) are
-designed here and not implemented. §13 records what was measured and
-where the implementation departed from the first plan.
+Status: phases 1–4 (§13) and the reader (§8) are implemented in pure Goose
+in `stdlib/json/`, with `bench/json/` and the `stdlib_json` fixture.
+[`../json.md`](../json.md) is the user's guide. SIMD kernels (§11) and
+typed decoding (§12) are designed here and not implemented. §14 records
+what was measured and where the implementation departed from the first
+plan.
 
 `import json;` reads and writes JSON (RFC 8259) as fast as Goose allows.
-It is one library with four layers, each usable on its own:
+It is one library with five layers, each usable on its own:
 
 | Layer | For | Shape |
 |---|---|---|
@@ -15,9 +16,10 @@ It is one library with four layers, each usable on its own:
 | **Numbers** (§5) | every layer | shortest round-trip `f64` output, correctly rounded `f64` input, integers eight digits at a time |
 | **Document** (§6) | reading a whole value and walking it | one pass into a flat tape of 16-byte entries, indexed by position |
 | **Cursor** (§7) | pulling a few fields out of a large input | a structural index, walked lazily, nothing materialized |
+| **Reader** (§8) | reading a text once, in order, into the program's own values | one forward pass, nothing built, everything checked |
 
 The goal is throughput in the class of yyjson on one core, without SIMD
-intrinsics, and a clear path to simdjson's class (§10) when measurement
+intrinsics, and a clear path to simdjson's class (§11) when measurement
 says the structural scan is the bottleneck.
 
 ---
@@ -70,7 +72,7 @@ Measured or read from the implementation before designing:
 * **No SIMD types or intrinsics** in the language (spec §12, future item
   10). clang auto-vectorizes simple loops in the generated C, but not a
   parser. The plan is SWAR — 64-bit words as 8 lanes of bytes — in pure
-  Goose, with SIMD as a later `extern` kernel (§10).
+  Goose, with SIMD as a later `extern` kernel (§11).
 * **Word loads are cheap if written right.** Taking an 8-byte slice
   `s[at..at + 8]` costs one range check, and the eight indexes into it
   are then elided by BCE; clang folds the shifts and ORs into one
@@ -82,16 +84,17 @@ Measured or read from the implementation before designing:
 * **No 128-bit multiply.** Eisel–Lemire and Schubfach/Zmij need the high
   64 bits of a 64×64 product. In pure Goose that is four 32×32→64
   multiplies (`mulhi`, §5). This is the second place an `extern` kernel
-  would help (§10).
-* **`std`'s `popcount`, `clz` and `ctz` are bit loops.** The library has
-  its own branch-free `ctz` (de Bruijn multiply and a 64-entry table) and
-  `clz` (halving). Neither is the one instruction the hardware has, and
-  that shows (§13).
+  would help (§11).
+* **`std`'s `popcount`, `clz` and `ctz`** are the runtime's, one
+  instruction under clang and gcc (`__builtin_ctzll`) and MSVC, a loop
+  only under TinyCC. The library's `ctz64` and `clz64` are them. (They were
+  bit loops when this library was first written, and it carried a de
+  Bruijn `ctz` and a halving `clz` of its own; §14.)
 * **Bounds checks.** Each `s[i]` in a byte-at-a-time loop is checked
   unless BCE can see `i < s.len`. Hot loops are written as `while i <
   s.len` over a slice, or with an explicit 8-byte slice per step.
 * **No reflection.** Generic code cannot walk a struct's fields, so typed
-  decoding needs either hand-written code or a compiler builtin (§11). The
+  decoding needs either hand-written code or a compiler builtin (§12). The
   builtin `format` already renders any type structurally, which is the
   precedent.
 * **No heap.** Every output is a flat, growable array: the response
@@ -114,6 +117,7 @@ stdlib/json/number.goose     integer and f64 writing and reading
 stdlib/json/write.goose      Writer
 stdlib/json/doc.goose        the tape parser and its accessors
 stdlib/json/cursor.goose     the structural index and the cursor
+stdlib/json/reader.goose     the one-pass reader
 ```
 
 Everything is in `namespace json`. As in `graphql`, functions meant to be
@@ -139,11 +143,14 @@ w.object() {
   parent needs, since after a container closes the parent always wants a
   comma before its next item. A second bit says a key was just written,
   so a pretty printer keeps the value on the key's line.
-* **Strings.** The escape loop reads 8 bytes as a word and tests all
-  lanes at once for a byte that needs escaping (`< 0x20`, `"`, `\`). A
-  clean word is skipped whole and a clean run appended at once. At a
-  dirty byte, the run so far is appended and the byte escaped. Non-ASCII
-  bytes pass through unchanged.
+* **Strings.** A scan first finds the first byte that needs escaping
+  (`< 0x20`, `"`, `\`), reading 8 bytes as a word and testing all lanes
+  at once; the last few bytes are one word that overlaps the ones before
+  it, which are known clean. A clean string, as nearly all are, is then
+  appended with its quotes in one piece, which the compiler turns into
+  one bump of the output's end. A string with a byte to escape is copied
+  in clean runs from there, each byte escaped as it comes. Non-ASCII
+  bytes pass through unchanged. `write_key` is the same, with the colon.
 * **Keys known at compile time** can be pre-quoted: `w.raw_key("\"id\":")`
   appends the bytes with no scan.
 * **Integers** are written eight digits at a time into a word (§5), and
@@ -155,7 +162,13 @@ w.object() {
 * **Pretty printing** is `pretty_writer(out, indent)`: newlines and an
   indent per depth.
 * **`w.value(v)`** writes a value of a parsed document, by walking its
-  tape in order with a stack of the containers still open.
+  tape in order with a stack of the containers still open. A compact
+  writer takes a walk of its own (`write_compact`): commas come from
+  whether an item is the first in its container, the innermost open
+  container's end and kind are locals, and floats go out from the tape's
+  bits without being made doubles first. With the string and float
+  changes, `w.value` writes 1.3 (canada.json) to 2.0 (kostya) times as
+  fast as before (§14).
 
 The writer appends to a growable array the caller owns. It never builds a
 tree, so writing has no allocation of its own.
@@ -168,6 +181,26 @@ of ten. The digits are then built eight at a time in a `u64`, in SWAR
 into two pairs, and each pair into two digits, every lane at once, with
 multiplies by reciprocals. The digits land as ASCII bytes in lane order,
 so `bytes_of` on the words is the text, appended with one copy.
+
+**Floats out, short.** Most doubles in JSON were written by people or
+rounded by programs, and have a decimal of at most 15 significant digits.
+For those, floating point finds it (`short_decimal`), as upstream Goose's
+`format_number` does: above the subnormals, 15-digit decimals are more
+than four times further apart than the doubles near them, so at most one
+reads back as x. That one is n, the integer nearest x · 10^s, with s
+chosen from the binary exponent (and one step more if the product lands
+at 10^15 or above) so that n has 15 digits; the two roundings, of x and
+of the product, are each under a fifth of a unit of n. n reads back as x
+exactly when n / 10^s, one correctly rounded division with 10^s exact
+(|s| ≤ 22), is x, and then the shortest decimal is n without its trailing
+zeros, since any shorter one, padded, would be another 15-digit decimal
+reading back as x. x · 10^s is taken from the bits as m · 10^s, rounded
+once, then scaled by 2^e, which is exact here: no conversion from bits to
+a double. n's 15 digits are two `encode8` words; the trailing zeros are
+the high zero lanes of the last nonzero word, one `clz`. Anything else --
+more than 15 digits, below 10^-8 or above 10^36, subnormal -- falls
+through to Schubfach, after a check that costs a few nanoseconds (canada.json,
+almost all 17-digit doubles, writes no slower).
 
 **Floats out.** Schubfach as drachennest's `schubfach_64` implements it.
 It finds the interval of decimals that round to the double, then the
@@ -272,9 +305,15 @@ struct Val { head: u64, data: u64 }
   Strings with escapes are unescaped into the text area.
 * **Skipping** a container is `i = data`: O(1).
 * **Navigation:**
-  * `v.get(key)` scans the object's keys, comparing the length (in the
-    head word) first, then the bytes. It returns the first match;
-    duplicate keys are kept as they appear.
+  * `v.get(key)` scans the object's keys. A key's head word -- kind,
+    flags and length -- is compared with the one the key would have in one
+    compare; only on a match are the bytes compared, in the source, or as
+    unescaped text for a key with escapes. It returns the first match;
+    duplicate keys are kept as they appear. `get`, `kind` and `try_float`
+    are `inline`: called from a user's loop, they were calls, and field
+    access on kostya's coordinates cost twice what it did on upstream
+    Goose's linked tree (§14). A key's first byte in the head word, so that
+    one-byte keys never touch the source, was tried and measured no faster.
   * `v.at(i)` walks `i` siblings, each step O(1) by the skip.
   * `v.each() { x => … }` and `v.members() { k, x => … }` take blocks:
     Goose has no iterator objects.
@@ -365,11 +404,79 @@ entry, and it reads with the same calls as a document's values.
   wins, and a malformed value reads as missing.
 
 The document parser does not run over the index. In pure Goose, stage 1
-alone runs at about the speed of the whole one-pass parse (§13), so a
-two-pass DOM would be slower. With the SIMD kernel (§10) that changes,
+alone runs at about the speed of the whole one-pass parse (§14), so a
+two-pass DOM would be slower. With the SIMD kernel (§11) that changes,
 and the question is open again.
 
-## 8. Errors and limits
+## 8. Reader
+
+```goose
+var r = json::reader(text);
+r.members() { k =>
+    if k == "coordinates" {
+        r.each() { r.members() { f => if f == "x" { x += r.float(); } }; };
+    }
+};
+guard r.finish() else { ... r.error ... }
+```
+
+A pull reader in the style of upstream Goose's `json::Reader` and of
+serde's deserializers: one forward pass, a value parsed when the program
+asks for it, nothing built. The technique is upstream's -- a position in
+the text, blocks for containers, an error that moves the position to the
+end so that every later read fails and every loop ends -- and the API is
+this library's: the same reads as a document's values (`int`, `float`,
+`try_string`, `kind` ...), the same `Error`, blocks named `members` and
+`each`.
+
+* **State.** `Reader { src, pos, depth, root, error, text }`: the text,
+  the position, the containers open around it (for `max_depth`), where
+  the root value starts, the first error, and the unescaped strings.
+  `text` is grow-only, so a view of a string in it stays valid as more
+  strings are added, as the cursor's do.
+* **Reads.** A read looks at the next byte (whitespace skipped). A value
+  of its kind is taken and the position moves past it; a value of
+  another kind is left in place and the read gives the default, as a
+  document's does. Numbers are read by `scan_number`, except that a plain
+  decimal of at most 15 digits with no exponent -- the common case -- is
+  read as an exact integer divided by an exact power of ten, the same
+  result as `scan_number`'s Clinger path, straight to a double without
+  going through its bits.
+* **Blocks.** `members` and `each` take the value's first byte, run the
+  block for each member or item, and skip a value the block did not take:
+  the position after the block is compared with the value's start. So a
+  block reads what it wants, in any way, and needs no `else skip()`. The
+  loops keep the position in a local and write it back around the block.
+* **Skipping checks everything.** `skip` is a parse without a tape: the
+  same string scan (eight bytes at a time, UTF-8 checked whole when a
+  byte was high, escapes and surrogates checked by unescaping into a
+  scratch array that is dropped), a number grammar check that computes
+  nothing, the literals, the commas and colons. Containers inside the
+  skipped value are a word of bits, one per level (set for an object),
+  and a stack past 64 levels; depth counts against `max_depth` with the
+  reader's own. So a reader ended with `finish` checks the text exactly as
+  `parse` does: on JSONTestSuite the document, a fully read reader and a
+  reader that reads nothing and only finishes agree on every file
+  (`bench/json/conformance.goose`).
+* **One root.** The reader notes where the root value starts. At depth 0,
+  a read anywhere else is an error ("unexpected text after the value"),
+  as is text after the root at `finish`. `finish` skips the root if
+  nothing has moved past it.
+* **What it costs.** Nothing but the text, plus unescaped strings. The
+  hot paths -- the next byte, whitespace -- are `inline`: where no space
+  comes first, as in compact text, they are one load and compare.
+
+**Against the cursor.** The cursor (§7) indexes the whole text before
+reading anything and checks only what it reads; the reader checks
+everything it passes. Reading everything once, the reader is 2.2 times
+the cursor's speed, and faster than a document. Looking up one value near
+the end of a file, the reader, which skips and checks everything before
+it and finishes, is faster than the cursor on twitter.json and
+citm_catalog.json, and slower on canada.json, whose numbers the cursor
+never looks at (§14). The cursor remains the reader for lookups out of
+text order, repeated lookups, and text whose unread parts need no check.
+
+## 9. Errors and limits
 
 * Errors are values everywhere: `Error { ok: bool, at: i64, message:
   u8[..48] }`. A cursor that reads malformed input keeps the first error.
@@ -383,7 +490,7 @@ and the question is open again.
 * Input must be UTF-8. A leading byte-order mark is rejected, per RFC
   8259 §8.1.
 
-## 9. Parallelism
+## 10. Parallelism
 
 A single document parses fastest on one thread. At gigabytes per second, a
 megabyte takes under a millisecond, and copying it to a worker through a
@@ -401,7 +508,7 @@ copying as the limit for a 583 KB response.) So:
   in order. This is simdjson's threaded stage 1. It is not planned until
   a user needs it.
 
-## 10. SIMD (designed, not implemented)
+## 11. SIMD (designed, not implemented)
 
 The pure-Goose code is the specification and the fallback. SIMD replaces
 exactly two kernels, behind `extern fn`s with the same contract, and only
@@ -441,7 +548,7 @@ extern "gs_json_index" fn index_kernel(src: const u8[:], out: u32[>..]&, state: 
 
 1. **Gate on a profile.** A kernel is written only if its Goose version
    is above roughly 25% of the time on the standard corpus. Today's
-   profile (§13) already passes the gate for two of them:
+   profile (§14) already passes the gate for two of them:
    * string and whitespace scanning are about two thirds of the parse
      time of twitter.json and citm_catalog.json;
    * Schubfach, mostly its 128-bit products, is about 40% of the time
@@ -469,7 +576,7 @@ moves back into Goose source and the `extern` is deleted. The SWAR code
 is structured as "classify a block, combine the masks, extract the bits"
 so that only the classification step changes.
 
-## 11. Typed decoding and encoding (designed, not implemented)
+## 12. Typed decoding and encoding (designed, not implemented)
 
 Turning JSON into the program's own structs, and back, without a DOM.
 
@@ -551,7 +658,7 @@ json::decode<T>(text, x&) -> json::Error
    and clang see it whole. That is where it can beat a hand-written one
    — the per-struct key switch.
 
-## 12. Benchmarks and phases
+## 13. Benchmarks and phases
 
 **`bench/json/json_bench.py`** builds `json_bench.goose`,
 `conformance.goose` and the yyjson baseline with one C toolchain, and
@@ -567,7 +674,7 @@ writes `results.md` and `results.json`.
   the same float format.
 * **Baseline.** yyjson 0.13, built with the same compiler and flags. Its
   walk reads every scalar, as ours does. simdjson is not built: it needs
-  C++ and is a SIMD baseline, to be added with §10.
+  C++ and is a SIMD baseline, to be added with §11.
 * **Reported:** MB/s per file for parse, parse plus walk, and write, each
   with yyjson beside it; stage 1, a cursor lookup and the same lookup
   through a document; ns per double written and read.
@@ -582,12 +689,12 @@ writes `results.md` and `results.json`.
 3. The document parser. Done.
 4. Stage 1 and the cursor. Done. GraphQL's envelope and variables are
    parsed by `json::parse`. Step A typed decoding is deferred with the
-   rest of §11.
-5. **SIMD (§10)**, gated on the profile in §13.
-6. **Typed decoding (§11)**, Step A then the builtin, a language change
+   rest of §12.
+5. **SIMD (§11)**, gated on the profile in §14.
+6. **Typed decoding (§12)**, Step A then the builtin, a language change
    with its own review.
 
-## 13. What was measured
+## 14. What was measured
 
 Apple arm64, clang -O2, one core, on a machine busy with other work (load
 average 14–40), so each figure is the best of 50 runs and yyjson ran
@@ -633,13 +740,13 @@ the parity hoped for.
 Goose costs most here. Each is a candidate for a builtin or an
 optimization, not a change to make in this library:
 
-1. **`ctz`/`clz`/`popcount` as intrinsics.** `std`'s versions are loops,
-   and the library's branch-free ones cost a multiply and a load each.
-   Stage 1 extracts every position with one, and the writer and parser
-   use them per string.
+1. **`ctz`/`clz`/`popcount` as intrinsics.** Done since, in `std` (the
+   runtime's, one instruction under clang, gcc and MSVC); the library
+   uses them. They were loops, and the library's branch-free ones cost a
+   multiply and a load each.
 2. **A 64×64→128 multiply** (`mulhi`). It is the core of both double
    conversions: four multiplies and carry handling instead of one
-   instruction (§10, kernel 2).
+   instruction (§11, kernel 2).
 3. **Appending through a reference reloads the array header.** `push`
    and `append` on an `A&` write the byte, then the stack top and the
    length, and reload them for the next call, since a byte store may
@@ -650,4 +757,31 @@ optimization, not a change to make in this library:
    help every writer of text, not just this one.
 4. **A bit cast between `f64` and `u64`.** `bytes_of` on a one-element
    array works and costs nothing after clang, but the reverse direction
-   has to be done by exact arithmetic.
+   has to be done by exact arithmetic (`f64_of`, a conversion and a
+   multiply). It is most of what a document's field access still costs
+   over upstream Goose's tree, which stores doubles as doubles: about
+   2 ns per double read.
+
+**Against upstream Goose's json (October 2026).** Upstream's module
+(aardappel/goose fb996b3: a linked tree, a pull `Reader`, `format_*`)
+was measured against this one with `bench/json_compare` on the
+`json-bench` branch, before and after the reader (§8), the field access
+change (§6) and the writer changes (§4, §5). Apple M5, clang -O2, load
+2.9–3.5, 7 interleaved rounds, medians in MB/s of input:
+
+| Task | Input | before | after | upstream |
+|---|---|---|---|---|
+| parse | canada / citm / twitter | 1427 / 4373 / 2438 | 1460 / 4463 / 2599 | 308 / 2396 / 2057 |
+| parse | kostya 25k / 524k | 1409 / 1402 | 1435 / 1443 | 1399 / 1428 |
+| kostya_dom | kostya 25k / 524k | 1211 / 1204 | 1274 / 1295 | 1315 / 1290 |
+| kostya_stream | kostya 25k / 524k | 717 / 720 (cursor) | 1753 / 1736 (reader) | 1744 / 1754 (Reader) |
+| write | canada / citm / twitter | 930 / 5682 / 3922 | 1177 / 8949 / 5794 | 76 / 7923 / 3255 |
+| write | kostya 25k / 524k | 684 / 685 | 1345 / 1344 | 1509 / 1508 |
+
+Peak RSS on the 50 MB kostya input: parse 176 MB (upstream 244), the
+reader 50 MB, the size of the text (the cursor 128 MB; upstream's Reader
+50 MB). Output is byte-identical to before on every input; documents,
+averages and round trips agree across all three. What is left: writing
+kostya is 11% behind, all of it in the doubles (with doubles written as a
+constant, the two writers are level); and kostya_dom on the small input
+is 3% behind, the bit cast above.

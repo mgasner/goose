@@ -64,28 +64,26 @@ fn get_result(s: JsonGenerate&) -> const u8[:] { s.text }
 // What serde's derived Serialize writes, field by field, for each type.
 fn to_json(out: u8[>..]&, c: Coordinate&) {
     out.push('{');
-    json::format_key(out, "x");
-    json::format_number(out, c.x);
+    json::write_key(out, "x");
+    json::write_float(out, c.x);
     out.push(',');
-    json::format_key(out, "y");
-    json::format_number(out, c.y);
+    json::write_key(out, "y");
+    json::write_float(out, c.y);
     out.push(',');
-    json::format_key(out, "z");
-    json::format_number(out, c.z);
+    json::write_key(out, "z");
+    json::write_float(out, c.z);
     out.push(',');
-    json::format_key(out, "name");
-    json::format_string(out, c.name);
+    json::write_key(out, "name");
+    json::write_string(out, c.name);
     out.push(',');
-    json::format_key(out, "opts");
+    json::write_key(out, "opts");
     out.push('{');
     for o, i in c.opts {
         if i > 0 { out.push(','); }
-        json::format_key(out, o.key);
+        json::write_key(out, o.key);
         out.push('[');
-        json::format_int(out, o.num);
-        out.push(',');
-        json::format_bool(out, o.flag);
-        out.push(']');
+        json::write_int(out, o.num);
+        out.append(if o.flag { ",true]" } else { ",false]" });
     }
     out.push('}');
     out.push('}');
@@ -94,7 +92,7 @@ fn to_json(out: u8[>..]&, c: Coordinate&) {
 // {"coordinates":[...],"info":"some info"}
 fn to_json(out: u8[>..]&, data: JsonData&) {
     out.push('{');
-    json::format_key(out, "coordinates");
+    json::write_key(out, "coordinates");
     out.push('[');
     for c, i in data.coordinates {
         if i > 0 { out.push(','); }
@@ -102,12 +100,14 @@ fn to_json(out: u8[>..]&, data: JsonData&) {
     }
     out.push(']');
     out.push(',');
-    json::format_key(out, "info");
-    json::format_string(out, data.info);
+    json::write_key(out, "info");
+    json::write_string(out, data.info);
     out.push('}');
 }
 
-// serde_json::to_string: the text of `data` as a new string.
+// serde_json::to_string: the text of `data` as a new string. Doubles come
+// out in JavaScript's layout (0.00000714 where serde writes 7.14e-6); both
+// read back as the same double.
 fn to_string(data: JsonData&) -> u8[>..] {
     var out: u8[>..] = [];
     to_json(out, data);

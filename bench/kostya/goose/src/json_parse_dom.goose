@@ -16,31 +16,25 @@ fn new_json_parse_dom() -> JsonParseDom {
 }
 
 // coord[key] as a number; the text is ours, so anything else is a bug.
-fn number_at(coord: json::Node&, key: u8[:]) -> f64 {
-    let v, ok = json::as_f64(json::member(coord, key));
+fn number_at(coord: json::Value, key: u8[:]) -> f64 {
+    let v, ok = coord.get(key).try_float();
     if !ok { abort(str("no number at ", key)); }
     return v;
 }
 
 fn calc(s: JsonParseDom&, text: u8[:]) -> f64, f64, f64 {
-    var doc: json::Node[>..] = [];
-    var decoded: u8[>..] = [];
-    let root, err = json::parse(text, doc, decoded);
-    guard root else { abort(err); }
-    let coordinates = json::member(root, "coordinates");
-    guard coordinates else { abort("no coordinates"); }
-    // An array node keeps its element count in its value.
-    var len = 0.0;
-    match coordinates.val {
-        Arr a => { len = a.count; },
-        _ => { abort("coordinates is not an array"); },
-    }
+    let doc = json::parse(text);
+    guard doc.ok() else { abort(str("json: ", doc.error.message, " at byte ", doc.error.at)); }
+    let coordinates = doc.root().get("coordinates");
+    guard coordinates.is_array() else { abort("no coordinates array"); }
+    // An array's entry keeps its element count.
+    let len: f64 = coordinates.count();
 
     var x = 0.0;
     var y = 0.0;
     var z = 0.0;
 
-    json::each(coordinates) { coord =>
+    coordinates.each() { coord =>
         x += number_at(coord, "x");
         y += number_at(coord, "y");
         z += number_at(coord, "z");

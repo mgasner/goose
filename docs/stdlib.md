@@ -848,8 +848,10 @@ for row in rows {
 ## json
 
 `import json;` reads and writes JSON, in Goose (`stdlib/json/`): a writer,
-a document parser that checks the whole text into a flat tape, and a
-cursor that indexes the text and parses values only when they are read.
+a document parser that checks the whole text into a flat tape, a reader
+that reads values in one forward pass as the program asks for them,
+building nothing, and a cursor that indexes the text and parses values
+only when they are read.
 Doubles are written shortest round trip and read correctly rounded.
 [`json.md`](json.md) is the guide and reference; [`design/json.md`](design/json.md)
 is the design.
@@ -859,7 +861,8 @@ fn writer<A>(out: A&) -> Writer<A>                   // w.object() { … }, w.ar
 fn pretty_writer<A>(out: A&, indent: i64) -> Writer<A>   // w.string/int/uint/float/boolean/none/raw(v), w.field(k, v)
 fn parse(text: const u8[:]) -> Doc                   // d.ok(), d.error { at, message }, d.root() -> Value
 fn cursor(text: const u8[:]) -> Cursor               // c.ok(), c.error, c.root() -> Lazy
-fn write_string<A>(out: A&, s: const u8[:])
+fn reader(text: const u8[:]) -> Reader               // r.members() { k => … }, r.each() { … }, r.float(), r.skip(), r.finish()
+fn write_string<A>(out: A&, s: const u8[:])          fn write_key<A>(out: A&, k: const u8[:])
 fn write_int<A>(out: A&, v: i64)    fn write_uint<A>(out: A&, v: u64)    fn write_float<A>(out: A&, x: f64)
 fn parse_float(s: const u8[:]) -> f64, bool
 ```
@@ -869,7 +872,11 @@ A `Value` (of a document) and a `Lazy` (of a cursor) read the same way:
 `v.count()`, `v.kind()`, and `v.int()`/`float()`/`string()`/`boolean()`, with
 `try_` forms that also say whether the value was one. A lookup that finds
 nothing gives a missing value, which reads as defaults, so chains need no
-checks along the way.
+checks along the way. A `Reader` reads the value at it with the same
+`int()`/`float()`/`string()`/`boolean()` and `try_` calls, and `kind()`
+without moving; a value of another kind is left in place, and one that a
+`members` or `each` block does not read is skipped and checked, so a
+reader ended with `r.finish()` has checked the whole text as `parse` does.
 
 ## regex
 

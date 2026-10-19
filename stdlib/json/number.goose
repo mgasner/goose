@@ -152,19 +152,85 @@ fn shortest(bits: u64) -> u64, i64 {
     return s + (if up { 1 } else { 0 }), k;
 }
 
+// The shortest decimal c * 10^k of the positive finite double with these
+// bits, by floating point, for one that has a decimal of at most 15
+// significant digits, as most doubles written by people do; false where
+// that does not settle it, and Schubfach decides. Above the subnormals,
+// 15-digit decimals are more than four times further apart than the
+// doubles near them, so at most one of them reads back as x: n, the
+// nearest to x * 10^s scaled into [10^14, 10^15) by an exact power of ten
+// (two roundings, each under a fifth of a unit of n). It reads back as x
+// exactly when n / 10^s, one correctly rounded division, is x; and then
+// every shorter decimal that reads back as x is n without trailing zeros.
+// With x = m * 2^e, x * 10^s is m * 10^s rounded once, then scaled by
+// powers of two, which is exact here: no conversion from the bits.
+fn short_decimal(bits: u64) -> u64, i64, bool {
+    let be = ((bits >> 52) & 0x7ff) as i64;
+    // floor(log10(x)) is d or d + 1.
+    let d = ((be - 1023) * 78913) >> 18;
+    var s = 14 - d;
+    if s > 22 || s < -21 || be == 0 { return 0, 0, false; }
+    let m = ((bits & 0xfffffffffffff) | (1 << 52)) as f64;
+    // Here e is in [-79, 67], one scaling from the table's [-64, 63].
+    var e = be - 1075;
+    var scale = 1.0;
+    if e < -64 { scale = POW2[0]; e += 64; }
+    else if e > 63 { scale = POW2[127]; e -= 63; }
+    scale = scale * POW2[e + 64];
+    var p = (if s >= 0 { m * POW10_F64[s] } else { m / POW10_F64[-s] }) * scale;
+    if p >= 1000000000000000.0 {
+        s -= 1;
+        p = (if s >= 0 { m * POW10_F64[s] } else { m / POW10_F64[-s] }) * scale;
+    }
+    let n = (p + 0.5) as! u64;
+    let nf = n as f64;
+    let back = if s >= 0 { nf / POW10_F64[s] } else { nf * POW10_F64[-s] };
+    if bits_of(back) != bits & 0x7fffffffffffffff { return 0, 0, false; }
+    return n, -s, true;
+}
+
 // Writes a finite double as JavaScript does: plain notation for decimal
 // exponents in [-7, 21), else d.ddde±x. NaN and the infinities, which
 // JSON lacks, are written as null.
-fn write_float<A>(out: A&, x: f64) {
-    let bits = bits_of(x);
+fn write_float<A>(out: A&, x: f64) { write_float_bits(out, bits_of(x)); }
+
+// write_float for the double with these bits, as a document stores it.
+fn write_float_bits<A>(out: A&, bits: u64) {
     if (bits >> 52) & 0x7ff == 0x7ff { out.append("null"); return; }
     if bits >> 63 != 0 { out.push('-'); }
     if bits << 1 == 0 { out.push('0'); return; }
-    var c, k = shortest(bits);
-    while c % 10 == 0 { c = c / 10; k += 1; }
+    // The digits are the bytes of three words, from..to.
     var words: u64[3] = [0, 0, 0];
-    let n = digits_into(words, c);
-    let digits = bytes_of(words)[24 - n..];
+    var from = 0;
+    var to = 24;
+    var k = 0;
+    let c15, k15, quick = short_decimal(bits);
+    if quick {
+        // 15 digits, or 16 for 10^15, as two words; the trailing zeros are
+        // the high lanes of the last nonzero word that hold digit 0.
+        let hi = c15 / 100000000;
+        let lo = c15 - hi * 100000000;
+        words[1] = encode8(hi);
+        words[2] = encode8(lo);
+        let tz = if lo == 0 { 8 + (clz64(words[1] - 0x3030303030303030) >> 3) } else { clz64(words[2] - 0x3030303030303030) >> 3 };
+        from = if hi >= 10000000 { 8 } else { 9 };
+        to = 24 - tz;
+        k = k15 + tz;
+    } else {
+        var c, k2 = shortest(bits);
+        // Trailing zeros, of which there are at most 16, in halving steps.
+        if c % 10 == 0 {
+            if c % 10000000000000000 == 0 { c = c / 10000000000000000; k2 += 16; }
+            if c % 100000000 == 0 { c = c / 100000000; k2 += 8; }
+            if c % 10000 == 0 { c = c / 10000; k2 += 4; }
+            if c % 100 == 0 { c = c / 100; k2 += 2; }
+            if c % 10 == 0 { c = c / 10; k2 += 1; }
+        }
+        from = 24 - digits_into(words, c);
+        k = k2;
+    }
+    let digits = bytes_of(words)[from..to];
+    let n = to - from;
     let e = n + k;           // the value is 0.digits * 10^e
     if k >= 0 && e <= 21 {
         out.append(digits);

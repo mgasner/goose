@@ -807,16 +807,29 @@ static int arm64_hfa(CType *type, unsigned *fsize)
     return 0;
 }
 
+// a[i] for an argument at byte offset off of the stack: the offset sits above
+// bit 0, which marks a struct replaced by a pointer.
+#define ARM64_STACK_ARG(off) (32 + ((unsigned long)(off) << 1))
+#define ARM64_STACK_OFF(a) (((a) - 32) >> 1)
+
 static unsigned long arm64_pcs_aux(int variadic, int n, CType **type, unsigned long *a)
 {
     int nx = 0; // next integer register
     int nv = 0; // next vector register
-    unsigned long ns = 32; // next stack offset
+    unsigned long ns = 0; // next stack offset
     int i;
 
     for (i = 0; i < n; i++) {
         int hfa = arm64_hfa(type[i], 0);
         int size, align, bt;
+        // Apple's arm64 ABI lays named arguments out on the stack at their
+        // natural size and alignment, not in 8-byte slots as AAPCS64 does;
+        // variadic arguments still take 8-byte slots.
+#if defined(TCC_TARGET_MACHO)
+        int packed = !variadic || i < variadic;
+#else
+        int packed = 0;
+#endif
 
         bt = type[i]->t & VT_BTYPE;
         if (bt == VT_PTR || bt == VT_FUNC)
@@ -828,8 +841,8 @@ static unsigned long arm64_pcs_aux(int variadic, int n, CType **type, unsigned l
         if (variadic && i == variadic) {
             nx = 8;
             nv = 8;
-
-            /* Fixed arguments may have ended partway through a slot. */
+            // Variadic arguments start in an 8-byte slot after the packed
+            // named ones.
             ns = (ns + 7) & ~7;
 	}
 
@@ -849,7 +862,7 @@ static unsigned long arm64_pcs_aux(int variadic, int n, CType **type, unsigned l
                 a[i] = nx++ << 1 | 1;
             else {
                 ns = (ns + 7) & ~7;
-                a[i] = ns | 1;
+                a[i] = ARM64_STACK_ARG(ns) | 1;
                 ns += 8;
             }
             continue;
@@ -871,40 +884,29 @@ static unsigned long arm64_pcs_aux(int variadic, int n, CType **type, unsigned l
             continue;
         }
 
-#if defined(TCC_TARGET_MACHO)
-        /* Apple packs fixed floating-point arguments on the stack at their
-           natural size and alignment. In particular, an HFA of three floats
-           takes 12 bytes, not 16; a following float starts at offset 12.
-           Variadic arguments still use the standard eight-byte slots. */
-        if ((!variadic || i < variadic) && (hfa || is_float(bt))) {
-            if (hfa)
-                nv = 8;
-            ns = (ns + align - 1) & -align;
-            a[i] = ns;
-            ns += size;
-            continue;
-        }
-#endif
-
         // C.3
         if (hfa) {
             nv = 8;
-            size = (size + 7) & ~7;
+            if (!packed)
+                size = (size + 7) & ~7;
         }
 
         // C.4
         if (hfa || bt == VT_LDOUBLE) {
-            ns = (ns + 7) & ~7;
+            if (!packed)
+                ns = (ns + 7) & ~7;
             ns = (ns + align - 1) & -align;
         }
 
         // C.5
-        if (bt == VT_FLOAT)
+        if (bt == VT_FLOAT && !packed)
             size = 8;
 
         // C.6
         if (hfa || is_float(bt)) {
-            a[i] = ns;
+            if (packed)
+                ns = (ns + align - 1) & -align;
+            a[i] = ARM64_STACK_ARG(ns);
             ns += size;
             continue;
         }
@@ -937,32 +939,29 @@ static unsigned long arm64_pcs_aux(int variadic, int n, CType **type, unsigned l
         nx = 8;
 
         // C.12
-        ns = (ns + 7) & ~7;
+        if (!packed || bt == VT_STRUCT)
+            ns = (ns + 7) & ~7;
         ns = (ns + align - 1) & -align;
 
         // C.13
         if (bt == VT_STRUCT) {
-            a[i] = ns;
+            a[i] = ARM64_STACK_ARG(ns);
             ns += size;
             continue;
         }
 
         // C.14
-        if (size < 8)
+        if (size < 8 && !packed)
             size = 8;
 
         // C.15
-        a[i] = ns;
+        a[i] = ARM64_STACK_ARG(ns);
         ns += size;
     }
 
-#if defined(TCC_TARGET_MACHO)
-    /* The callee only classifies the fixed parameters; va_start must skip
-       their final partial slot just as the caller does above. */
-    if (variadic)
-        ns = (ns + 7) & ~7;
-#endif
-    return ns - 32;
+    // Keeps the stack area, and where va_start finds the first variadic
+    // argument, 8-byte aligned when packed arguments end short of it.
+    return (ns + 7) & ~7;
 }
 
 static unsigned long arm64_pcs(int variadic, int n, CType **type, unsigned long *a)
@@ -997,7 +996,7 @@ static unsigned long arm64_pcs(int variadic, int n, CType **type, unsigned long 
                 printf("V%lu\n", a[i] / 2 - 8);
             else
                 printf("stack %lu%s\n",
-                       (a[i] - 32) & ~1, a[i] & 1 ? " pointer" : "");
+                       ARM64_STACK_OFF(a[i]), a[i] & 1 ? " pointer" : "");
         }
     }
 
@@ -1113,14 +1112,14 @@ ST_FUNC void gfunc_call(int nb_args)
                 // pointer on stack
                 r = get_reg(RC_INT);
                 arm64_spoff(intr(r), a1[i]);
-                arm64_strx(3, intr(r), 31, (a[i] - 32) >> 1 << 1);
+                arm64_strx(3, intr(r), 31, ARM64_STACK_OFF(a[i]));
             }
         }
         else if (a[i] >= 32) {
             // value on stack
             if ((vtop->type.t & VT_BTYPE) == VT_STRUCT) {
                 int r = get_reg(RC_INT);
-                arm64_spoff(intr(r), a[i] - 32);
+                arm64_spoff(intr(r), ARM64_STACK_OFF(a[i]));
                 vset(&vtop->type, r | VT_LVAL, 0);
                 vswap();
                 vstore();
@@ -1128,12 +1127,19 @@ ST_FUNC void gfunc_call(int nb_args)
             else if (is_float(vtop->type.t)) {
                 gv(RC_FLOAT);
                 arm64_strv(arm64_type_size(vtop[0].type.t),
-                           fltr(vtop[0].r), 31, a[i] - 32);
+                           fltr(vtop[0].r), 31, ARM64_STACK_OFF(a[i]));
             }
             else {
+                int sz = 3;
+#if defined(TCC_TARGET_MACHO)
+                // A packed argument (see arm64_pcs_aux) is stored at its own
+                // size, since a neighbour may follow it directly; a variadic
+                // one fills its 8-byte slot.
+                if (!var_nb_arg || i <= var_nb_arg)
+                    sz = arm64_type_size(vtop[0].type.t);
+#endif
                 gv(RC_INT);
-                arm64_strx(3, // arm64_type_size(vtop[0].type.t),
-                           intr(vtop[0].r), 31, a[i] - 32);
+                arm64_strx(sz, intr(vtop[0].r), 31, ARM64_STACK_OFF(a[i]));
             }
         }
 
@@ -1250,7 +1256,7 @@ static unsigned long arm64_pe_param_off(unsigned long a)
 {
     return a < 16 ? 160 + a / 2 * 8 :
            a < 32 ? 16 + (a - 16) / 2 * 16 :
-           224 + ((a - 32) >> 1 << 1);
+           224 + ARM64_STACK_OFF(a);
 }
 #endif
 
@@ -1341,7 +1347,7 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
     for (i = 1, sym = func_type->ref->next; sym; i++, sym = sym->next) {
         int off = (a[i] < 16 ? 160 + a[i] / 2 * 8 :
                    a[i] < 32 ? 16 + (a[i] - 16) / 2 * 16 :
-                   224 + ((a[i] - 32) >> 1 << 1));
+                   224 + ARM64_STACK_OFF(a[i]));
 
         gfunc_set_param(sym, off, a[i] & 1);
 

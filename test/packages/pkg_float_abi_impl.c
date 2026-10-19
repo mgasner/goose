@@ -34,3 +34,12 @@ int32_t abi_aligned(V4 a, V4 b, float c, V3 d, float e, double f) {
     return is3(a.v, 1, 2, 3) && a.w == 4 && is3(b.v, 5, 6, 7) && b.w == 8 &&
            c == 9 && is3(d, 10, 11, 12) && e == 13 && f == 14;
 }
+
+/* Integer arguments past the eighth register: Apple packs a char, a short
+   and an int at their natural size, where AAPCS64 gives each eight bytes. */
+int32_t abi_ints(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f,
+                 int32_t g, int32_t h, int8_t i, int16_t j, int32_t k, int8_t l,
+                 int64_t m) {
+    return a == 1 && b == 2 && c == 3 && d == 4 && e == 5 && f == 6 && g == 7 &&
+           h == 8 && i == 9 && j == 10 && k == 11 && l == 12 && m == 13;
+}

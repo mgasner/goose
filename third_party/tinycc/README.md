@@ -27,6 +27,13 @@ Local changes:
   which has tests for TinyCC's `tests/abitest.c` and is not upstream yet.
   `test/packages/pkg_float_abi.goose` checks calls into native C through the
   in-process backend as well as native builds.
+- `arm64-gen.c`, Linux: `va_arg` once an argument did not fit in the
+  registers left of its class. AAPCS64 then has every later argument of the
+  class on the stack, but `gen_va_arg` (for a variadic argument) and
+  `gfunc_prolog` (for a named one, through `va_start`) still let a later
+  small one be read from a leftover register. This is
+  https://github.com/mgasner/tinycc/commit/2fdc42ee597bc4aaf53f5b3ad1efee9c64d51db1,
+  which has tests for TinyCC's `tests/abitest.c` and is not upstream yet.
 
 To update, copy the same files from a newer TinyCC commit and record that
 commit here. Preserve the local changes until they are included upstream.

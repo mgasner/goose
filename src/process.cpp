@@ -1,6 +1,6 @@
-// Goose compiler — other processes (process.h), over subprocess.h. This is
-// the one translation unit besides main.cpp, kept apart so that the platform
-// headers it needs stay out of the compiler's.
+// Goose compiler — other processes (process.h), over subprocess.h. A
+// translation unit of its own, so that the platform headers it needs stay out
+// of the compiler's.
 
 #include "includes.h"
 #include "utils.h"

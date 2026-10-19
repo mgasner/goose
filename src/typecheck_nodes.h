@@ -7,7 +7,7 @@
 
 namespace goose {
 
-inline Val IntLit::Check(TypeCheck &tc, TypeExpr *) {
+Val IntLit::Check(TypeCheck &tc, TypeExpr *) {
     Val v;
     v.type = tc.ast.inttypes[uns ? IS_U64 : IS_I64];
     v.ck = CK_INT;
@@ -17,7 +17,7 @@ inline Val IntLit::Check(TypeCheck &tc, TypeExpr *) {
     return v;
 }
 
-inline Val FltLit::Check(TypeCheck &tc, TypeExpr *) {
+Val FltLit::Check(TypeCheck &tc, TypeExpr *) {
     Val v;
     v.type = tc.ast.flttypes[FS_F64];
     v.ck = CK_FLT;
@@ -25,13 +25,13 @@ inline Val FltLit::Check(TypeCheck &tc, TypeExpr *) {
     return v;
 }
 
-inline Val BoolLit::Check(TypeCheck &tc, TypeExpr *) {
+Val BoolLit::Check(TypeCheck &tc, TypeExpr *) {
     Val v;
     v.type = tc.ast.booltype;
     return v;
 }
 
-inline Val NullLit::Check(TypeCheck &tc, TypeExpr *expected) {
+Val NullLit::Check(TypeCheck &tc, TypeExpr *expected) {
     Val v;
     v.isnull = true;
     v.writable = true;   // Nothing to write: fits a writable slot or parameter.
@@ -43,14 +43,14 @@ inline Val NullLit::Check(TypeCheck &tc, TypeExpr *expected) {
 
 // `self` is consumed by CheckInits in the only position that gives it a
 // meaning, so reaching the general expression path means it is misplaced.
-inline Val SelfRef::Check(TypeCheck &tc, TypeExpr *) {
+Val SelfRef::Check(TypeCheck &tc, TypeExpr *) {
     tc.Error(this, "self is only valid as the initializer of a non-optional "
                    "relative-reference field of the literal containing it (§3.9)");
 }
 
 // A string literal is a `const u8[:]` into static data (§3.7), copyable
 // into any u8 array type.
-inline Val StrLit::Check(TypeCheck &tc, TypeExpr *expected) {
+Val StrLit::Check(TypeCheck &tc, TypeExpr *expected) {
     Val v;
     v.strlit = true;
     v.Set(nullptr, true);   // Static data owns what it holds.
@@ -79,7 +79,7 @@ inline Val StrLit::Check(TypeCheck &tc, TypeExpr *expected) {
     return v;
 }
 
-inline Val Ident::Check(TypeCheck &tc, TypeExpr *) {
+Val Ident::Check(TypeCheck &tc, TypeExpr *) {
     if (auto vd = tc.LookupVar(name, ns, this)) {
         vdef = vd;
         tc.RequireAssigned(vd, this);
@@ -170,7 +170,7 @@ inline Val Ident::Check(TypeCheck &tc, TypeExpr *) {
     tc.Error(this, cat("unknown identifier: ", name));
 }
 
-inline Val ArrayLit::Check(TypeCheck &tc, TypeExpr *expected) {
+Val ArrayLit::Check(TypeCheck &tc, TypeExpr *expected) {
     Val v;
     TypeCheck::LitDeep deep;
     if (capexpr) {
@@ -290,7 +290,7 @@ inline Val ArrayLit::Check(TypeCheck &tc, TypeExpr *expected) {
     return v;
 }
 
-inline Val StructLit::Check(TypeCheck &tc, TypeExpr *expected) {
+Val StructLit::Check(TypeCheck &tc, TypeExpr *expected) {
     fieldindices.clear();
     sinst = nullptr;
     einst = nullptr;
@@ -374,7 +374,7 @@ inline Val StructLit::Check(TypeCheck &tc, TypeExpr *expected) {
     tc.Error(this, cat("cannot construct a value of type ", tc.TypeStr(t), " with a literal"));
 }
 
-inline Val Unary::Check(TypeCheck &tc, TypeExpr *) {
+Val Unary::Check(TypeCheck &tc, TypeExpr *) {
     litfloat = false;
     flexint = false;
     tc.ForgetCastAlt(this);
@@ -396,7 +396,7 @@ inline Val Unary::Check(TypeCheck &tc, TypeExpr *) {
 
 // Keep operator-specific temporaries in helpers: this frame stays on the
 // native stack while an operand checks a whole chain of callees.
-inline Val Binary::Check(TypeCheck &tc, TypeExpr *) {
+Val Binary::Check(TypeCheck &tc, TypeExpr *) {
     litfloat = false;
     flexint = false;
     tc.ForgetCastAlt(this);
@@ -407,7 +407,7 @@ inline Val Binary::Check(TypeCheck &tc, TypeExpr *) {
     return tc.CheckBinaryResult(this, lv, rv);
 }
 
-inline Val Dot::Check(TypeCheck &tc, TypeExpr *) {
+Val Dot::Check(TypeCheck &tc, TypeExpr *) {
     // EnumName.Variant: a payload-less variant constant (§3.5).
     if (auto id = Is<Ident>(obj)) {
         const FnValBind *fb;
@@ -449,13 +449,13 @@ inline Val Dot::Check(TypeCheck &tc, TypeExpr *) {
     return tc.ContainerRead(lv);
 }
 
-inline Val Call::Check(TypeCheck &tc, TypeExpr *expected) { return tc.CheckCall(this, expected); }
+Val Call::Check(TypeCheck &tc, TypeExpr *expected) { return tc.CheckCall(this, expected); }
 
-inline Val Index::Check(TypeCheck &tc, TypeExpr *) {
+Val Index::Check(TypeCheck &tc, TypeExpr *) {
     return tc.ContainerRead(tc.CheckLValue(this));
 }
 
-inline Val SliceExpr::Check(TypeCheck &tc, TypeExpr *) {
+Val SliceExpr::Check(TypeCheck &tc, TypeExpr *) {
     auto lv = tc.LValueBase(obj, cmpview);
     tc.DerefLValue(lv, obj);
     tc.SliceProvenance(lv, obj);
@@ -486,7 +486,7 @@ inline Val SliceExpr::Check(TypeCheck &tc, TypeExpr *) {
     return v;
 }
 
-inline Val AsCast::Check(TypeCheck &tc, TypeExpr *) {
+Val AsCast::Check(TypeCheck &tc, TypeExpr *) {
     // A conversion the checker inserted is checked again as the integer it
     // converts, which its destination or operator converts again
     // (TypeCheck::ToFloat).
@@ -511,95 +511,95 @@ inline Val AsCast::Check(TypeCheck &tc, TypeExpr *) {
     return v;
 }
 
-inline Val RangeExpr::Check(TypeCheck &tc, TypeExpr *) {
+Val RangeExpr::Check(TypeCheck &tc, TypeExpr *) {
     tc.Error(this, "range expressions are only valid in for headers");
 }
 
-inline Val Block::Check(TypeCheck &tc, TypeExpr *expected) {
+Val Block::Check(TypeCheck &tc, TypeExpr *expected) {
     // On joinpath the construct that started it makes the copy (CheckJoin).
     auto onjoin = tc.joinpath == this;
     auto v = tc.CheckBlockVal(this, expected, true, TypeCheck::SK_PLAIN);
     return tc.VoidIfBottom(onjoin ? v : tc.TempCopy(v));
 }
 
-inline Val IfExpr::Check(TypeCheck &tc, TypeExpr *expected) {
+Val IfExpr::Check(TypeCheck &tc, TypeExpr *expected) {
     return tc.VoidIfBottom(
         tc.CheckJoin(this, expected, [&](TypeExpr *e) { return tc.CheckIf(this, e, true); }));
 }
 
-inline Val MatchExpr::Check(TypeCheck &tc, TypeExpr *expected) {
+Val MatchExpr::Check(TypeCheck &tc, TypeExpr *expected) {
     return tc.VoidIfBottom(
         tc.CheckJoin(this, expected, [&](TypeExpr *e) { return tc.CheckMatch(this, e, true); }));
 }
 
-inline Val EarlyBlock::Check(TypeCheck &tc, TypeExpr *expected) {
+Val EarlyBlock::Check(TypeCheck &tc, TypeExpr *expected) {
     return tc.VoidIfBottom(tc.CheckJoin(
         this, expected, [&](TypeExpr *e) { return tc.CheckEarlyBlock(this, e, true); }));
 }
 
-inline Val While::Check(TypeCheck &tc, TypeExpr *) {
+Val While::Check(TypeCheck &tc, TypeExpr *) {
     tc.CheckWhile(this);
     return tc.VoidVal();
 }
 
-inline Val LoopExpr::Check(TypeCheck &tc, TypeExpr *expected) {
+Val LoopExpr::Check(TypeCheck &tc, TypeExpr *expected) {
     return tc.VoidIfBottom(
         tc.CheckJoin(this, expected, [&](TypeExpr *e) { return tc.CheckLoop(this, e, true); }));
 }
 
-inline Val ForLoop::Check(TypeCheck &tc, TypeExpr *) {
+Val ForLoop::Check(TypeCheck &tc, TypeExpr *) {
     tc.CheckFor(this);
     return tc.VoidVal();
 }
 
-inline Val Return::Check(TypeCheck &tc, TypeExpr *) {
+Val Return::Check(TypeCheck &tc, TypeExpr *) {
     tc.CheckReturn(this);
     return tc.VoidVal();
 }
 
-inline Val Break::Check(TypeCheck &tc, TypeExpr *) {
+Val Break::Check(TypeCheck &tc, TypeExpr *) {
     tc.CheckBreak(this);
     return tc.VoidVal();
 }
 
-inline Val Continue::Check(TypeCheck &tc, TypeExpr *) {
+Val Continue::Check(TypeCheck &tc, TypeExpr *) {
     tc.CheckContinue(this);
     return tc.VoidVal();
 }
 
-inline Val FunVal::Check(TypeCheck &tc, TypeExpr *) {
+Val FunVal::Check(TypeCheck &tc, TypeExpr *) {
     tc.Error(this, "function values can only be passed to calls (§7.6)");
 }
 
-inline Val VarDecl::Check(TypeCheck &tc, TypeExpr *) {
+Val VarDecl::Check(TypeCheck &tc, TypeExpr *) {
     tc.Error(this, "a declaration is a statement, not a value");
 }
 
-inline Val Assign::Check(TypeCheck &tc, TypeExpr *) {
+Val Assign::Check(TypeCheck &tc, TypeExpr *) {
     tc.Error(this, "an assignment is a statement, not a value");
 }
 
-inline Val IncDec::Check(TypeCheck &tc, TypeExpr *) {
+Val IncDec::Check(TypeCheck &tc, TypeExpr *) {
     tc.Error(this, "an increment is a statement, not a value");
 }
 
-inline Val FnDecl::Check(TypeCheck &tc, TypeExpr *) {
+Val FnDecl::Check(TypeCheck &tc, TypeExpr *) {
     tc.Error(this, "a declaration is a statement, not a value");
 }
 
-inline Val StructDecl::Check(TypeCheck &tc, TypeExpr *) {
+Val StructDecl::Check(TypeCheck &tc, TypeExpr *) {
     tc.Error(this, "a declaration is a statement, not a value");
 }
 
-inline Val EnumDecl::Check(TypeCheck &tc, TypeExpr *) {
+Val EnumDecl::Check(TypeCheck &tc, TypeExpr *) {
     tc.Error(this, "a declaration is a statement, not a value");
 }
 
-inline Val AliasDecl::Check(TypeCheck &tc, TypeExpr *) {
+Val AliasDecl::Check(TypeCheck &tc, TypeExpr *) {
     tc.Error(this, "a declaration is a statement, not a value");
 }
 
-inline Val InlineBlock::Check(TypeCheck &tc, TypeExpr *) {
+Val InlineBlock::Check(TypeCheck &tc, TypeExpr *) {
     tc.Error(this, "internal: optimizer node reached the typechecker");
 }
 

@@ -10,7 +10,7 @@ namespace goose {
 // top, bumping it. All branches of value-producing control constructs
 // construct to the same destination; calls pass the stack down.
 
-inline void CodeGen::EmitValStore(const string &stk, TypeExpr *t, const string &x) {
+void CodeGen::EmitValStore(const string &stk, TypeExpr *t, const string &x) {
     auto sz = FixedSize(t);
     if (sz == 0) { L("(void)(", x, ");"); return; }
     StoreWhole(Top(stk), t, x);
@@ -24,7 +24,7 @@ inline void CodeGen::EmitValStore(const string &stk, TypeExpr *t, const string &
 // forwarded from several narrower stores and waits for them to reach the
 // cache. Copying through an integer of the value's size is what makes the
 // C compiler assemble it in a register first.
-inline void CodeGen::StoreWhole(const string &p, TypeExpr *t, const string &x) {
+void CodeGen::StoreWhole(const string &p, TypeExpr *t, const string &x) {
     auto sz = FixedSize(t);
     auto agg = t->kind == TY_STRUCT || t->kind == TY_VARIANT || t->kind == TY_ARRAY ||
                (t->kind == TY_ENUM && !t->enu->varmode);
@@ -45,14 +45,14 @@ inline void CodeGen::StoreWhole(const string &p, TypeExpr *t, const string &x) {
     L("memcpy(", p, ", &", w, ", ", sz, ");");
 }
 
-inline void CodeGen::EmitLenCheck(IntStorage ls, const string &n) {
+void CodeGen::EmitLenCheck(IntStorage ls, const string &n) {
     if (ls == IS_VARINT || IntSize(ls) == 8) return;
     auto max = (1ull << (IntSize(ls) * 8)) - 1;
     L("if ((uint64_t)(", n, ") > ", max,
       "ull) gs_panic(\"array length exceeds storage range\");");
 }
 
-inline void CodeGen::EmitLenStore(const string &stk, IntStorage ls, const string &n) {
+void CodeGen::EmitLenStore(const string &stk, IntStorage ls, const string &n) {
     EmitLenCheck(ls, n);
     if (ls == IS_VARINT) {
         Bump(stk, cat("gs_uleb_write(", Top(stk), ", (uint64_t)(", n, "))"));
@@ -63,7 +63,7 @@ inline void CodeGen::EmitLenStore(const string &stk, IntStorage ls, const string
 }
 
 // A varint field or element (§3.6): the i64 value `x`, zigzag-encoded.
-inline void CodeGen::EmitVarintStore(const string &stk, const string &x) {
+void CodeGen::EmitVarintStore(const string &stk, const string &x) {
     Bump(stk, cat("gs_zig_write(", Top(stk), ", ", x, ")"));
 }
 
@@ -79,7 +79,7 @@ inline void CodeGen::EmitVarintStore(const string &stk, const string &x) {
 //
 // `inroot` says the slot address is its real one inside the root array,
 // which holds everywhere except the literal-temp path in StructLit::CgX.
-inline void CodeGen::EmitRelRangeCheck(TypeExpr *rt, const string &off, Line ln, bool inroot) {
+void CodeGen::EmitRelRangeCheck(TypeExpr *rt, const string &off, Line ln, bool inroot) {
     auto w = (IntStorage)rt->ref->lenstorage;
     auto bits = IntSize(w) * 8;
     if (bits >= 64) return;
@@ -113,7 +113,7 @@ static bool NonNullRefValue(Node *v) {
     return false;
 }
 
-inline RelFacts CodeGen::RelValue(Node *v) {
+RelFacts CodeGen::RelValue(Node *v) {
     RelFacts f;
     f.nonnull = NonNullRefValue(v);
     return f;
@@ -127,7 +127,7 @@ inline RelFacts CodeGen::RelValue(Node *v) {
 // slot, so it would be the target that lies inside the holder, as a part
 // starting where the slot does -- and the only such part is the slot
 // itself, a reference.
-inline bool CodeGen::RelSlotApart(TypeExpr *rt, TypeExpr *holder, int64_t off) {
+bool CodeGen::RelSlotApart(TypeExpr *rt, TypeExpr *holder, int64_t off) {
     return off > 0 && holder && holder->kind == TY_STRUCT && IsFix(holder) &&
            rt->ref->sub->kind != TY_REF;
 }
@@ -137,7 +137,7 @@ inline bool CodeGen::RelSlotApart(TypeExpr *rt, TypeExpr *holder, int64_t off) {
 // for the null of an optional one, whose slot cannot hold a real offset of
 // zero (§3.9). A self-relative one could be zero for a target at the slot
 // itself, which aborts, unless the facts rule that target out.
-inline string CodeGen::RelOffset(TypeExpr *rt, const string &org, const string &rv, Line ln,
+string CodeGen::RelOffset(TypeExpr *rt, const string &org, const string &rv, Line ln,
                                  RelFacts f) {
     auto addr = cat("(uint8_t *)(", rv, ")");
     auto off = T();
@@ -154,7 +154,7 @@ inline string CodeGen::RelOffset(TypeExpr *rt, const string &org, const string &
 // Writes a plain-reference value into the relative-reference slot at
 // `fa` (§3.9), range-checked. Fixed widths only; the varint form exists
 // only in the stack-top variant below.
-inline void CodeGen::EmitRelStoreAt(const string &fa, TypeExpr *rt, const string &rv, Line ln,
+void CodeGen::EmitRelStoreAt(const string &fa, TypeExpr *rt, const string &rv, Line ln,
                                     bool inroot, RelFacts f) {
     assert(rt->ref->lenstorage != IS_VARINT);
     assert(!IsResz(rt->ref->sub));
@@ -163,7 +163,7 @@ inline void CodeGen::EmitRelStoreAt(const string &fa, TypeExpr *rt, const string
     L("*(", RelCT(rt), " *)(", fa, ") = (", RelCT(rt), ")", off, ";");
 }
 
-inline void CodeGen::EmitRelStore(const string &stk, TypeExpr *rt, const string &rv, Line ln,
+void CodeGen::EmitRelStore(const string &stk, TypeExpr *rt, const string &rv, Line ln,
                                   RelFacts f) {
     auto w = (IntStorage)rt->ref->lenstorage;
     auto fa = T();
@@ -186,7 +186,7 @@ inline void CodeGen::EmitRelStore(const string &stk, TypeExpr *rt, const string 
 // built in a temp and copied into place. For an `in pool` field it is the
 // value's own position in the pool, which the checker admits only where
 // the literal is being built inside that pool.
-inline void CodeGen::EmitRelSelfAt(const string &fa, TypeExpr *rt, int64_t fieldoff, Line ln,
+void CodeGen::EmitRelSelfAt(const string &fa, TypeExpr *rt, int64_t fieldoff, Line ln,
                                    bool inroot) {
     auto w = (IntStorage)rt->ref->lenstorage;
     assert(w != IS_VARINT);
@@ -209,7 +209,7 @@ inline void CodeGen::EmitRelSelfAt(const string &fa, TypeExpr *rt, int64_t field
     L("*(", RelCT(rt), " *)(", fa, ") = (", RelCT(rt), ")", -fieldoff, ";");
 }
 
-inline void CodeGen::EmitRelSelfStore(const string &stk, TypeExpr *rt, int64_t fieldoff, Line ln) {
+void CodeGen::EmitRelSelfStore(const string &stk, TypeExpr *rt, int64_t fieldoff, Line ln) {
     EmitRelSelfAt(Top(stk), rt, fieldoff, ln);
     Bump(stk, cat(IntSize((IntStorage)rt->ref->lenstorage)));
 }
@@ -221,7 +221,7 @@ inline void CodeGen::EmitRelSelfStore(const string &stk, TypeExpr *rt, int64_t f
 // indeterminate bytes is what MSVC 19.51 exploits to miscompile the reads of
 // the bytes that were written, and copying one nothing wrote at all is
 // undefined.
-inline bool CodeGen::HasUninitSlots(TypeExpr *t) {
+bool CodeGen::HasUninitSlots(TypeExpr *t) {
     switch (t->kind) {
         case TY_STRUCT: case TY_ENUM: case TY_VARIANT:
             if (t->kind == TY_ENUM && t->enu->varmode) return false;
@@ -236,7 +236,7 @@ inline bool CodeGen::HasUninitSlots(TypeExpr *t) {
 
 // Does a fixed type contain relative references at any depth? Literals of
 // such types must construct in their final location, not via a temp.
-inline bool CodeGen::HasRelRef(TypeExpr *t) {
+bool CodeGen::HasRelRef(TypeExpr *t) {
     switch (t->kind) {
         case TY_REF: return t->ref->lenstorage >= 0;
         case TY_STRUCT: case TY_ENUM: case TY_VARIANT:
@@ -251,7 +251,7 @@ inline bool CodeGen::HasRelRef(TypeExpr *t) {
 
 // Does a value of type t hold a self-relative reference by value, at any
 // depth, variable-size parts included? Its offsets depend on where it sits.
-inline bool CodeGen::HasSelfRelRef(TypeExpr *t) {
+bool CodeGen::HasSelfRelRef(TypeExpr *t) {
     switch (t->kind) {
         case TY_REF: return t->ref->lenstorage >= 0 && !t->ref->pool;
         case TY_ARRAY: return HasSelfRelRef(t->arr->sub);
@@ -263,14 +263,14 @@ inline bool CodeGen::HasSelfRelRef(TypeExpr *t) {
 // its destination only as the named result built there (§3.9, §7.3): the
 // checker allows nothing else (TypeCheck::AllowNamedResult), and a copy
 // would keep offsets measured from the local.
-inline void CodeGen::NoSelfRelCopy(Node *val) {
+void CodeGen::NoSelfRelCopy(Node *val) {
     auto id = Is<Ident>(val);
     if (id && id->vdef && id->vdef->type && HasSelfRelRef(id->vdef->type))
         Fail(val->line, cat("internal error: ", id->vdef->name, " holds self-relative "
                             "references and is not built where it is returned"));
 }
 
-inline void CodeGen::ComputeRelRootMax() {
+void CodeGen::ComputeRelRootMax() {
     for (auto vd : ast.vardefs) {
         if (!vd->type || !IsFix(vd->type) || !HasRelRef(vd->type)) continue;
         relrootmax = std::max(relrootmax, FixedSize(vd->type));
@@ -279,7 +279,7 @@ inline void CodeGen::ComputeRelRootMax() {
 
 // Copies `n` elements of type `elem` from `src` (typed or byte pointer)
 // to the stack top.
-inline void CodeGen::EmitCopyElems(const string &stk, TypeExpr *elem, const string &src,
+void CodeGen::EmitCopyElems(const string &stk, TypeExpr *elem, const string &src,
                                    const string &n) {
     if (IsFix(elem)) {
         auto esz = FixedSize(elem);
@@ -300,7 +300,7 @@ inline void CodeGen::EmitCopyElems(const string &stk, TypeExpr *elem, const stri
     }
 }
 
-inline CodeGen::SrcElems CodeGen::GenSrcElems(Node *n) {
+CodeGen::SrcElems CodeGen::GenSrcElems(Node *n) {
     SrcElems r;
     if (auto s = Is<StrLit>(n)) {
         r.elems = StrRaw(s->val);
@@ -335,7 +335,7 @@ inline CodeGen::SrcElems CodeGen::GenSrcElems(Node *n) {
 // Constructs n's value at stk's top. For resizable-class values, lenlv
 // names the receiving header's length lvalue: elements are written and
 // the count assigned there (§7.3's metadata-outside-the-data form).
-inline void CodeGen::GenConstruct(Node *n, const string &stk, TypeExpr *want, const string &lenlv) {
+void CodeGen::GenConstruct(Node *n, const string &stk, TypeExpr *want, const string &lenlv) {
     if (auto it = fillvalues.find(n); it != fillvalues.end()) {
         auto target = want ? want : it->second.t;
         if (target->kind == TY_REF && target->ref->lenstorage >= 0)
@@ -517,7 +517,7 @@ inline void CodeGen::GenConstruct(Node *n, const string &stk, TypeExpr *want, co
 
 // Constructs the value at an existing location as a bytes-class et at stk's
 // top (see GenConstruct).
-inline void CodeGen::ConstructFromLoc(Loc lv, TypeExpr *et, const string &stk,
+void CodeGen::ConstructFromLoc(Loc lv, TypeExpr *et, const string &stk,
                                       const string &lenlv, Line ln) {
     if (lv.t->kind == TY_REF && et->kind != TY_REF) DerefLoc(lv);
     if (IsResz(et)) {
@@ -572,7 +572,7 @@ inline void CodeGen::ConstructFromLoc(Loc lv, TypeExpr *et, const string &stk,
 // prefix (OpenRzDest, EmitStr). Any other array result (a runtime-capacity
 // limited one, say, or a variable one for such a slot) has a layout the
 // slot does not share.
-inline bool CodeGen::CallBuildsAt(Call *c, TypeExpr *rt, TypeExpr *et, const string &lenlv) {
+bool CodeGen::CallBuildsAt(Call *c, TypeExpr *rt, TypeExpr *et, const string &lenlv) {
     if (rt->kind != TY_ARRAY || et->kind != TY_ARRAY || TEq(rt, et)) return true;
     auto var = [](TypeExpr *t) { return t->arr->akind == A_VAR; };
     if (!lenlv.empty()) return IsResz(rt) || var(rt);
@@ -581,7 +581,7 @@ inline bool CodeGen::CallBuildsAt(Call *c, TypeExpr *rt, TypeExpr *et, const str
 }
 
 // A call's first result constructed as et at stk's top (see GenConstruct).
-inline void CodeGen::ConstructCall(Call *c, TypeExpr *et, const string &stk, TypeExpr *want,
+void CodeGen::ConstructCall(Call *c, TypeExpr *et, const string &stk, TypeExpr *want,
                                    const string &lenlv) {
     auto rt0 = c->rettypes.empty() ? nullptr : c->rettypes[0];
     // A bytes-class result feeding a fixed-class slot (an array
@@ -629,7 +629,7 @@ inline void CodeGen::ConstructCall(Call *c, TypeExpr *et, const string &stk, Typ
 // checker adapted that value to an ADT it does not arrive as (FitsAt: a
 // variant to its ADT, or the ADT to its other mode, §3.5); null elsewhere.
 // A reference result counts as its pointee, which the receiver loads.
-inline TypeExpr *CodeGen::AdtFrom(Node *n) {
+TypeExpr *CodeGen::AdtFrom(Node *n) {
     auto et = n->exprtype;
     if (!et || et->kind != TY_ENUM) return nullptr;
     TypeExpr *from = nullptr;
@@ -650,7 +650,7 @@ inline TypeExpr *CodeGen::AdtFrom(Node *n) {
 // handed. A variant constructing a variable-mode ADT needs only its tag in
 // front of it, so it builds in place; every other adaptation builds into a
 // temporary and converts from there.
-inline void CodeGen::GenAdtAdapted(TypeExpr *from, TypeExpr *to, const Dst &d, Line ln,
+void CodeGen::GenAdtAdapted(TypeExpr *from, TypeExpr *to, const Dst &d, Line ln,
                                    const function<void(const Dst &)> &gen) {
     if (d.k == DK_DISCARD) { gen(d); return; }
     if (to->enu->varmode) {
@@ -694,7 +694,7 @@ inline void CodeGen::GenAdtAdapted(TypeExpr *from, TypeExpr *to, const Dst &d, L
 // ADT's tag goes in first, and the variant builds behind it where the
 // returned destination says. A resizable-class ADT's tail count is the
 // variant's own, or zero when the variant has no tail.
-inline Dst CodeGen::VariantBehindTag(TypeExpr *from, TypeExpr *to, const Dst &d) {
+Dst CodeGen::VariantBehindTag(TypeExpr *from, TypeExpr *to, const Dst &d) {
     assert(d.k == DK_STACK);
     auto ei = EIOf(to);
     EmitValStoreTag(d.s, TagStore(ei->en), TagConst(ei, ei->en->VariantIndex(from->var->variant)));
@@ -704,7 +704,7 @@ inline Dst CodeGen::VariantBehindTag(TypeExpr *from, TypeExpr *to, const Dst &d)
 }
 
 // A call's first result, of the type t it arrives as, into d.
-inline void CodeGen::GenCallAs(Call *c, TypeExpr *t, const Dst &d) {
+void CodeGen::GenCallAs(Call *c, TypeExpr *t, const Dst &d) {
     if (d.k == DK_STACK) {
         ConstructCall(c, t, d.s, d.t, d.lenlv);
         return;
@@ -715,7 +715,7 @@ inline void CodeGen::GenCallAs(Call *c, TypeExpr *t, const Dst &d) {
     if (r0 != d.s) L(d.s, " = ", r0, ";");
 }
 
-inline void CodeGen::GenArrayFromLoc(Loc lv, TypeExpr *et, const string &stk, Line ln,
+void CodeGen::GenArrayFromLoc(Loc lv, TypeExpr *et, const string &stk, Line ln,
                                      const string &lenlv) {
     if (IsStaticLimited(et)) {
         // A static-capacity limited array is a C value (§4.2): its length
@@ -749,7 +749,7 @@ inline void CodeGen::GenArrayFromLoc(Loc lv, TypeExpr *et, const string &stk, Li
 // Copies an existing resizable value (source location) to the stack top:
 // the static prefix of any resizable-tailed structs, then the tail's
 // elements; the count goes to the receiving header.
-inline void CodeGen::EmitRzCopy(Loc lv, TypeExpr *et, const string &stk, const string &lenlv,
+void CodeGen::EmitRzCopy(Loc lv, TypeExpr *et, const string &stk, const string &lenlv,
                                 Line ln) {
     assert(!lenlv.empty());
     if (IsFrameObj(et)) {
@@ -782,7 +782,7 @@ inline void CodeGen::EmitRzCopy(Loc lv, TypeExpr *et, const string &stk, const s
 // bytes layout the same type takes at `p` as the tail of a value that is not
 // a frame object (C.2): stored there, explicit pads zeroed as GenFieldInits
 // zeroes them, or (`tobytes` false) loaded back.
-inline void CodeGen::FoBytes(TypeExpr *t, const string &obj, const string &p, bool tobytes) {
+void CodeGen::FoBytes(TypeExpr *t, const string &obj, const string &p, bool tobytes) {
     auto si = SI(t);
     auto &fields = si->st->fields;
     int64_t off = 0;
@@ -809,7 +809,7 @@ inline void CodeGen::FoBytes(TypeExpr *t, const string &obj, const string &p, bo
 // A frame object laid out as bytes (FoBytes) as the C frame object a whole
 // read of it takes: its fixed fields loaded, its innermost tail's header
 // pointing at the elements where they lie.
-inline CodeGen::Loc CodeGen::FoView(const Loc &lv) {
+CodeGen::Loc CodeGen::FoView(const Loc &lv) {
     assert(!lv.val && !lv.lenlv.empty());
     Loc r;
     r.t = lv.t;
@@ -829,7 +829,7 @@ inline CodeGen::Loc CodeGen::FoView(const Loc &lv) {
 // builds that way directly. Anything else is built as the frame object it is
 // everywhere else, its elements landing behind room left for the fixed
 // fields, which are stored there after it.
-inline void CodeGen::GenFoAsBytes(Node *n, const string &stk, TypeExpr *t, const string &lenlv) {
+void CodeGen::GenFoAsBytes(Node *n, const string &stk, TypeExpr *t, const string &lenlv) {
     OpenAt open(*this, stk);
     if (auto sl = Is<StructLit>(n); sl && TEq(sl->exprtype, t) && !fillvalues.count(n)) {
         auto si = SI(t);
@@ -852,7 +852,7 @@ inline void CodeGen::GenFoAsBytes(Node *n, const string &stk, TypeExpr *t, const
 
 // The static byte size before a resizable value's tail elements, plus the
 // tail's element type. False when the prefix is not statically sized.
-inline bool CodeGen::RzShape(TypeExpr *t, int64_t &prefix, TypeExpr *&elem) {
+bool CodeGen::RzShape(TypeExpr *t, int64_t &prefix, TypeExpr *&elem) {
     if (t->kind == TY_ARRAY) {
         elem = t->arr->sub;
         return true;
@@ -873,7 +873,7 @@ inline bool CodeGen::RzShape(TypeExpr *t, int64_t &prefix, TypeExpr *&elem) {
     return false;   // Resizable variable-mode ADTs: unsupported copies.
 }
 
-inline void CodeGen::GenVarEnumFromLoc(Loc lv, TypeExpr *et, const string &stk) {
+void CodeGen::GenVarEnumFromLoc(Loc lv, TypeExpr *et, const string &stk) {
     auto ei = EIOf(et);
     auto ts = TagStore(ei->en);
     if (lv.t->kind == TY_VARIANT) {
@@ -913,7 +913,7 @@ inline void CodeGen::GenVarEnumFromLoc(Loc lv, TypeExpr *et, const string &stk) 
 // retain absolute targets until the destination is known; `self` remains
 // bound to each constructed element. Capturing the literal's leaves avoids
 // trying to encode a narrow relative link in a distant temporary first.
-inline void CodeGen::FreezeFill(Node *n, TypeExpr *t, vector<Node *> &added) {
+void CodeGen::FreezeFill(Node *n, TypeExpr *t, vector<Node *> &added) {
     if (!n || Is<SelfRef>(n) || fillvalues.count(n)) return;
     if (HasRelRefAny(t)) {
         if (auto sl = Is<StructLit>(n)) {
@@ -958,7 +958,7 @@ inline void CodeGen::FreezeFill(Node *n, TypeExpr *t, vector<Node *> &added) {
 // A fixed struct/array literal built directly at the stack top, so its
 // relative references measure offsets from their real addresses. Layout
 // gaps (pads, ADT payload padding) are zero-filled to keep sizes exact.
-inline void CodeGen::FixedLitAtStk(Node *n, const string &stk) {
+void CodeGen::FixedLitAtStk(Node *n, const string &stk) {
     auto et = n->exprtype;
     auto Gap = [&](int64_t bytes) {
         if (bytes <= 0) return;
@@ -1059,21 +1059,21 @@ inline void CodeGen::FixedLitAtStk(Node *n, const string &stk) {
 // references measure from where the value stays, not from a temporary
 // that is then copied over. `dst` is named once, through a pointer, so an
 // indexed destination evaluates (and bounds-checks) once.
-inline void CodeGen::FixedLitAt(Node *n, const string &dst) {
+void CodeGen::FixedLitAt(Node *n, const string &dst) {
     auto p = T();
     L(CT(n->exprtype), " *", p, " = &", dst, ";");
     FixedLitAtLv(n, cat("(*", p, ")"), true);
 }
 
 // As above, for a destination cheap enough to name per field.
-inline void CodeGen::FixedLitAtLv(Node *n, const string &base, bool inroot) {
+void CodeGen::FixedLitAtLv(Node *n, const string &base, bool inroot) {
     if (auto al = Is<ArrayLit>(n)) { FixedArrayLitAt(al, base, inroot); return; }
     auto sl = Is<StructLit>(n);
     assert(sl);
     StructLitAt(sl, base, inroot);
 }
 
-inline void CodeGen::FixedArrayLitAt(ArrayLit *al, const string &base, bool inroot) {
+void CodeGen::FixedArrayLitAt(ArrayLit *al, const string &base, bool inroot) {
     auto et = al->exprtype;
     assert(et->kind == TY_ARRAY);
     auto elem = et->arr->sub;
@@ -1113,7 +1113,7 @@ inline void CodeGen::FixedArrayLitAt(ArrayLit *al, const string &base, bool inro
 
 // `inroot` says `base` is the value's real address inside its root (see
 // EmitRelStoreAt); a temporary that is copied afterwards is not.
-inline void CodeGen::StructLitAt(StructLit *sl, const string &base, bool inroot) {
+void CodeGen::StructLitAt(StructLit *sl, const string &base, bool inroot) {
     auto et = sl->exprtype;
     // `baseoff` is where the fields run starts within the whole value, so a
     // `self` field can store its (constant) offset back to it.
@@ -1169,14 +1169,14 @@ inline void CodeGen::StructLitAt(StructLit *sl, const string &base, bool inroot)
                  TagSize(ei->en));
 }
 
-inline void CodeGen::EmitValStoreTag(const string &stk, IntStorage ts, const string &x) {
+void CodeGen::EmitValStoreTag(const string &stk, IntStorage ts, const string &x) {
     L("*(", IntCT(ts), " *)", Top(stk), " = (", IntCT(ts), ")(", x, ");");
     Bump(stk, cat(IntSize(ts)));
 }
 
 // The literal built as `as` where that is given (GenConstruct's retarget),
 // as its own type otherwise.
-inline void CodeGen::GenArrayLit(ArrayLit *al, const string &stk, const string &lenlv,
+void CodeGen::GenArrayLit(ArrayLit *al, const string &stk, const string &lenlv,
                                 TypeExpr *as) {
     auto et = as ? as : al->exprtype;
     assert(et->kind == TY_ARRAY);
@@ -1268,7 +1268,7 @@ inline void CodeGen::GenArrayLit(ArrayLit *al, const string &stk, const string &
 // Does this literal name `self` directly? Such a literal has no static
 // layout here, so the address it constructs at must be captured before
 // any of its bytes are written.
-inline bool CodeGen::HasSelfInit(StructLit *sl) {
+bool CodeGen::HasSelfInit(StructLit *sl) {
     for (auto &fi : sl->inits) if (Is<SelfRef>(fi.val)) return true;
     return false;
 }
@@ -1277,7 +1277,7 @@ inline bool CodeGen::HasSelfInit(StructLit *sl) {
 // order, defaults (or a zero optional) for omitted ones. Named inits out
 // of declaration order still construct in layout order (a note against
 // §2's left-to-right rule; flagged for the spec).
-inline void CodeGen::GenStructLit(StructLit *sl, const string &stk, const string &lenlv) {
+void CodeGen::GenStructLit(StructLit *sl, const string &stk, const string &lenlv) {
     auto et = sl->exprtype;
     string selfbase;
     if (HasSelfInit(sl)) {
@@ -1314,7 +1314,7 @@ inline void CodeGen::GenStructLit(StructLit *sl, const string &stk, const string
 // A frame object literal: fixed fields as C members of the receiving
 // object `obj`, the tail's header pointed at the stack top before its
 // elements are built there.
-inline void CodeGen::GenFrameObjLit(StructLit *sl, StructInst *si, const string &stk,
+void CodeGen::GenFrameObjLit(StructLit *sl, StructInst *si, const string &stk,
                                     const string &obj) {
     assert(!obj.empty());
     auto &fields = si->st->fields;
@@ -1350,7 +1350,7 @@ inline void CodeGen::GenFrameObjLit(StructLit *sl, StructInst *si, const string 
     }
 }
 
-inline void CodeGen::GenFieldInits(StructLit *sl, const vector<Field> &fields,
+void CodeGen::GenFieldInits(StructLit *sl, const vector<Field> &fields,
                                    const vector<TypeExpr *> &ftypes, const string &stk,
                                    const string &lenlv, const string &selfbase) {
     for (size_t i = 0; i < fields.size(); i++) {

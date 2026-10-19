@@ -12,20 +12,20 @@ namespace goose {
 // value renders structurally into a u8[>..] builder, or through a user
 // `format` overload recorded on the call for its type.
 
-inline TypeExpr *CodeGen::GrowU8() {
+TypeExpr *CodeGen::GrowU8() {
     if (growu8) return growu8;
     growu8 = ast.ArrayOf(ast.inttypes[IS_U8], A_GROW, Line {});
     return growu8;
 }
 
 // A u8[>..] builder on a statement stack.
-inline CodeGen::Loc CodeGen::TempBuilder() {
+CodeGen::Loc CodeGen::TempBuilder() {
     string stk;
     auto h = RzTemp(GrowU8(), stk);
     return RzTempLoc(GrowU8(), h, stk);
 }
 
-inline Call *CodeGen::FmtContext(Call *c, Node *arg) {
+Call *CodeGen::FmtContext(Call *c, Node *arg) {
     if (!c || c->fmtcontexts.empty()) return c;
     auto args = c->ArgNodes();
     size_t start = c->builtin == B_FORMAT ? 1 : 0;
@@ -34,14 +34,14 @@ inline Call *CodeGen::FmtContext(Call *c, Node *arg) {
     return c;
 }
 
-inline FnSpec *CodeGen::FmtSpecFor(Call *c, TypeExpr *t) {
+FnSpec *CodeGen::FmtSpecFor(Call *c, TypeExpr *t) {
     if (!c) return nullptr;
     for (auto &fs : c->fmtspecs) if (TEq(fs.first, t)) return fs.second;
     return nullptr;
 }
 
 // The scalar, bool, u8-array cases EmitOutArg/FmtCall handle directly.
-inline bool CodeGen::SimpleText(Call *c, TypeExpr *t) {
+bool CodeGen::SimpleText(Call *c, TypeExpr *t) {
     if (FmtSpecFor(c, t)) return false;
     if (t->kind == TY_INT || t->kind == TY_FLT || t->kind == TY_BOOL) return true;
     if (t->kind == TY_ARRAY) return IsU8(t->arr->sub);
@@ -49,21 +49,21 @@ inline bool CodeGen::SimpleText(Call *c, TypeExpr *t) {
     return false;
 }
 
-inline void CodeGen::RenderLit(Loc &out, const string &text) {
+void CodeGen::RenderLit(Loc &out, const string &text) {
     L("memcpy(", Top(out.stk), ", ", StrRaw(text), ", ", text.size(), ");");
     Bump(out.stk, cat(text.size()));
     L(out.lenlv, " += ", text.size(), ";");
 }
 
 // nexpr writes at the builder's top and yields the byte count.
-inline void CodeGen::RenderN(Loc &out, const string &nexpr) {
+void CodeGen::RenderN(Loc &out, const string &nexpr) {
     auto n = T();
     L("int64_t ", n, " = ", nexpr, ";");
     Bump(out.stk, n);
     L(out.lenlv, " += ", n, ";");
 }
 
-inline void CodeGen::RenderLoc(Loc &out, Loc lv, TypeExpr *t, bool nested, Call *c, Line ln) {
+void CodeGen::RenderLoc(Loc &out, Loc lv, TypeExpr *t, bool nested, Call *c, Line ln) {
     // A reference location whose checked type already decayed (a narrowed
     // optional, a plain reference in value position): the pointee.
     if (lv.t->kind == TY_REF && t->kind != TY_REF) DerefLoc(lv);
@@ -274,7 +274,7 @@ inline void CodeGen::RenderLoc(Loc &out, Loc lv, TypeExpr *t, bool nested, Call 
 }
 
 // A variant's positional literal, its payload's parts rendered from lv.
-inline void CodeGen::RenderVariant(Loc &out, Loc lv, TypeExpr *t, Call *c, Line ln) {
+void CodeGen::RenderVariant(Loc &out, Loc lv, TypeExpr *t, Call *c, Line ln) {
     auto ei = EIVar(t);
     auto vi = ei->en->VariantIndex(t->var->variant);
     auto &v = ei->en->variants[vi];
@@ -296,7 +296,7 @@ inline void CodeGen::RenderVariant(Loc &out, Loc lv, TypeExpr *t, Call *c, Line 
 // A reference to the value at lv, of type sub, for a function taking one: a
 // resizable's header and stack, a bytes value's address, a fixed value's
 // typed address.
-inline string CodeGen::RefArg(const Loc &lv, TypeExpr *sub, Line ln) {
+string CodeGen::RefArg(const Loc &lv, TypeExpr *sub, Line ln) {
     if (IsResz(sub)) {
         if (lv.hdr.empty() || lv.stk.empty())
             Fail(ln, "a format overload by reference needs a resizable with its own header");
@@ -316,7 +316,7 @@ inline string CodeGen::RefArg(const Loc &lv, TypeExpr *sub, Line ln) {
 }
 
 // A user `format(out, v)` overload applied to the value at lv.
-inline void CodeGen::EmitUserFormat(Loc &out, Loc lv, FnSpec *sp, Line ln) {
+void CodeGen::EmitUserFormat(Loc &out, Loc lv, FnSpec *sp, Line ln) {
     assert(!out.hdr.empty() && !out.stk.empty());
     PushSc(SC_PLAIN);
     auto r = T();
@@ -349,7 +349,7 @@ inline void CodeGen::EmitUserFormat(Loc &out, Loc lv, FnSpec *sp, Line ln) {
 // one per type. It is handed the builder and a reference to the value, as
 // an overload taking it by reference is, and its body is emitted after the
 // specializations' (EmitRenderFn).
-inline string CodeGen::RenderFn(TypeExpr *t, Line ln) {
+string CodeGen::RenderFn(TypeExpr *t, Line ln) {
     auto m = Mangle(t);
     if (auto it = renderfns.find(m); it != renderfns.end()) return it->second;
     auto name = Unique(cat("gs_render_", m));
@@ -361,7 +361,7 @@ inline string CodeGen::RenderFn(TypeExpr *t, Line ln) {
     return name;
 }
 
-inline void CodeGen::EmitRenderCall(Loc &out, const Loc &lv, TypeExpr *t, Line ln) {
+void CodeGen::EmitRenderCall(Loc &out, const Loc &lv, TypeExpr *t, Line ln) {
     assert(!out.hdr.empty() && !out.stk.empty());
     auto fn = RenderFn(t, ln);
     MarkFlush();
@@ -384,7 +384,7 @@ inline void CodeGen::EmitRenderCall(Loc &out, const Loc &lv, TypeExpr *t, Line l
 // OverloadedPart), so the overloads of a print are all run at its first
 // level, by the function printing, above its live stacks. spexpr is "0"
 // only so that nothing below forms a stack expression by accident.
-inline void CodeGen::EmitRenderFn(RenderFnReq r) {
+void CodeGen::EmitRenderFn(RenderFnReq r) {
     curspec = nullptr;
     curinfo = nullptr;
     ResetFnState();
@@ -416,7 +416,7 @@ inline void CodeGen::EmitRenderFn(RenderFnReq r) {
 // what the reference names, which is where the checker binds it (§3.7,
 // DecayRef's slot), not a copy of it. A varint pointee is rendered as the
 // i64 it decodes to, a value no storage holds.
-inline CodeGen::Loc CodeGen::RenderedLoc(Node *a) {
+CodeGen::Loc CodeGen::RenderedLoc(Node *a) {
     auto c = Is<Call>(a);
     auto ib = Is<InlineBlock>(a);
     TypeExpr *rt = nullptr;
@@ -439,14 +439,14 @@ inline CodeGen::Loc CodeGen::RenderedLoc(Node *a) {
 }
 
 // A value rendered into a builder of its own: the print and str paths.
-inline CodeGen::Loc CodeGen::RenderToTemp(Node *a, Call *c) {
+CodeGen::Loc CodeGen::RenderToTemp(Node *a, Call *c) {
     auto b = TempBuilder();
     auto lv = RenderedLoc(a);
     RenderLoc(b, lv, a->exprtype, false, c, a->line);
     return b;
 }
 
-inline void CodeGen::EmitOutArg(Node *a, Call *c) {
+void CodeGen::EmitOutArg(Node *a, Call *c) {
     c = FmtContext(c, a);
     auto t = a->exprtype;
     if (!SimpleText(c, t)) {
@@ -470,7 +470,7 @@ inline void CodeGen::EmitOutArg(Node *a, Call *c) {
 }
 
 // The C expression formatting scalar `a` at `dst`, yielding the byte count.
-inline string CodeGen::FmtCall(Node *a, const string &dst) {
+string CodeGen::FmtCall(Node *a, const string &dst) {
     auto t = a->exprtype;
     if (t->kind == TY_INT) {
         if (t->intstorage == IS_U64) return cat("gs_fmt_u64(", dst, ", ", GenX(a), ")");
@@ -486,7 +486,7 @@ inline string CodeGen::FmtCall(Node *a, const string &dst) {
 // the bytes are written straight at its stack top (the reservation has
 // room for them); a limited array formats into a buffer first, so the
 // capacity check comes before anything lands in it.
-inline void CodeGen::EmitFormatInto(Loc lv, Node *a, Line ln, Call *c) {
+void CodeGen::EmitFormatInto(Loc lv, Node *a, Line ln, Call *c) {
     c = FmtContext(c, a);
     auto v = ArrayView(lv);
     auto limited = lv.t->arr->akind == A_LIMITED;
@@ -537,7 +537,7 @@ inline void CodeGen::EmitFormatInto(Loc lv, Node *a, Line ln, Call *c) {
 // the receiving header -- or into a length prefix reserved in front of the
 // elements when the destination is a value slot (a u8[] element or field),
 // exactly as a named result lands there (§7.3).
-inline vector<string> CodeGen::EmitStr(Call *c, vector<Node *> &an, Dst d0, Line ln) {
+vector<string> CodeGen::EmitStr(Call *c, vector<Node *> &an, Dst d0, Line ln) {
     EmitCoreTypes();
     string stk = d0.s, lenlv = d0.lenlv, pref, hdr;
     IntStorage ls = IS_U32;
@@ -588,7 +588,7 @@ inline vector<string> CodeGen::EmitStr(Call *c, vector<Node *> &an, Dst d0, Line
 // Structural named-result discovery on the final body (NamedResultOf). Both
 // real functions and inlined bodies use it, so rewrites need not maintain an
 // AST annotation.
-inline const VarDef *CodeGen::NamedResult(Block *fnbody, SFunction *target,
+const VarDef *CodeGen::NamedResult(Block *fnbody, SFunction *target,
                                          size_t nrets, size_t resultidx) {
     return NamedResultOf(fnbody, target, nrets, resultidx);
 }
@@ -597,7 +597,7 @@ inline const VarDef *CodeGen::NamedResult(Block *fnbody, SFunction *target,
 // nonfixed return position is allocated at that destination; a return of any
 // other value builds it behind the local and moves it down (BindLocal marks
 // the local open there).
-inline void CodeGen::DetectNrvo(FnSpec *sp) {
+void CodeGen::DetectNrvo(FnSpec *sp) {
     nrvo.clear();
     // A long-distance return into this function lands its value over the
     // named result at the catch (EmitRfCheck).

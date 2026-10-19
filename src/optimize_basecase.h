@@ -357,12 +357,12 @@ struct BaseCaseInliner {
 
 // The optimizer's two hooks into the pass. The object is made on first use:
 // it needs the Inliner, so it cannot be a member of the Optimizer itself.
-inline void Optimizer::SetupBaseCase(FnSpec *sp) {
+void Optimizer::SetupBaseCase(FnSpec *sp) {
     if (!basecase) basecase = make_unique<BaseCaseInliner>(*this);
     basecase->Setup(sp);
 }
 
-inline Node *Optimizer::TryBaseCase(Call *c) {
+Node *Optimizer::TryBaseCase(Call *c) {
     return basecase ? basecase->Try(c) : nullptr;
 }
 

@@ -3,7 +3,8 @@
 // json's writer. Records are fixed-size and kept in arenas: a feature's
 // polygon is a run of rings, a ring a run of points, and a document a run of
 // features, each run a start and a count in the arena below it. Strings are
-// views of the text, or of the decoded text for those that held escapes.
+// views of the text, or of the reader's own text for those that held
+// escapes.
 
 import std;
 import os;
@@ -18,14 +19,54 @@ struct GeoData { kind: const u8[:], features: Run }
 // --- numbers --------------------------------------------------------------------
 
 // As the Rust programs' MyF64 writes a number: integral values as an i64
-// (saturated, as Rust's `as` is), others as json writes them.
+// (saturated, as Rust's `as` is), others as serde_json writes them.
 fn format_num(out: u8[>..]&, x: f64) {
-    if x != x || x - x != 0.0 { json::format_number(out, x); return; }
+    if x != x || x - x != 0.0 { out.append("null"); return; }
     if x >= 9223372036854775807.0 { format(out, 9223372036854775807); return; }
     if x <= -9223372036854775808.0 { format(out, -9223372036854775807 - 1); return; }
     let i = x as! i64;
     if i == x { format(out, i); return; }
-    json::format_number(out, x);
+    format_ryu(out, x);
+}
+
+// A finite double as serde_json's ryu lays it out: the shortest digits that
+// read back as x (json::shortest), in plain notation for a decimal point
+// within 16 places, else d.ddde-x: 0.5, 1.0, 123.25, 1e-7, 1.5e300. json's
+// own writer lays them out as JavaScript does (1.5e+300).
+fn format_ryu(out: u8[>..]&, x: f64) {
+    let bits = json::bits_of(x);
+    if bits >> 63 != 0 { out.push('-'); }
+    if bits << 1 == 0 { out.append("0.0"); return; }
+    var c, k = json::shortest(bits & 0x7fffffffffffffff);
+    while c % 10 == 0 {
+        c = c / 10;
+        k++;
+    }
+    var digits: u8[..24] = [];
+    format(digits, c);
+    let n = digits.len;
+    let e = n + k;          // the value is 0.digits * 10^e
+    if k >= 0 && e <= 16 {
+        out.append(digits[..]);
+        for j in k { out.push('0'); }
+        out.append(".0");
+    } else if e > 0 && e <= 16 {
+        out.append(digits[..e]);
+        out.push('.');
+        out.append(digits[e..]);
+    } else if e > -5 && e <= 0 {
+        out.append("0.");
+        for j in -e { out.push('0'); }
+        out.append(digits[..]);
+    } else {
+        out.push(digits[0]);
+        if n > 1 {
+            out.push('.');
+            out.append(digits[1..]);
+        }
+        out.push('e');
+        format(out, e - 1);
+    }
 }
 
 // --- MD5 (RFC 1321) ---------------------------------------------------------------
@@ -129,21 +170,36 @@ fn main() {
     var text: u8[>..] = [];
     if !read_file(path, text) { abort("cannot read the input"); }
 
-    var decoded: u8[>..] = [];      // strings that held escapes
-    // The strings read are views of the reader's text, so the reader is
-    // one that outlives the records; each document resets it.
+    // The strings read are views of the text, or of the reader's own text
+    // for those that held escapes, which never moves: so the reader is one
+    // that outlives the records, and each document rewinds it.
     var r = json::reader(text);
     var points: f64[>..] = [];      // x and y, by pairs
     var rings: Run[>..] = [];       // runs of points
     var features: Feature[>..] = [];
     var docs: GeoData[>..] = [];
 
+    // A value the program reads is of the kind it expects, or the input is
+    // not what the Rust programs read either.
+    fn number(r: json::Reader&) -> f64 {
+        let v, ok = r.try_float();
+        if !ok { abort(str("json: expected a number at byte ", r.pos)); }
+        return v;
+    }
+    fn string(r: json::Reader&) -> const u8[:] {
+        let v, ok = r.try_string();
+        if !ok { abort(str("json: expected a string at byte ", r.pos)); }
+        return v;
+    }
+
+    // A member or an element the block does not read is skipped, and
+    // checked, by the reader.
     fn read_ring(r: json::Reader&) -> Run {
         let first = points.len / 2;
-        json::each_element(r) {
+        r.each() {
             var k = 0;
-            json::each_element(r) {
-                if k < 2 { points.push(json::read_number(r)); } else { json::skip(r); }
+            r.each() {
+                if k < 2 { points.push(number(r)); }
                 k++;
             };
             if k != 2 { abort("a point is two numbers"); }
@@ -153,15 +209,13 @@ fn main() {
 
     fn read_geometry(r: json::Reader&) -> Geometry {
         var g = Geometry { kind: "", coordinates: Run { 0, 0 } };
-        json::each_member(r) { key =>
+        r.members() { key =>
             if key == "type" {
-                g.kind = json::read_string(r, decoded);
+                g.kind = string(r);
             } else if key == "coordinates" {
                 let first = rings.len;
-                json::each_element(r) { rings.push(read_ring(r)); };
+                r.each() { rings.push(read_ring(r)); };
                 g.coordinates = Run { first: first, count: rings.len - first };
-            } else {
-                json::skip(r);
             }
         };
         return g;
@@ -169,53 +223,51 @@ fn main() {
 
     fn read_feature(r: json::Reader&) -> Feature {
         var f = Feature { kind: "", properties: Properties { name: "" }, geometry: Geometry { kind: "", coordinates: Run { 0, 0 } } };
-        json::each_member(r) { key =>
+        r.members() { key =>
             if key == "type" {
-                f.kind = json::read_string(r, decoded);
+                f.kind = string(r);
             } else if key == "properties" {
-                json::each_member(r) { pkey =>
-                    if pkey == "name" { f.properties.name = json::read_string(r, decoded); } else { json::skip(r); }
+                r.members() { pkey =>
+                    if pkey == "name" { f.properties.name = string(r); }
                 };
             } else if key == "geometry" {
                 f.geometry = read_geometry(r);
-            } else {
-                json::skip(r);
             }
         };
         return f;
     }
 
     fn read_doc() -> GeoData {
-        r = json::reader(text);
+        r.pos = 0;
+        r.depth = 0;
+        r.root = -1;
         var d = GeoData { kind: "", features: Run { 0, 0 } };
-        json::each_member(r) { key =>
+        r.members() { key =>
             if key == "type" {
-                d.kind = json::read_string(r, decoded);
+                d.kind = string(r);
             } else if key == "features" {
                 let first = features.len;
-                json::each_element(r) { features.push(read_feature(r)); };
+                r.each() { features.push(read_feature(r)); };
                 d.features = Run { first: first, count: features.len - first };
-            } else {
-                json::skip(r);
             }
         };
-        if !json::finish(r) { abort(json::message(r)); }
+        if !r.finish() { abort(str("json: ", r.error.message, " at byte ", r.error.at)); }
         return d;
     }
 
     fn write_doc(out: u8[>..]&, d: GeoData) {
         out.append("{\"type\":");
-        json::format_string(out, d.kind);
+        json::write_string(out, d.kind);
         out.append(",\"features\":[");
         for fi in d.features.count {
             let f = features[d.features.first + fi];
             if fi > 0 { out.push(','); }
             out.append("{\"type\":");
-            json::format_string(out, f.kind);
+            json::write_string(out, f.kind);
             out.append(",\"properties\":{\"name\":");
-            json::format_string(out, f.properties.name);
+            json::write_string(out, f.properties.name);
             out.append("},\"geometry\":{\"type\":");
-            json::format_string(out, f.geometry.kind);
+            json::write_string(out, f.geometry.kind);
             out.append(",\"coordinates\":[");
             let c = f.geometry.coordinates;
             for ri in c.count {

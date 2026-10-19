@@ -19,8 +19,8 @@ what Goose's memory model and library give it:
 |---|---|---|---|
 | Brainfuck | `brainfuck/bf.goose` | `bf.rs`: an op tree, a tape that starts at one cell and grows, run recursively | the ops of every loop body are one run of a single op pool; the parser's unfinished bodies wait on one shared stack, since a recursive function holds no growable array of its own |
 | Base64 | `base64/test.goose` | `base64.rs`: the library codec, a new buffer per call | `std`'s `base64`, whose loops the C compiler vectorizes; each buffer is a data-stack bump, freed at the loop body's brace |
-| Json | `json/test.goose` | `json_struct.rs` (serde, typed) | `json::Reader` maps the text onto `Coordinate`s as serde's derive does, building no tree |
-| Json | `json/test_dom.goose` | `json_value.rs` (serde `Value`), RapidJSON's `Document` | `json::parse`'s tree: fixed-size nodes in one array, linked by 4-byte self-relative offsets, strings as views of the text |
+| Json | `json/test.goose` | `json_struct.rs` (serde, typed) | `json::reader` maps the text onto `Coordinate`s in one forward pass as serde's derive does, building nothing |
+| Json | `json/test_dom.goose` | `json_value.rs` (serde `Value`), RapidJSON's `Document` | `json::parse`'s document: the text checked into one flat tape, values read in place, strings as views of the text |
 | Matmul | `matmul/matmul.goose` | `matmul.jl` without threads: `c[i][j] += a[i][k] * b[k][j]` with j innermost, no transpose | a matrix is an array of row slices, the rows runs of one `reusable[]` pool; one `assert` per row lets every index in the inner loop go unchecked |
 | Primes | `primes/primes.goose` | `primes.rs`: sieve of Atkin, a trie of the primes' digits, a breadth-first walk | trie nodes in one array; each node's map is a run of (digit, node) pairs in a `reusable[]` pool; queue entries hold their prefix inline in a `u8[..16]` |
 
@@ -79,6 +79,12 @@ is the suite's base + increase of the resident set.
 | rust | 0.467 | 0.464 | 2.44 + 0.00 | 5.31 |
 
 ### Json
+
+These were measured with upstream's `json` module (a linked tree of
+fixed-size nodes and a pull reader). This fork's `json` (a tape document, a
+cursor and a one-pass reader, `docs/json.md`) replaces it; the two tests
+were ported to it and not measured again here. `bench/kostya` measures the
+same tests in the suite's other harness (`bench/kostya/README.md`).
 
 | test | time, s | min | memory, MiB | its time / Goose's |
 |---|---:|---:|---:|---:|

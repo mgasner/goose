@@ -3,7 +3,6 @@
 // variable points where each call passed, not at the class the body's check
 // saw, so the loop's passes settle (§7.5).
 import std;
-import json;
 
 fn each<F>(xs: i64[:]) { for i in 0..xs.len { F(&xs[i]); } }
 fn apply<G>(ys: i64[:]) { each(ys) { q => G(q); }; }
@@ -56,25 +55,45 @@ fn bound_before() {
     if r { print(r); }
 }
 
-// A block rebinding a reference to a json node in a loop of a nested
-// function, whose call from another block stores what it leads to.
+// A block rebinding a reference to a tree node in a loop of a nested
+// function, whose call from another block stores what it leads to. The tree
+// is a pool of nodes linked by self-relative references, in the shape of
+// {"x": {"a": 1, "b": 2}, "y": {"a": 3}}.
+struct Node { next: Node&<u32>?, first: Node&<u32>?, key: const u8[:] }
 struct P { name: const u8[:], n: i64 }
 
-fn json_members(text: const u8[:]) -> i64 {
-    var doc: json::Node[>..] = [];
-    var decoded: u8[>..] = [];
+// F(child) for each child of n, in order.
+fn each<F>(n: Node&) {
+    var c = n.first;
+    while c {
+        F(c);
+        c .= c.next;
+    }
+}
+
+fn tree_members() -> i64 {
+    var doc: Node[>..] = [];
     var ps: P[>..] = [];
-    fn load(list: json::Node&) {
+    fn load(list: Node&) {
         for i in 2 {
-            var chosen: json::Node? = null;
-            json::each(list) { p => if p.key == "a" { chosen .= p; } };
+            var chosen: Node? = null;
+            each(list) { p => if p.key == "a" { chosen .= p; } };
             guard chosen else { continue; }
             ps.push(P { name: chosen.key, n: i });
         }
     }
-    let root, err = json::parse(text, doc, decoded);
-    guard root else { return -1; }
-    json::each(root) { item => load(item); };
+    let root .= doc.push(Node { next: null, first: null, key: "" });
+    let x .= doc.push(Node { next: null, first: null, key: "x" });
+    root.first .= x;
+    let xa .= doc.push(Node { next: null, first: null, key: "a" });
+    x.first .= xa;
+    let xb .= doc.push(Node { next: null, first: null, key: "b" });
+    xa.next .= xb;
+    let y .= doc.push(Node { next: null, first: null, key: "y" });
+    x.next .= y;
+    let ya .= doc.push(Node { next: null, first: null, key: "a" });
+    y.first .= ya;
+    each(root) { item => load(item); };
     for p in ps { print(p.name, " ", p.n); }
     return ps.len;
 }
@@ -84,5 +103,5 @@ fn main() {
     nested_rebind();
     two_levels();
     bound_before();
-    print(json_members("""{"x": {"a": 1, "b": 2}, "y": {"a": 3}}"""));
+    print(tree_members());
 }

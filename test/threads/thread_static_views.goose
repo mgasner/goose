@@ -1,7 +1,7 @@
 // A `let` global whose references lead only to static data -- a string
 // literal, an array or struct of them -- is read by a worker as its own copy
 // (§11.2): the copy views the same read-only bytes, so no program can tell.
-// json::format_number reads such a table of digit pairs.
+// json::write_float reads such tables (of digit pairs and powers of ten).
 import std;
 import json;
 
@@ -14,7 +14,7 @@ let EMPTY: const u8[:] = "";
 
 thread_fn worker(i: i64) {
     var out: u8[>..] = [];
-    json::format_number(out, 0.5);
+    json::write_float(out, 0.5);
     print(PAIRS[i], " ", DIGITS[i], " ", NAMES[i], " ", CFG.name, " ", CFG.n, " ", EMPTY.len,
           " ", out);
 }

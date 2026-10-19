@@ -15,15 +15,23 @@ fn format(out: u8[>..]&, c: Coordinate) {
     format(out, "Coordinate { x: ", c.x, ", y: ", c.y, ", z: ", c.z, " }");
 }
 
+// A number at the reader; the text is the benchmark's, so anything else is a
+// bug, as it is an error to serde.
+fn number(r: json::Reader&) -> f64 {
+    let v, ok = r.try_float();
+    if !ok { abort(str("json: expected a number at byte ", r.pos)); }
+    return v;
+}
+
 // The members a test struct does not name are passed over, as serde passes
-// over the fields a struct does not have.
+// over the fields a struct does not have: a member the block does not read
+// is skipped, and checked, by the reader.
 fn read_coordinate(r: json::Reader&) -> Coordinate {
     var c = Coordinate { 0.0, 0.0, 0.0 };
-    json::each_member(r) { key =>
-        if key == "x" { c.x = json::read_number(r); }
-        else if key == "y" { c.y = json::read_number(r); }
-        else if key == "z" { c.z = json::read_number(r); }
-        else { json::skip(r); }
+    r.members() { key =>
+        if key == "x" { c.x = number(r); }
+        else if key == "y" { c.y = number(r); }
+        else if key == "z" { c.z = number(r); }
     };
     return c;
 }
@@ -31,14 +39,10 @@ fn read_coordinate(r: json::Reader&) -> Coordinate {
 fn read_coordinates(text: const u8[:]) -> Coordinate[>..] {
     var coordinates: Coordinate[>..] = [];
     var r = json::reader(text);
-    json::each_member(r) { key =>
-        if key == "coordinates" {
-            json::each_element(r) { coordinates.push(read_coordinate(r)); };
-        } else {
-            json::skip(r);
-        }
+    r.members() { key =>
+        if key == "coordinates" { r.each() { coordinates.push(read_coordinate(r)); }; }
     };
-    if !json::finish(r) { abort(json::message(r)); }
+    if !r.finish() { abort(str("json: ", r.error.message, " at byte ", r.error.at)); }
     return coordinates;
 }
 

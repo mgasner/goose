@@ -129,8 +129,11 @@ With AVX-512 allowed, the `simd fn` programs go further: nbody/2 79.7 ms at
   **/2** counts with the stdlib `dictionary`.
 * **lru/1** uses the stdlib `dictionary`; **/2** a table made for the cache.
 * **json-serde** reads into typed records with the stdlib `json` reader and
-  writes with its writer, numbers included, but for the integral values the
-  Rust programs' `MyF64` writes as integers.
+  writes strings with its writer. Numbers are written as serde_json's ryu
+  lays them out, from `json`'s shortest digits (`json`'s own writer lays them
+  out as JavaScript does), but for the integral values the Rust programs'
+  `MyF64` writes as integers. The results above were measured with
+  upstream's `json` module, before this fork's replaced it.
 * **pidigits**, **edigits** and **secp256k1** carry their own big-integer
   arithmetic on 64-bit limbs: the spigot's products and sums fused into one
   pass each (GMP's addmul kind), Toom-3 and Karatsuba multiplication and

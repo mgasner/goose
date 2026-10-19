@@ -1,5 +1,5 @@
 // Json: the mean of the coordinates in a large JSON document, from the
-// standard library's document tree, as serde_json's Value and RapidJSON's
+// standard library's parsed document, as serde_json's Value and RapidJSON's
 // Document hand them over.
 
 import std;
@@ -15,28 +15,28 @@ fn format(out: u8[>..]&, c: Coordinate) {
     format(out, "Coordinate { x: ", c.x, ", y: ", c.y, ", z: ", c.z, " }");
 }
 
-fn number(n: json::Node?) -> f64 {
-    let v, ok = json::as_f64(n);
-    if !ok { abort("not a number"); }
+// coord[key] as a number; the text is the benchmark's, so anything else is
+// a bug.
+fn number(coord: json::Value, key: u8[:]) -> f64 {
+    let v, ok = coord.get(key).try_float();
+    if !ok { abort(str("not a number: ", key)); }
     return v;
 }
 
 fn calc(text: const u8[:]) -> Coordinate {
-    var doc: json::Node[>..] = [];
-    var decoded: u8[>..] = [];
-    let root, err = json::parse(text, doc, decoded);
-    guard root else { abort(err); }
-    let coordinates = json::member(root, "coordinates");
-    guard coordinates else { abort("no coordinates"); }
+    let doc = json::parse(text);
+    guard doc.ok() else { abort(str("json: ", doc.error.message, " at byte ", doc.error.at)); }
+    let coordinates = doc.root().get("coordinates");
+    guard coordinates.is_array() else { abort("no coordinates"); }
 
     var len = 0;
     var x = 0.0;
     var y = 0.0;
     var z = 0.0;
-    json::each(coordinates) { coord =>
-        x += number(json::member(coord, "x"));
-        y += number(json::member(coord, "y"));
-        z += number(json::member(coord, "z"));
+    coordinates.each() { coord =>
+        x += number(coord, "x");
+        y += number(coord, "y");
+        z += number(coord, "z");
         len++;
     };
     return Coordinate { x / len, y / len, z / len };

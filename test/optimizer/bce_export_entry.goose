@@ -10,12 +10,12 @@ recursive fn pick_twin(dist: i32[:], i: i64) -> i32 {
     return dist[i];                               // bce:elide (every site passes i < dist.len)
 }
 
-// The wrapper, called the way C calls it.
-extern "c_pick" fn c_pick(dist: i32[:], i: i64) -> i32;
+// A call of the wrapper from C, with an index the Goose sites never pass,
+// is embed/export_entry_bounds: from here, through an extern, it would be a
+// re-entry of the program, which aborts first (spec §7.11).
 
 fn main() {
     var d: i32[>..] = [];
     d.push(7);
     print(pick(d, 0), " ", pick_twin(d, 0));
-    print(c_pick(d, 1));
 }

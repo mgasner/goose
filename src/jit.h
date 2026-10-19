@@ -52,6 +52,16 @@ inline int RunJit(const string &csrc, const string &libpath, const string &progn
     // Both the header search path and the library search path are derived from
     // this, so it has to be set before the output type that reads them.
     tcc_set_lib_path(s, libpath.c_str());
+    #ifdef __APPLE__
+        // The C library's headers are only in an SDK. The output type adds
+        // the include paths TinyCC was configured with after these: its own
+        // headers, then the SDK of the machine the compiler was built on.
+        // This machine's active SDK goes first, behind TinyCC's headers.
+        if (auto sdk = MacSdkPath(); !sdk.empty()) {
+            tcc_add_sysinclude_path(s, cat(libpath, "/include").c_str());
+            tcc_add_sysinclude_path(s, cat(sdk, "/usr/include").c_str());
+        }
+    #endif
     auto fail = [&](const char *what) {
         auto msg = cat("libtcc: ", what, "\n", diags);
         tcc_delete(s);

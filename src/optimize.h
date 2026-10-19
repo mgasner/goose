@@ -56,6 +56,7 @@
 namespace goose {
 
 struct BaseCaseInliner;   // optimize_basecase.h.
+struct Reassociator;      // optimize_reassoc.h.
 
 struct Optimizer {
     Ast &ast;
@@ -309,6 +310,15 @@ struct Optimizer {
     void SetupBaseCase(FnSpec *sp);   // Records the base case of sp, if any.
     Node *TryBaseCase(Call *c);       // Rewrites one self-call against it.
     int basecases = 0;
+
+    // Regrouping integer min/max chains around a loop-carried operand:
+    // optimize_reassoc.h, which holds the state and defines this. The loops
+    // around the node being optimized, innermost last, are what it asks
+    // which operands carry a value from one iteration to the next.
+    unique_ptr<Reassociator> reassoc;
+    Node *TryReassoc(Call *c);
+    vector<Node *> loopnodes;
+    int reassociated = 0;
 
     // ------------------------------------------------------------------
     // The fold/propagate/inline walk. Opt returns the (possibly replaced)
@@ -705,7 +715,9 @@ struct Inliner {
 
     Node *Cp(const Node *n) {
         auto r = n->Cp1(*this);
+        r->end = n->end;
         r->exprtype = n->exprtype;
+        r->expansiontrace = n->expansiontrace;
         return r;
     }
 
@@ -764,7 +776,7 @@ inline Node *Optimizer::TryInline(Call *c) {
     // A global initializer's locals belong to no specialization, so its
     // copies could not be told from the variables they replace.
     if (info.nestedcalls && !curspec) return nullptr;
-    auto argnodes = c->ArgNodes();
+    auto argnodes = c->ValueArgNodes();
     if (argnodes.size() != K->params.size()) return nullptr;
     if (!small && deferonce && branchdepth > 0 && loopdepth == 0) {
         deferred.push_back(K);
@@ -818,8 +830,12 @@ inline Node *Optimizer::TryInline(Call *c) {
 // kind. Inliner::Cp wraps every call and carries exprtype over; TypeExprs and
 // symbols are shared, VarDefs remap via Inliner::Remap.
 
-inline Node *IntLit::Cp1(Inliner &inl) const { return inl.ast.New<IntLit>(line, val, text, uns); }
-inline Node *FltLit::Cp1(Inliner &inl) const { return inl.ast.New<FltLit>(line, val, text); }
+inline Node *IntLit::Cp1(Inliner &inl) const { return Clone1(inl.ast); }
+inline Node *FltLit::Cp1(Inliner &inl) const { return Clone1(inl.ast); }
+
+// Specialization eliminates every expansion before these passes.
+inline Node *ConstFor::Cp1(Inliner &) const { assert(false); return nullptr; }
+inline Node *ConstFor::Opt(Optimizer &) { assert(false); return nullptr; }
 inline Node *BoolLit::Cp1(Inliner &inl) const { return inl.ast.New<BoolLit>(line, val); }
 inline Node *StrLit::Cp1(Inliner &inl) const {
     return inl.ast.New<StrLit>(line, val, multiline);
@@ -894,6 +910,7 @@ inline Node *Call::Cp1(Inliner &inl) const {
     c->dispatcharg = dispatcharg;
     c->builtin = builtin;
     c->poolcheck = poolcheck;
+    c->qtype = qtype;
     c->shaderblob = shaderblob;
     c->fvtarget = fvtarget;
     c->rettypes = rettypes;
@@ -1212,6 +1229,8 @@ inline Node *Dot::Opt(Optimizer &o) {
 }
 
 inline Node *Call::Opt(Optimizer &o) {
+    // Before the arguments: a chain of min or max calls is still calls.
+    if (auto r = o.TryReassoc(this)) return r;
     // A member builtin works on its receiver where it stands (bytes_of
     // returns a view of it), and print, str and format render an argument
     // where it stands around the user format overloads they run.
@@ -1254,6 +1273,9 @@ inline Node *SliceExpr::Opt(Optimizer &o) {
 inline Node *AsCast::Opt(Optimizer &o) {
     child = o.Opt(child);
     auto tt = totype;
+    // A conversion into an index type checks against the array's length at
+    // run time, which no constant settles (§3.11).
+    if (tt->ix) return this;
     if (auto i = Is<IntLit>(child)) {
         // Whether the source value's bits read as a u64 above i64.max.
         auto st = Optimizer::IntTypeOf(child);
@@ -1388,20 +1410,25 @@ inline Node *EarlyBlock::Opt(Optimizer &o) {
 
 inline Node *While::Opt(Optimizer &o) {
     o.loopdepth++;
+    o.loopnodes.push_back(this);
     cond = o.OptIn(this, cond);
     if (auto b = Is<BoolLit>(cond); b && !b->val) {
+        o.loopnodes.pop_back();
         o.loopdepth--;
         o.folded++;
         return o.EmptyBlock(this);
     }
     o.OptBlock(body);
+    o.loopnodes.pop_back();
     o.loopdepth--;
     return this;
 }
 
 inline Node *LoopExpr::Opt(Optimizer &o) {
     o.loopdepth++;
+    o.loopnodes.push_back(this);
     o.OptBlock(body);
+    o.loopnodes.pop_back();
     o.loopdepth--;
     return this;
 }
@@ -1409,7 +1436,9 @@ inline Node *LoopExpr::Opt(Optimizer &o) {
 inline Node *ForLoop::Opt(Optimizer &o) {
     iter = o.OptViewed(iter);
     o.loopdepth++;
+    o.loopnodes.push_back(this);
     o.OptBlock(body);
+    o.loopnodes.pop_back();
     o.loopdepth--;
     return this;
 }

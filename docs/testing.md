@@ -87,7 +87,7 @@ Test fixtures are grouped by category; `run_tests.py` stays at the root of `test
 | `optimizer/` | Inlining, tail recursion and bounds-check elimination. |
 | `runtime/` | Runtime diagnostics, reusable slot and slice pool operations and array size checks. |
 | `storage/` | Relative references, pools and serialization. |
-| `threads/` | Workers, queues, shared globals and the native runtime lifecycle test. |
+| `threads/` | Workers, queues, shared globals, contained workers' aborts and the native runtime lifecycle test. Imported helpers live in `threads/spawn/`. |
 | `embed/` | C hosts of a `--header` library (spec §7.11): each `embed/<case>/` holds `lib.goose` and `host.c`, built with `--standalone --header`, linked by the system C compiler (with `embed/host_thread.h` for a thread of the host's own) and run at -O0 and -O2, its expectations those of a fixture `embed_<case>` in `expected/`. Calls in sequence, an export calling another from Goose, `goose_init` twice and before it, and the aborts for a callback from C into an export (from another export or from `fn main()`) and for a call from a thread other than `goose_init`'s, with and without workers. Not run through TinyCC, which `--header` excludes. |
 | `stdlib/` | Standard-library modules. |
 | `goose_in_goose/` | A Goose-written compiler used as one multi-file bootstrap regression: build and run three generations, check a C fixed point and repeated self-checks of the stage-2 compiler, and compare JIT/native self-compilation. |
@@ -97,6 +97,8 @@ Test fixtures are grouped by category; `run_tests.py` stays at the root of `test
 | `ui/` | The `ui` module: fonts, windows and layout, widgets, popups and menus, text editing, style, drawing and the input queries, charts, rendering and input through headless gfx, whether the keys and the mouse are the ui's, a runtime misuse, the layer's misuse messages, and the threading rejection. |
 | `errors/`, `errors_tc/` | Expected parser/resolver and semantic rejections. |
 | `errors_build/` | Programs `--check` accepts (with no warnings) but a build (`-o`) rejects: those without a global `fn main()`. A fixture's module parts live in a subdirectory of its name. |
+| `errors_tc/recovery/` | Programs with several errors, which the parser, resolution and the checker go on past (`docs/design/language_server.md` §5 D): each `// error:` marker is part of the message of the error in its position, in the order the compiler reports them, with no error besides, in text and under `--diagnostics json`. `imported/` holds a module `imports.goose` imports, which is no fixture of its own. |
+| `lsp/` | The language server's fixtures, driven over the protocol by `lsp_protocol.py` rather than compiled as programs: `basics.goose`, an entry file whose `// lsp:` lines state the queries and their answers, `helper.goose`, which it imports, `recovery.goose`, a program with an error in each of two functions, whose `// lsp: error` lines say where they are published and whose queries answer from what was checked, and `broken_decls.goose`, whose struct, enum and functions have errors inside their declarations and whose import finds nothing., and `exemplar.goose`, generic functions nothing calls, whose queries answer from their exemplar checks (`docs/design/language_server.md` §11). |
 | `expected/` | Shared output and runtime-diagnostic expectations. |
 | `run_tests.py` | The Python test runner. |
 | `compiler_roots.cpp` | Root-set join laws, feedback on weakening, order-independent equality and the deliberate comparison projections; compiled and run in both native profiles. |
@@ -152,8 +154,9 @@ compiles; the benchmarks build that form too.
 
 The direct `test/threads/runtime_threads_lifecycle.c` regression checks allocations,
 mappings and Windows handles across worker churn, including unjoined workers,
-concurrent/repeated waits and children outliving their parents. It runs in both
-profiles. The normal suite also checks user-visible worker error diagnostics.
+concurrent/repeated waits, children outliving their parents and contained
+workers that abort. It runs in both profiles. The normal suite also checks
+user-visible worker error diagnostics.
 
 The `gfx/` tests exercise the gfx package (https://github.com/aardappel/goose_gfx,
 its `docs/gfx.md`). They
@@ -269,13 +272,19 @@ runner also checks the `--stacks` report of `thread_cap.goose` and
 `cycle_scratch_locals.goose` for its shape, not its counts. A fixture
 expecting a debug-only abort sets `GS_DEBUG=1` the same way, which makes
 every run of it a debug build: `cast_abort_location.goose` and
-`overflow_abort_location.goose` check the location a failing check reports.
+`overflow_abort_location.goose` check the location a failing check reports,
+and `thread_contained.goose` that the debug checks end a contained worker
+alone.
 
 Parser/resolver errors live in `test/errors/`; semantic errors live in
 `test/errors_tc/` and must get past parsing and resolution (`parsed ok`)
 before they fail. Each source declares one or
 more `// error: <diagnostic substring>` lines. The compiler must exit with 1,
-and all markers must occur in diagnostic headers, excluding echoed source.
+and all markers must occur in diagnostic headers or `in const for` expansion
+context lines, excluding echoed source. The compiler goes on past the
+errors it can recover from, so a fixture may print more errors than it
+declares; `test/errors_tc/recovery/` holds the fixtures that declare every
+one of theirs, in order (the table above).
 Use the specific rejection reason and relevant types/roots; omit source paths,
 line numbers and specification section numbers. These inline assertions replace
 the old compiler-error `.stderr` files.
@@ -315,6 +324,13 @@ The runner checks more than exit status and runtime output:
 | `member_parameters.goose` at O1 | Read the generated C: `walk`, which takes two slices and a `T[>..]&`, has each as two scalar C parameters (data pointer and count, header pointer and stack; spec C.3, `ParamFields`). Its runs pass slices, builders and pool references through calls, a recursion, a case-function dispatch, nested functions' free variables, a `simd` function, a `format` overload and an exported wrapper. |
 | `member_stores.goose` at O1 | Read the generated C: `store_links` stores to fields reached through references that cannot be rebound, with no index on the way, as C member stores rather than through a pointer taken first (`StableDest`); its runs check the stores, and that a right side rebinding the reference on the way still stores where the destination named before it ran (`evaluation_order.goose` has a right side writing the destination itself). |
 | `optimize.goose` at O0/O1/O2 | Inspect named tail-recursion bodies in `--specs`: supported integer accumulator/plain recursion becomes loops; modulo, floating-point reassociation, nonlocal-return frames and returns inside nested loops retain self calls. Mixed operators retain the ineligible call. Leading locals prevent base-case inlining from consuming these cases first. The `gb_` functions count the copies of their first statement: guarded base-case inlining copies the body once per self-call site where the test compares unassigned parameters, UFCS-spelled self-calls included, and not where it reads a global or a node, does arithmetic, or reads an assigned parameter. |
+| `docs/reference.md` | Every ```` ```goose ```` block of the language reference compiles (as written, or wrapped in a `main`), a block marked `// error` fails, none warns, and where the JIT runs, each complete program prints the block shown after it. `scripts/check_doc_examples.py` does the work in a process of its own, as the samples' runner does, writing the blocks under `build/gen/<profile>/doc_examples/`; its docstring has the markers a document uses for a block that is only a fragment or is compiled without being run. Run it by hand on any document: `python scripts/check_doc_examples.py docs/reference.md --run -v`. |
+
+| `doc_comments.py` | `goose --dump-docs` prints the documentation comments of a program's declarations, fields and variants: the run of `//` lines directly above each, less its indentation; a blank line, a block comment or any token ends a run, a comment after code starts none, and a banner followed by a blank line belongs to nothing. The program still checks and roundtrips. |
+| `lsp_protocol.py` | `goose lsp` driven over its own protocol: `--probe`, then a client of the runner's initializes with `test/lsp/basics.goose` as an entry file and the VS Code extension's commands, opens it, waits for its diagnostics (none) and asks what its `// lsp:` lines say to ask: hovers that must contain a text, definitions that must land at a place or in a file, document symbols, signature help with its active parameter, semantic token types at a place, the number of references of a name, renames that must make a number of edits (each to the name's leaf alone) or be refused, inlay hints with their text at a place, folding ranges by their lines, selection range chains that must hold a range and nest, code lenses by line and title (an instantiation count with as many lines as its data and the command that lists them, "Run" with the file's URI, "not instantiated" a title alone), completions that must offer or lack a label (`complete.goose`, whose last statement is the `p.` an editor has when it asks), and a workspace symbol from the imported `helper.goose`, and checks the analysis asked the client to refresh its lenses, semantic tokens and inlay hints. Then a burst of edits into an error and back, whose diagnostics must follow the last text, with the analysis a change interrupts cancelled; then `recovery.goose` and `broken_decls.goose` opened as roots of their own, with every error published and the queries answered; then `exemplar.goose` and `errors_tc/recovery/exemplar_unchecked.goose`, whose generic functions nothing calls answer from their exemplars, the second's with no diagnostic though no binding could make their bodies right (its one error is main's, as `goose check` finds); and a clean shutdown. |
+| `lsp_sweep.py` | Not a section of the runner but a script beside it: a robustness and latency sweep of `goose lsp` over the repository's Goose programs (every sample, the goose_in_goose bootstrap, every stdlib module, every positive fixture, every `errors/` and `errors_tc/` fixture), each opened as a root of its own: its diagnostics awaited, then hover, definition, completion and signature help asked at every identifier start and after every `.`, semantic tokens, symbols, folding, inlay hints and code lenses once, a burst of ten random one-character edits with their diagnostics awaited, and the text put back, whose diagnostics must be the first ones again. It fails on a server exit, an error reply, a request over 2 s or a server that stops answering, and prints the slowest files and requests; `--quick` sweeps a handful of files in a second or two. The baseline is in `docs/design/language_server.md` §12. |
+| `packages_git.py` | Besides the fetches, `goose check --offline` rejects a package not in the cache at its import, naming `goose fetch`, without fetching, and accepts it once fetched. |
+| `diagnostics_json.py` | `goose check --diagnostics json` prints an array with one object per error or warning, whose `text` is what the text mode printed on stderr, with the progress lines on stderr instead of stdout. A lexer error is at its caret's column, one byte wide; a typecheck error ranges over the node it is at, with its instantiation chain's entries at the calls they name; a warning has a range too; an import error covers the whole import; a `checkfree` function's kept checks are several errors at once; an error with no place in the program is its text alone. |
 
 ## Fixture audit
 

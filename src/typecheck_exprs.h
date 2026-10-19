@@ -22,6 +22,7 @@ inline TypeCheck::LVal TypeCheck::CheckLValue(Node *n) {
         RecordVal(n, v);
     };
     if (auto id = Is<Ident>(n)) {
+        if (!id->expansionerror.empty()) Error(id, string(id->expansionerror));
         auto vd = LookupVar(id->name, id->ns, n);
         if (!vd) {
             if (auto kind = ScopeNameKind(id->name))
@@ -58,6 +59,7 @@ inline TypeCheck::LVal TypeCheck::CheckLValue(Node *n) {
         return lv;
     }
     if (auto d = Is<Dot>(n)) {
+        if (d->incomplete) IncompleteDot(d);
         auto lv = LValueBase(d->obj);
         auto base = lv.type;
         DerefLValue(lv, d->obj);
@@ -168,6 +170,9 @@ inline void TypeCheck::DerefLValue(LVal &lv, Node *at) {
 // is when its initializer runs (§11.1).
 inline void TypeCheck::RequireAssigned(VarDef *vd, Node *at) {
     if (vd->assigned) return;
+    // Its initializer's check failed and reported why: a use is no error
+    // of its own.
+    if (failedglobals.count(vd)) throw Abandoned {};
     auto order = vd->isglobal
                      ? cat(": globals initialize in declaration order, imported files first "
                            "(§11.1), so ", vd->name, " has no value until its initializer at ",
@@ -602,6 +607,9 @@ inline VarDef *TypeCheck::HolderRootOf(const Val &v) { return ContentsOf(v).Root
 // Field / builtin-property resolution on an lvalue path.
 inline void TypeCheck::ResolveMemberLValue(LVal &lv, Dot *d) {
     auto t = lv.type;
+    if (d->accessorowner && !TypeEq(ast.PlainOf(t), d->accessorowner))
+        Error(d, cat("const for accessor belongs to ", TypeStr(d->accessorowner),
+                     ", not ", TypeStr(t)));
     // Steps the path into the named field of a field run; a frame
     // object's resizable tail has a header of its own to address (C.2).
     auto step = [&](const vector<Field> &fields, const vector<TypeExpr *> &ftypes,
@@ -626,6 +634,7 @@ inline void TypeCheck::ResolveMemberLValue(LVal &lv, Dot *d) {
     if (t->kind == TY_STRUCT) {
         auto inst = GetStructInst(t);
         if (step(inst->st->fields, inst->ftypes, FieldsInFrame(d))) return;
+        if (inst->st->broken) throw Abandoned {};
         Error(d, cat("struct ", inst->st->name, " has no field ", d->name));
     }
     if (t->kind == TY_VARIANT) {
@@ -634,6 +643,17 @@ inline void TypeCheck::ResolveMemberLValue(LVal &lv, Dot *d) {
         if (step(t->var->variant->fields, inst->vftypes[vi], false)) return;
         Error(d, cat("variant ", inst->en->name, ".", t->var->variant->name,
                      " has no field ", d->name));
+    }
+    // A member of an exemplar's opaque value (CheckExemplars) is one more,
+    // of a type that all of them share: what it is, only a call could say.
+    if (IsOpaque(t)) {
+        if (t->cq) lv.writable = false;
+        lv.letbound = lv.fotail = lv.isvarint = false;
+        lv.type = OpaqueMember();
+        lv.var = nullptr;
+        lv.fromstorage = true;
+        lv.isslot = true;
+        return;
     }
     Error(d, cat("no field access on a value of type ", TypeStr(t)));
 }
@@ -954,6 +974,10 @@ inline Val TypeCheck::CheckValueAt(Node *&n, TypeExpr *expected, Dest d, bool ca
 inline Val TypeCheck::Operand(Node *n) {
     auto v = DecayRef(CheckV(n, nullptr));
     n->exprtype = v.type;
+    // An operator computes with the number an index type holds (§3.11), so
+    // nothing it computes is one. The operand keeps its type for the
+    // bounds-check pass, which an index operand's is for.
+    if (IsIndexT(v.type)) v.type = ast.NoIndex(v.type);
     return v;
 }
 
@@ -973,6 +997,10 @@ inline void TypeCheck::MustFit(Val &v, Node *n, TypeExpr *dt) {
             RelyOnNamed(v, n);
         }
     } else {
+        // A type naming nothing fits nothing, which is the consequence of
+        // the error reported at the name.
+        if (!ast.unknowntypes.empty() && (MentionsUnknown(dt) || MentionsUnknown(v.type)))
+            throw Abandoned {};
         if (!fitfail.empty()) Error(n, fitfail);
         auto got = dt->kind == TY_REF ? StorageType(v) : v.type;
         string hint;
@@ -1144,6 +1172,22 @@ inline bool TypeCheck::FitsAt(Val &v, TypeExpr *dt) {
     switch (dt->kind) {
         case TY_INT:
             if (t->kind != TY_INT) return false;
+            // An index or bound type takes only a value of one of the same
+            // array (an index where a bound is wanted), at most as wide: no
+            // constant, and no computed value, says anything about the
+            // array's length (§3.11).
+            if (dt->ix) {
+                if (t->ix && t->ix->arr == dt->ix->arr && (dt->ix->upto || !t->ix->upto) &&
+                    ImplicitInt(t->intstorage, dt->intstorage)) {
+                    v.type = dt;
+                    return true;
+                }
+                fitfail = cat("expected a value of type ", TypeStr(dt), ", got ", TypeStr(t),
+                              v.ck == CK_INT || v.litint ? " constant" : "",
+                              " (only `x as ", TypeStr(dt), "` makes one, checking x against ",
+                              dt->ix->arr->name, ".len, §3.11)");
+                return false;
+            }
             // A literal parameter adapts to any integer type; whether the
             // literal fits is each call site's question (§7.7).
             if (v.unsized) {
@@ -1335,6 +1379,19 @@ inline TypeExpr *TypeCheck::UnifyBranch(TypeExpr *a, TypeExpr *b, Node *at, bool
     if (!b) return a;
     if (TypeEq(a, b)) return a;
     if (TopConstEq(a, b)) return a->cq ? a : b;   // Read-only in one branch: in both.
+    if (a->kind == TY_INT && b->kind == TY_INT && (a->ix || b->ix)) {
+        // Index or bound types of one array join at the wider width, as a
+        // bound if either is one; anything else joins as the plain
+        // integers they are (§3.11).
+        if (a->ix && b->ix && a->ix->arr == b->ix->arr) {
+            auto upto = a->ix->upto || b->ix->upto;
+            if (ImplicitInt(a->intstorage, b->intstorage))
+                return ast.IndexTypeOf(b->intstorage, b->ix->arr, upto, at->line);
+            if (ImplicitInt(b->intstorage, a->intstorage))
+                return ast.IndexTypeOf(a->intstorage, a->ix->arr, upto, at->line);
+        }
+        return UnifyBranch(ast.NoIndex(a), ast.NoIndex(b), at, wantvalue);
+    }
     if (a->kind == TY_INT && b->kind == TY_INT) {
         if (ImplicitInt(a->intstorage, b->intstorage)) return b;
         if (ImplicitInt(b->intstorage, a->intstorage)) return a;
@@ -1740,7 +1797,14 @@ inline Val TypeCheck::CheckLogical(Binary *b) {
     }
     for (auto [gv, gn] : mid.globals)
         if (gn && !gv->narrowed) b->rightkills.push_back(gv);
+    // What it leaves emptied may not be, but what it ended stays ended.
+    auto rightkills = cur.kills;
     RestoreFlow(snap);
+    erase_if(cur.kills, [&](const Kill &k) {
+        return none_of(rightkills.begin(), rightkills.end(), [&](const Kill &l) {
+            return l.container == k.container && l.base == k.base && l.path == k.path;
+        });
+    });
     for (auto kv : b->rightkills) kv->narrowed = nullptr;
     for (auto v : mayassign) v->maybeassigned = true;
     Val v;
@@ -1752,6 +1816,15 @@ inline Val TypeCheck::CheckBinaryResult(Binary *b, Val &lv, Val &rv) {
     NoUntypedEmptyArray(lv, b->left, TName(b->op));
     NoUntypedEmptyArray(rv, b->right, TName(b->op));
     auto lt = LoadType(lv.type), rt = LoadType(rv.type);
+    // An exemplar's opaque operand (CheckExemplars) supports any operator:
+    // a comparison is a bool, anything else is of the opaque type.
+    if (IsOpaque(lt) || IsOpaque(rt)) {
+        Val v;
+        auto compare = b->op == T_EQ || b->op == T_NEQ || b->op == T_LT || b->op == T_GT ||
+                       b->op == T_LTEQ || b->op == T_GTEQ;
+        v.type = compare ? ast.booltype : IsOpaque(lt) ? lt : rt;
+        return v;
+    }
     auto numeric = [](TypeExpr *t) { return IsIntT(t) || t->kind == TY_FLT; };
     if (b->op == T_EQ || b->op == T_NEQ) {
         Val v;
@@ -2169,6 +2242,9 @@ inline bool TypeCheck::Converts(const Val &v, TypeExpr *t) {
     auto vt = LoadType(v.type);
     if (t->kind == TY_INT) {
         if (vt->kind != TY_INT) return false;
+        if (t->ix)
+            return vt->ix && vt->ix->arr == t->ix->arr && (t->ix->upto || !vt->ix->upto) &&
+                   ImplicitInt(vt->intstorage, t->intstorage);
         if (vt->intstorage == t->intstorage) return true;
         if (v.ck == CK_INT || (v.litint && t->intstorage != IS_VARINT))
             return v.litint ? ConstsFit(v, t->intstorage)
@@ -2391,8 +2467,9 @@ inline void TypeCheck::CastVerdict(const CastAlt &a, const string &reason,
     w.cast = a.cast->Origin();
     w.redundant = !reason.empty();
     if (w.redundant) {
-        w.text = cat("redundant `as", a.cast->unchecked ? "! " : " ", TypeStr(a.cast->totype),
-                     "`: ", reason);
+        w.diag.where = LocOf(a.cast);
+        w.diag.message = cat("redundant `as", a.cast->unchecked ? "! " : " ",
+                             TypeStr(a.cast->totype), "`: ", reason);
         w.dependson = dependson;
     }
     if (WarningsHeld()) cur.pendingwarnings.push_back(std::move(w));
@@ -2436,10 +2513,7 @@ inline void TypeCheck::ReportRedundantCasts() {
         return tuple(l.fileidx, l.line, i);
     };
     sort(out.begin(), out.end(), [&](size_t i, size_t j) { return key(i) < key(j); });
-    for (auto i : out)
-        fputs(cat(Where(castverdicts[i].cast->line), ": warning: ", castverdicts[i].text, "\n")
-                  .c_str(),
-              stderr);
+    for (auto i : out) ast.Warn(castverdicts[i].diag);
 }
 
 // A name in a compile-time size, capacity or fill count, or in an integer
@@ -2452,6 +2526,7 @@ inline void TypeCheck::ReportRedundantCasts() {
 // parameter default, which names what a top-level declaration would, a name
 // its scope makes something else is an error as well (DefaultScopeName).
 inline void TypeCheck::ConstName(Ident *id, const char *what) {
+    if (!id->expansionerror.empty()) Error(id, string(id->expansionerror));
     if (auto vd = LookupVar(id->name, id->ns); vd && !vd->isglobal)
         Error(id, cat(what, " ", id->name, " names a local variable, not a constant"));
     if (auto kind = ScopeNameKind(id->name))
@@ -2518,11 +2593,11 @@ inline int64_t TypeCheck::FillCount(Node *n) {
 inline bool TypeCheck::ConstIntValue(Node *n, Val &v, bool &literal,
                                      set<VarDecl *> &visiting, ConstUse *use) {
     if (auto i = Is<IntLit>(n)) {
-        v.type = ast.inttypes[i->uns ? IS_U64 : IS_I64];
+        v.type = i->fixedtype ? i->fixedtype : ast.inttypes[i->uns ? IS_U64 : IS_I64];
         v.ck = CK_INT;
         v.ival = i->val;
         v.uns = i->uns;
-        literal = true;
+        literal = !i->fixedtype;
         return true;
     }
     if (auto id = Is<Ident>(n)) {
@@ -2736,6 +2811,7 @@ inline Val TypeCheck::CheckVariantConst(Dot *d, SEnum *en) {
     auto t = ast.EnumOf(en, {}, false, d->line);
     auto inst = GetEnumInst(t);
     auto found = en->FindVariant(d->name);
+    if (!found && en->broken) throw Abandoned {};
     // A deferred type's one written variant is its empty call (deferred.h).
     if (en->isdeferred && found != &en->variants[0])
         Error(d, cat(en->qname, " is a deferred type, whose only named value is ", en->name,
@@ -2888,13 +2964,18 @@ inline TypeCheck::LitDeep TypeCheck::CheckInits(StructLit *sl, vector<Field> &fi
     auto pos = 0;
     for (auto &fi : sl->inits) {
         auto idx = -1;
+        if (fi.accessorowner && !TypeEq(ast.PlainOf(selft), fi.accessorowner))
+            Error(fi.val, cat("const for accessor belongs to ", TypeStr(fi.accessorowner),
+                              ", not ", TypeStr(selft)));
         if (named) {
             for (auto i = 0; i < (int)fields.size(); i++)
                 if (!fields[i].ispad && fields[i].name == fi.name) { idx = i; break; }
+            if (idx < 0 && LacksByError(selft)) throw Abandoned {};
             if (idx < 0) Error(fi.val, cat(what, " has no field ", fi.name));
             if (got[idx]) Error(fi.val, cat("duplicate initializer for field ", fi.name));
         } else {
             while (pos < (int)fields.size() && fields[pos].ispad) pos++;
+            if (pos >= (int)fields.size() && LacksByError(selft)) throw Abandoned {};
             if (pos >= (int)fields.size())
                 Error(fi.val, cat("too many initializers for ", what));
             idx = pos++;
@@ -2924,6 +3005,8 @@ inline TypeCheck::LitDeep TypeCheck::CheckInits(StructLit *sl, vector<Field> &fi
                                   " (it has no declared default, and ", why, ")"));
                 fi.val = DefaultValue(ftypes[i], sl->line);
             }
+            // No value could be written for a field of a type naming nothing.
+            else if (!ast.unknowntypes.empty() && MentionsUnknown(ftypes[i])) throw Abandoned {};
             else Error(sl, cat("missing initializer for field ", fields[i].name, " of ", what,
                                " (it has no default)"));
         }
@@ -3017,14 +3100,21 @@ inline void TypeCheck::CheckSelfInit(Node *n, TypeExpr *ft, TypeExpr *selft) {
 // Statements.
 
 inline void TypeCheck::CheckStmts(Block *b) {
+    // The parser lost a statement here (Block::brokenat), which it reported:
+    // what the block holds from there on was not what the program meant,
+    // and the body ends silently.
+    auto lost = [&](size_t i) { return (int)i == b->brokenat; };
     for (size_t i = 0; i < b->stmts.size(); i++) {
         if (!reachable) {
             b->stmts.resize(i);
             break;
         }
+        if (lost(i)) throw Abandoned {};
         blockpos.back().idx = i;
+        if (auto cf = Is<ConstFor>(b->stmts[i])) b->stmts[i] = ExpandStatements(cf);
         CheckStmt(b->stmts[i]);
     }
+    if (lost(b->stmts.size())) throw Abandoned {};
     // Drop the unreachable suffix (including the tail), so later passes never
     // see unchecked nodes. Function bodies are specialization clones; unknown
     // recursive calls may return, so only proven exits can prune them.
@@ -3201,6 +3291,7 @@ inline bool TypeCheck::UsedAfter(VarDef *v) {
 }
 
 inline void TypeCheck::CheckStmt(Node *n) {
+    ast.CheckCancel();
     // A statement inside a returned value's block is no part of that value:
     // the function's locals outlive it.
     FlagScope rs(inreturn, false);

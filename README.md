@@ -6,8 +6,8 @@ A memory-safe systems language with no heap allocator, garbage collector, or
 lifetime annotations. In this repository's benchmarks, Goose runs faster than
 C++ and Rust while using less memory.
 
-[Tutorial](docs/tutorial.md) · [Specification](docs/goose_spec.md) ·
-[Packages](docs/packages.md) ·
+[Tutorial](docs/tutorial.md) · [Reference](docs/reference.md) ·
+[Specification](docs/goose_spec.md) · [Packages](docs/packages.md) ·
 [Samples](samples/README.md) · [Benchmarks](bench/results.md) ·
 [Standard library](docs/stdlib.md)
 
@@ -15,6 +15,9 @@ Goose has syntax familiar to C and Rust programmers, but **there is no heap**.
 Every dynamic value lives inline on a data stack managed by the compiler.
 Growth advances a pointer, and memory is freed when its scope ends. The
 language's type and lifetime rules make this memory model safe to use.
+
+[![Discord Chat](https://img.shields.io/badge/chat-discord-blue)](https://discord.gg/397eZdbnsR)
+[![Twitter Follow](https://img.shields.io/twitter/follow/wvo.svg?style=social)](https://twitter.com/wvo)
 
 ## Why Goose
 
@@ -69,7 +72,8 @@ language's type and lifetime rules make this memory model safe to use.
   TinyCC backend compiles and runs a program in-process, with no build step.
 
 The [tutorial](docs/tutorial.md) walks through all of this by example, the
-[specification](docs/goose_spec.md) has the exact rules, and the
+[reference](docs/reference.md) covers the whole language topic by topic,
+the [specification](docs/goose_spec.md) has the exact rules, and the
 [benchmarks](bench/results.md) have the numbers, losses included.
 
 ## Features
@@ -345,6 +349,22 @@ with no references at any depth. That is cheap because a flat Goose value is
 contiguous: a job or a result carries real data, pixels included, and crossing
 is a `memcpy`.
 
+A failed check or `abort` in a worker started with `thread_spawn_contained`
+ends only that worker. Its message goes to whoever waits for it, not to
+stderr, so a supervisor can log it and start another:
+
+```goose
+var why: u8[>..] = [];
+while !thread_wait(thread_spawn_contained(serve, attempt), why) {
+    log(why);                                       // "assert failed (serve.goose:12)"
+    why.clear();
+    attempt++;
+}
+```
+
+The first `thread_wait(id, msg)` for a worker takes the message; a caller
+that doesn't ask for it loses it.
+
 ### Plain C in, plain C out
 
 ```goose
@@ -366,14 +386,15 @@ per-object teardown, contiguous data, narrow links, and enums sized for the
 variant they contain. Every index is bounds-checked, and the compiler removes
 checks it can prove unnecessary. An `assert` on a slice length often lets a
 kernel eliminate its remaining checks and vectorize. `--bce-lines` reports
-the checks that remain. Benchmark measurements use whole-process wall-clock
-time, including teardown.
+the checks that remain. `checkfree fn` rejects a kernel if any bounds check
+survives; index types let graph edges retain validation done during construction.
+Benchmark measurements use whole-process wall-clock time, including teardown.
 
 | Geometric mean over 16 benchmarks | vs idiomatic C++ | vs hand-optimized C++ | vs best safe Rust |
 |---|---:|---:|---:|
-| speed, MSVC backend | 3.30x | 1.16x | 1.04x |
-| speed, clang backend | 3.35x | 1.19x | 1.12x |
-| peak memory | 1.93x less | 1.30x less | 1.24x less |
+| speed, MSVC backend | 3.51x | 1.24x | 1.13x |
+| speed, clang backend | 3.54x | 1.26x | 1.19x |
+| peak memory | 1.95x less | 1.32x less | 1.25x less |
 
 The [summary](bench/summary.md) explains the gains and losses;
 [results.md](bench/results.md) has every measurement, and
@@ -395,6 +416,25 @@ The [summary](bench/summary.md) explains the gains and losses;
   next owner put there: a logic bug, never memory corruption.
 
 [Tutorial §18](docs/tutorial.md#18-what-it-costs-you) is the full list.
+
+## Install a release
+
+Prebuilt compilers for Windows (x64), Linux (x64) and macOS (Apple silicon
+and Intel) are on the [releases page](https://github.com/aardappel/goose/releases),
+with the graphics, audio, ui and physics packages compiled in. Unpack one
+anywhere and put its directory on PATH: the compiler finds the standard
+library, TinyCC's runtime and the packages beside itself, and keeps what it
+builds under `~/.goose` (`GOOSE_HOME`). The archive also holds these docs, the
+samples and the VS Code extension.
+
+Running a program in-process (`goose file.goose`) needs nothing else on
+Windows. On Linux it needs the C library's headers (`libc6-dev`, or
+`glibc-devel`); on macOS, the SDK of the Xcode command line tools
+(`xcode-select --install`). `goose build` also needs a C compiler: Visual
+Studio 2022 or later, or clang, on Windows; gcc or clang elsewhere. The Linux
+compiler needs glibc 2.35 or later (Ubuntu 22.04, Debian 12), the macOS one
+macOS 13.3 or later. macOS keeps a downloaded archive's files from running
+until `xattr -dr com.apple.quarantine` is run on the unpacked directory.
 
 ## Build and run
 
@@ -523,16 +563,27 @@ python samples/run_samples.py
 ```
 
 For editing, the [VS Code extension](vscode/README.md) gives syntax
-highlighting, compiler checks on save and one-key runs through the JIT:
+highlighting, the compiler's language server (`goose lsp`: errors as you
+type, hover, go to definition, completion, rename, symbols) and one-key runs
+through the JIT:
 
 ```bash
 code --install-extension vscode/goose-language.vsix
 ```
 
+Other editors can run `goose lsp` themselves; [editors](docs/editors.md)
+has the configuration for Neovim, Helix and Emacs.
+
 ## Documentation
 
+* [Documentation index](docs/index.md): the map of everything below, and
+  the root of the documentation site built from these files
+  ([how](docs/site/README.md)).
 * [Tutorial](docs/tutorial.md): the friendly introduction, by example. Read
   this first.
+* [Language reference](docs/reference.md): every feature, topic by topic,
+  with a compiling example for each: the whole language, written to be
+  read.
 * [Language specification](docs/goose_spec.md): the exact rules, when you want
   to know why something did not compile.
 * [Samples](samples/README.md): thirty-one complete programs in reading

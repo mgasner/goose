@@ -100,6 +100,21 @@ inline bool CodeGen::StraightCode(Node *n) {
     return ok;
 }
 
+// Whether n, where it runs, calls a recursive function: a call the C compiler
+// cannot inline away, across which everything live is in a callee-saved
+// register or spilled.
+inline bool CodeGen::CallsRecursive(Node *n) {
+    if (!n) return false;
+    if (auto c = Is<Call>(n)) {
+        if (c->spec && c->spec->sf && c->spec->sf->isrec) return true;
+        for (auto s : c->dispatch)
+            if (s && s->sf && s->sf->isrec) return true;
+    }
+    auto found = false;
+    RunChildren(n, [&](Node *ch) { found = found || CallsRecursive(ch); });
+    return found;
+}
+
 // Whether the code being emitted is in a loop StraightCode accepts, the
 // innermost one around it in this function.
 inline bool CodeGen::InStraightLoop() {
@@ -120,6 +135,21 @@ inline bool CodeGen::LoopDivisible(Binary *b) {
     if (!IsUnsigned(t->intstorage) && !b->nonneg) return false;
     auto rt = b->right->exprtype;
     return rt && rt->kind == TY_INT && !DivisorKey(b->right).empty();
+}
+
+// Whether a LoopDivisible division's operands, of the left one's type, fit
+// in 32 bits, for a 32-bit magic: the high half of a 32x32 product, which a
+// C compiler vectorizes, where it keeps a 64x64 one scalar.
+inline bool CodeGen::NarrowDivision(Binary *b) {
+    return IntBits(b->left->exprtype->intstorage) <= 32;
+}
+
+// What HoistDivisors files a LoopDivisible division's magic under: its
+// divisor's DivisorKey, distinct for a NarrowDivision, which takes a 32-bit
+// magic.
+inline string CodeGen::DivisionKey(Binary *b, const VarDef **root, bool *path) {
+    auto k = DivisorKey(b->right, root, path);
+    return NarrowDivision(b) ? cat(k, " u32") : k;
 }
 
 // What a divisor a loop may fix is known by, or "" where it is none: an
@@ -146,7 +176,9 @@ inline string CodeGen::DivisorKey(Node *n, const VarDef **root, bool *path) {
         return cat(k, ".", d->fieldidx);
     }
     if (auto c = Is<AsCast>(n)) {
-        if (!isint(c->totype) || !isint(c->child->exprtype)) return "";
+        // A conversion into an index type checks against its array, which
+        // no hoisted divisor condition stands in for (§3.11).
+        if (!isint(c->totype) || !isint(c->child->exprtype) || c->totype->ix) return "";
         auto k = DivisorKey(c->child, root, path);
         if (k.empty()) return "";
         return cat("(", k, c->unchecked ? " as! " : " as ", IntStorageName(c->totype->intstorage),
@@ -160,7 +192,7 @@ inline string CodeGen::DivisorKey(Node *n, const VarDef **root, bool *path) {
 // of them would fail (or stays "1"), and the value is used only under it.
 inline string CodeGen::DivisorValue(Node *n, string &ok) {
     auto c = Is<AsCast>(n);
-    if (!c) return GenX(n);
+    if (!c || c->totype->ix) return GenX(n);
     auto x = DivisorValue(c->child, ok);
     auto st = c->child->exprtype;
     auto is = c->totype->intstorage;
@@ -297,7 +329,7 @@ inline vector<string> CodeGen::HoistDivisors(Block *loopbody, Node *cond,
     for (auto b : divs) {
         const VarDef *root = nullptr;
         auto path = false;
-        auto key = DivisorKey(b->right, &root, &path);
+        auto key = DivisionKey(b, &root, &path);
         if (divmagic.count(key) || inner.count(root) || root->captured || root->refwrite ||
             nrvo.count(root))
             continue;
@@ -309,12 +341,15 @@ inline vector<string> CodeGen::HoistDivisors(Block *loopbody, Node *cond,
         auto ok = string("1");
         auto x = DivisorValue(b->right, ok);
         auto v = T(), m = T(), more = T();
+        auto narrow = NarrowDivision(b);
+        auto w = narrow ? "uint32_t" : "uint64_t";
+        auto gen = narrow ? "gs_divu32_gen(" : "gs_divu_gen(";
         L("uint8_t ", more, ";");
-        L("uint64_t ", v, " = (uint64_t)(", x, ");");
-        if (ok == "1") L("uint64_t ", m, " = gs_divu_gen(", v, ", &", more, ");");
-        else L("uint64_t ", m, " = (", ok, ") ? gs_divu_gen(", v, ", &", more, ") : (", more,
+        L(w, " ", v, " = (", w, ")(", x, ");");
+        if (ok == "1") L(w, " ", m, " = ", gen, v, ", &", more, ");");
+        else L(w, " ", m, " = (", ok, ") ? ", gen, v, ", &", more, ") : (", more,
                " = GS_DIVU_NONE, 0);");
-        divmagic[key] = { v, m, more };
+        divmagic[key] = { v, m, more, narrow, narrow && ok == "1" };
         added.push_back(key);
     }
     return added;
@@ -564,6 +599,7 @@ inline void CodeGen::LandValue(const string &stk, const string &top0, const stri
 // A break's value, or a return's leaving an inlined body, for scope si.
 inline void CodeGen::GenExitValue(Node *val, int si) {
     auto d = cscopes[si].dst;
+    if (d.k == DK_BRANCH) return GenBranch(val, d.when, d.s, d.exitscope);
     if (d.k != DK_STACK || !NrvoBoundAt(val, d.s, d.lenlv)) NoSelfRelCopy(val);
     auto start = d.k == DK_STACK ? ExitStart(val, d.s, d.lenlv, cscopes[si].open0) : "";
     GenAny(val, d);
@@ -680,9 +716,9 @@ inline void CodeGen::BindLocal(VarDef *d, Node *init, bool forlocal) {
                        RelValue(init));
         return;
     }
-    // Literals holding relative references construct into the variable
-    // itself rather than through an initializer copy.
-    if (IsCtl(init) || Is<Call>(init) ||
+    // Literals holding relative references, and slices, construct into the
+    // variable itself rather than through an initializer copy.
+    if (IsCtl(init) || Is<Call>(init) || (Is<SliceExpr>(init) && t->kind == TY_SLICE) ||
         ((Is<StructLit>(init) || Is<ArrayLit>(init)) && HasRelRef(t))) {
         L(CT(t), " ", name, ";");
         GenAny(init, Dst { DK_LVALUE, name, t });
@@ -753,7 +789,7 @@ inline void CodeGen::GenRebind(Assign *a, Loc lv) {
     }
     assert(lv.val);
     if (Is<NullLit>(a->rhs)) {
-        if (IsResz(lv.t->ref->sub)) L("memset(&", lv.s, ", 0, sizeof(", lv.s, "));");
+        if (IsResz(lv.t->ref->sub)) L("GS_MEMZERO(&", lv.s, ", sizeof(", lv.s, "));");
         else L(lv.s, " = NULL;");
         return;
     }
@@ -936,7 +972,7 @@ inline void CodeGen::EmitPrefixPatch(const string &pref, IntStorage ls, const st
     L("int64_t ", ms, " = gs_uleb_write(", tmp, ", (uint64_t)(", count, "));");
     L("memmove((", elems, ") + ", ms, " - 1, ", elems, ", (size_t)(", Top(stk), " - (",
       elems, ")));");
-    L("memcpy(", pref, ", ", tmp, ", (size_t)", ms, ");");
+    L("GS_MEMCPY(", pref, ", ", tmp, ", (size_t)", ms, ");");
     L(TopW(stk), " += ", ms, " - 1;");
     ind--;
     L("}");

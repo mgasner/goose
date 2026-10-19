@@ -26,6 +26,8 @@
 This working specification defines Goose's syntax, semantics, and compilation
 model. It provides the detail needed to implement the language, without the
 formal structure of an ISO specification. Appendix B lists unresolved items.
+A readable account of the same rules, with an example for each, is
+[the language reference](reference.md).
 
 Priorities, in order: **Speed, Safety, Expressiveness.**
 Safety here means: no out-of-bounds access, no access to memory at a type
@@ -905,6 +907,81 @@ but writes through a slice are legal when its provenance is writable (§9.5).
 * A slice of a grow-only resizable taken before growth remains valid (it just
   doesn't see the new elements).
 
+### 3.11 Index and bound types
+
+An *index type* `uN in a` is an unsigned integer that is below `a.len`
+wherever it can be observed. A *bound type* `uN upto a` is one that is at
+most `a.len`: the end of a range. Indexing `a` with an index of `a` needs no
+check, and an index stored in data keeps that guarantee wherever it travels.
+This is how an index loaded out of one array (a graph's edge targets, a
+mesh's index buffer) is checked once, where it enters the program, rather
+than wherever it is used (`docs/design/index_types.md`).
+
+```goose
+struct Node { lo: u32 upto edges, hi: u32 upto edges }
+var nodes: Node[>..] = [];
+type NodeId = u32 in nodes;
+var edges: NodeId[>..] = [];
+```
+
+* `uN` is `u8`, `u16`, `u32` or `u64`. `a` names a global `var` (or
+  `reusable var`) of a grow-only type `T[>..]` with fixed-size elements,
+  resolved where the type is written, as a pool's name is (§3.9). Anything
+  else is a compile error: a local or parameter has no name where a type
+  is declared, any other array kind can shrink, and a sequential array
+  cannot be indexed.
+* The array is part of the type's identity: `u32 in nodes` is neither
+  `u32`, `u16 in nodes`, `u32 upto nodes` nor `u32 in edges`. The value is
+  the plain integer; the C type is that of `uN`.
+* An index type takes no postfix of its own: an array of them is
+  `(u32 in nodes)[>..]`, or an alias's `NodeId[>..]`. A `for` binder's
+  written type is followed by the loop's `in`, so one there is
+  parenthesized too: `for w: (u32 in nodes) in ...`.
+* **Making one.** `x as (uN in a)`, for `x` of any integer type, aborts
+  unless `0 <= x < a.len`, with the error `a[x]` would give, in every
+  build: it is a bounds check, which the bounds-check pass elides where it
+  would elide `a[x]` (§10.5). `x as (uN upto a)` is the same with
+  `x <= a.len`. A value that `uN` cannot hold then converts as any `as`
+  does (§6.3), and what it wraps to is still in range. `as!` cannot make
+  one. A wider width of one array's type converts implicitly (`u16 in a` to
+  `u32 in a`), and so does an index type to the bound type of its array;
+  the other directions take an `as`, which checks. A constant is never of
+  an index type and never adapts to one, since nothing about `a.len` is
+  known where the program is compiled.
+* **Loops.** `for i in lo..hi` whose bounds are both of index or bound types
+  of one array `a` gives `i` the index type of `a` at their joined width,
+  since `lo <= i < hi <= a.len`; so does a count `for i in n` of an index or
+  bound type.
+* **As a number.** A value converts implicitly to its plain integer type,
+  and from there as that type does (§6.3). Operators compute with the plain
+  value, so `w + 1`, `w << 3`, `-w` and `w & m` are plain integers.
+  Compound assignment and `++`/`--` on a place of an index type are errors.
+* **Passing through.** Declarations without a written type, parameters,
+  results, fields, ADT payloads and elements carry the type, and a store
+  into one takes only a value of it. A branch, `match` or block value has
+  one array's index or bound type where every branch has one (at the
+  widest width, and a bound if any branch is one), and otherwise the join
+  of the plain integers (`if c { w } else { 0 }` is a `u32`). A reference
+  or slice to index-typed storage is `(u32 in a)&` or `(u32 in a)[:]`,
+  never a `u32&` or `u32[:]`, which could write any `u32`. A type argument
+  may be an index type, and each instantiation is checked with it (§7.7).
+* **No default.** An index type has no default value: `default<T>()`, a
+  literal's `..`, a field default and a global without an initializer all
+  need one, and an empty array has no index at all.
+* **Never shrunk.** An array an index or bound type names is never shrunk:
+  `pop`, `pop_n`, `resize`, `clear` and a whole assignment of it are errors
+  anywhere, directly or through a reference parameter, as is a shrink
+  through a reference that may only bound such an array's storage (§9.5).
+  Its length only grows, so a value once in range stays in range.
+* **What stays out.** `format` and `to_bytes(a, out)` do not write into an
+  array of `u8 in x`, which is no byte array. `from_bytes` checks each index
+  in an image against its array's length when it verifies the image, which
+  it rejects otherwise. `qput`, `qget`, `qpoll`, `qlimit` and `thread_spawn`
+  arguments take no type holding an index type: each thread program's copy
+  of the array grows on its own (§11.2). An `extern fn` or `export fn`
+  signature holds none either, since C code is not checked against the
+  array.
+
 ---
 
 ## 4. Values, copying, and assignment
@@ -1082,7 +1159,7 @@ Literal forms usable in any construction context:
   code (a `sum`'s accumulator, a hash table's empty slots). A type that
   contains a non-optional reference without a declared default has no
   default value, and `default<T>()` for it is a compile error. (The zero
-  value a missed `qpoll` yields, §11.2, is the all-zero-bytes value; the two
+  value a missed `qpoll` or `qget<T>(ms)` yields, §11.2, is all zeros; the two
   agree except where a field declares a non-zero default.) A type that is
   not fixed-size has a default value too, which a literal's `..` gives a
   field though `default<T>()` does not: an array other than a fixed one is
@@ -1276,6 +1353,32 @@ or to a holder, the storage whose tail shrinks among them, counts as what it
 refers to: while the reference is live, so is whatever that slice or holder
 may refer into.
 
+A whole assignment of a value that holds no references — `refs = []`,
+`s.refs = []`, a struct literal with none in it — *empties* the part of
+the holder it writes: what was stored there before is gone. The part is a
+variable's own storage or the pointee of a `let` reference or of a
+reference parameter, which no rebinding moves, and the fields named after
+it. A holder each of whose slots that can hold a view into the array lies,
+on every path to the shrink, in a part so emptied — the whole of it, or its
+fields one by one — holds only what was stored into its storage since; but
+no longer once a store into that storage the record cannot show is made,
+one moving the holder's own references within it, or once a call that may
+write into the part runs, a callee's stores never being on record in their
+order: one handed a reference that may point at the holder's storage, with
+room for the part or lying in it, or anything whose references may lead to
+storage of the part's type, whatever it points at; a nested function; one
+handed a block or any other function value; and a block's own call. A call
+handed a struct of the function's own built from the holder's reference
+fields, whose references lead only to what those do, may not. So
+`for i in 3 { refs = []; pool = []; refs.push(pool.push(i)); }` passes,
+the store at the end of one iteration being gone by the shrink at the start
+of the next, while emptying `refs` on some paths only, after a store that
+reaches the shrink, or only in a copy of it, does not; and so does
+`s.refs = []; s.pool = []; s.refs.push(s.pool.push(i));` through
+`s: S&`, `struct S { pool: i64[>..]&, refs: (i64&)[>..] }`, the path to
+the pool being no reference into it, and a view taken through it stored, if
+at all, in `refs`.
+
 Nor may the shrink free what a `for` loop around it walks (§6.5): each
 reference or slice on the path to its sequence, which the loop loads again
 on every iteration, and the sequence it iterates in place — a slice, an
@@ -1327,7 +1430,17 @@ variables, so it is checked at every level: each function specialization
 records which globals, and which parameters' pointees, it shrinks — directly
 or through its own callees — and what its calls stored into those pointees,
 and a call is checked as if it performed those shrinks and stores in the
-caller. The pointees of a parameter that holds references by value (a
+caller, each grow-only shrink where it stands in the body: against the
+stores the body made before it (in a loop, any the body makes), not those
+it makes after, and with the parts of reference parameters' pointees the
+body had emptied before it on every path empty in the caller's holders
+too, where the argument names such a part — the caller's variable, a field
+path in it, or the pointee of its own `let` reference or reference
+parameter, which its own callers judge the same way — of storage no nested
+function or function value names. A function doing
+`s.refs = []; s.pool = []; s.refs.push(s.pool.push(i));` may be called
+again and again on the same holder, in a loop or through a function taking
+the holder by reference. The pointees of a parameter that holds references by value (a
 struct with a reference field, an array of slices) are what those
 references point to: a shrink or a store through one of them is of the
 caller's storage, not of the callee's copy of the holder. The other globals
@@ -1353,7 +1466,17 @@ any array of its type that the root bounds, and a shrink through it counts
 as a shrink of each of them: those in variables at the root's scope or
 outside it, and the caller's arrays a parameter's references lead to, for
 which the callers check it. The same holds where a call shrinks what an
-inexactly rooted argument points at.
+inexactly rooted argument points at. Read out of the storage behind a
+reference parameter — `s.text = …` for `s: S&` — the reference may point
+at anything the callers or the function stored there: the function judges
+its own variables against every array of the type outliving the call, and
+its callers judge the shrink as one of an array that storage leads to,
+each by its argument. A struct of the caller's leads to the arrays its
+record says it refers to, of the type shrunk, or holding or leading to one:
+`s.text = copy(t)` in a callee frees no global `u8[>..]` the caller views,
+where the caller's struct refers to a local text and a node pool. One built
+from the caller's own struct parameter's reference fields leads where those
+do, which the caller's callers judge in turn.
 
 Nor can a shrink inside a function tell what its parameters point into: a
 parameter's pointee is whatever each call passes, which may be a global, a
@@ -1799,6 +1922,8 @@ mantissa rounds as every float result does.
   catch.
 * `x as! T` — always-unchecked wrap/truncate, for when losing bits is what
   is intended, even in debug. To a float it is the same conversion as `as`.
+* Into an index or bound type (§3.11), `as` first checks the value against
+  the array in every build, and `as!` is an error.
 * float → int (both forms in release, `as!` always) is defined exactly:
   truncate toward zero, then wrap modulo 2^64 into the target's width; NaN
   yields 0. The common in-range case is a range test and a hardware
@@ -1972,6 +2097,41 @@ lie in may not shrink either. Iterating a copy (`let row = a[i]; for x in
 row` over fixed-size rows), or a reference read out first (`let r .=
 refs[i]; for x in r`), leaves the array free.
 
+**Specialization-time expansion.** `const for` specializes a fragment once
+per entry of a compiler-known sequence. Its v1 sources are `fields<T>` with
+two bindings (field name string and field accessor), `types<T1, T2, ...>`
+with one type binding, and `[c1, c2, ...]` with one constant binding. `fields`
+and `types` are contextual identifiers in this header, not keywords or
+ordinary function calls. Bindings use required angle brackets:
+
+```goose
+fn visit_fields<T, F>(value: T&) {
+    const for <N, A> in fields<T> { F(N, &value.A); }
+}
+fn transform_fields<T, F>(value: T&) -> T {
+    T { const for <N, A> in fields<T> { A: F(N, value.A), } }
+}
+```
+
+`fields<T>` visits direct, non-padding fields of a concrete struct in
+declaration order. Its accessor identifies the field of that particular
+struct instantiation; another struct with the same field name does not
+match. It can appear in a member access or initializer label. Bindings
+follow lexical scope and shadowing, including in nested functions. Types
+and constants may be heterogeneous; all three sources may be empty.
+Constants are scalar or string literals, named global constants, and the
+integer constant expressions supported for array sizes, including enclosing
+expansion bindings. There is no arbitrary compile-time execution.
+
+A statement fragment is a separate scope for each entry. A constructor
+fragment contributes comma-separated initializer entries, flattened before
+ordinary default, completeness, ordering and destination checks. An
+expansion produces no runtime iterator or reflection metadata. Its body
+contains ordinary runtime code, with the usual reference, lifetime and
+construction rules. Returns retain their lexical targets; a `break` or
+`continue` cannot cross an expansion boundary. The full v1 rules and
+implementation limit are in [the `const for` design](design/const_for.md).
+
 ---
 
 ## 7. Functions
@@ -2051,7 +2211,12 @@ fn scaled(a: i32, b: i32 = 0, c: f32 = 1.0) -> f32 { ... }   // scaled(2) is sca
   The expected result type never selects an overload. An `f32` destination
   may refine an otherwise unconstrained floating generic computation (§7.7),
   provided resolution still selects that same overload.
-* Multiple return values: `fn f() -> A, B`; received as `let a, b = f();`.
+* Multiple return values: `fn f() -> A, B`; received as `let a, b = f();`,
+  or assigned to places that exist as `x, xs[i] = f();`: the call runs
+  first, then each target is assigned its result in order, as `x = f()`
+  would assign one (a non-fixed result is built at its target; a reference
+  to a non-fixed value needs a `let` and an explicit `copy`, §4.1). Only `=`
+  takes several targets.
   There is no tuple *type* — multiple returns are a calling convention;
   structs are the way to keep data together. (Function *types* with
   multiple returns need parens — `fn(i64) -> (A, B)` — to disambiguate the
@@ -2666,7 +2831,9 @@ any flat fixed-size value (including structs, fixed and static-capacity
 limited arrays, and fixed-mode ADTs), by value as its packed C type;
 `T&` to such a `T`, as a pointer; `T[:]` of such a `T`, as the slice struct
 (`{ data, len }`); and `u8[>..]&`, as the resizable's header plus its stack
-(`gs_rref`), which C appends to through `gs_bld_append(ref, p, n)`.
+(`gs_rref`), which C appends to through `gs_bld_append(ref, p, n)`; C
+compiled on its own, a package's, finds both in `goose.h`
+(docs/packages.md).
 Returns are one scalar or flat fixed-size value by value, or nothing;
 references, slices and builders are parameter-only forms. Everything
 else — varints, references inside structs, variable and resizable values
@@ -2802,6 +2969,48 @@ instead. Where inlining is off (`-O0`), every call stays a call.
 `thread_fn`, so it stays usable as a name. It is an error together with
 `extern` (no body to copy), `export` (its C wrapper calls it), `simd` (a
 caller would run the baseline only), `recursive` and `thread_fn`.
+
+### 7.14 `checkfree fn`: no bounds check left
+
+```goose
+checkfree fn bfs(dist: i32[>..]&, q: NodeId[>..<]&, src: NodeId) -> i64 { ... }
+```
+
+`checkfree` asks the compiler to reject the program if a bounds check is
+left anywhere in the function's text after bounds-check elimination
+(§10.5): in each specialization of it, each `simd` version and each copy
+inlined into a caller. It changes nothing about what the program computes
+or how it is compiled. A check belongs to the text it is written in, so a
+caller's argument expression is the caller's, and a nested function or
+block written inside a `checkfree` function is checked as part of it.
+
+* **What counts.** The index and slice checks of §9.3, conversions into
+  index and bound types (§3.11), and nothing else: the other aborts of §9.3
+  remain, `assert` in particular, which is how such a function states its
+  preconditions once, outside its loops.
+* **What it calls.** Every call in a `checkfree` function is to a
+  `checkfree` function (directly, through a case function's dispatch or a
+  function value naming one, or a `format` overload a `print` reaches), a
+  builtin or an `extern fn`; a block it calls must be written in a
+  `checkfree` function. `inline` exempts nothing: a call that stays a call
+  runs the callee's own checks.
+* **What it may rely on.** The analysis's facts, call sites' included
+  (§10.5), so a new caller that does not establish what an entry relied on
+  can make a `checkfree` function fail to compile; the error names the
+  check and why it stayed. Index types in the signature and `assert`s at
+  entry make it independent of its callers. An implementation must prove,
+  inside a `checkfree` function, at least: a constant index into a fixed
+  array in range, and one whose type's range fits the array; an index of
+  `a`'s index type into `a`; one of `a`'s index type into `b` where
+  `b.len >= a.len` was asserted, with no growth of `a` and no shrink of `b`
+  since; a `for` index into the array whose length is its count or range
+  end; `a[i]` where a condition established `0 <= i < a.len` and nothing
+  changed either since; and a repeat of a check already passed on the same
+  path. Anything else it proves is implementation-defined.
+* `checkfree` is a keyword only directly before `inline`, `simd`,
+  `recursive`, `fn` or `thread_fn`, after `export`, and is an error with
+  `extern`. A nested function inherits it. Under `--no-bce` nothing is
+  verified, which the compiler warns about.
 
 ## 8. ADTs in use
 
@@ -3125,11 +3334,13 @@ Violations are compile errors. There is no escape hatch in v1.
 
 ### 9.3 What the runtime still checks
 
-Aborts (message + exit; not catchable):
+Aborts (message + exit; not catchable). In a contained worker (§11.2), each
+but the last two ends only that worker:
 
 * array/slice indexing out of bounds (elided wherever the compiler proves it
   cannot fire, §10.5; can be disabled wholesale in a designated unsafe-fast
-  build);
+  build), and a conversion into an index or bound type outside its array
+  (§3.11), elided the same way;
 * a reusable pool's `free(i)` with an index outside `[0, pool.len)`;
 * a slice pool's `alloc_slice`/`realloc_slice` with a negative length, or
   one no data stack could hold (§5.4);
@@ -3467,10 +3678,22 @@ compilation model rather than an implementation detail. It runs over each
 specialization after optimization, and it is required only to be *sound*:
 every check it removes is one that could not have aborted, and what it fails
 to prove stays in the program. Nothing about a program's meaning depends on
-how much it proves.
+how much it proves, except whether a `checkfree` function compiles (§7.14),
+for which the specification fixes what every implementation must prove.
 
 What the language gives it, beyond ordinary flow facts (loop headers,
 conditions and their negations, `assert`, match arms):
+
+* **Index types.** A value of `uN in a` is below `a.len` at any later point,
+  since `a` never shrinks (§3.11), so an index of `a` into `a` needs no
+  check, and one into another array `b` needs only `a.len <= b.len`: a
+  relation between two lengths, which the analysis states and keeps as it
+  does any other, rather than a fact about every element of an array, which
+  it cannot.
+* **Types.** An array is of one type, and a reference reaches only an array
+  of its own type, so a growth or shrink through a reference, or a callee's
+  write through an argument that is an array of scalars, leaves every
+  array of another type as it was.
 
 * **Monotonicity in the type.** A grow-only `[>..]` shrinks only at a `pop`,
   `pop_n`, `resize` or `clear` on the array itself (§5.1), which the analysis
@@ -3492,11 +3715,13 @@ carries them too. Every call site records what it proves about the arguments
 it passes — constant bounds on an array's length, and how the passed lengths
 and integers relate — and a specialization enters with the meet of those
 facts once all of its sites have been analyzed (callers are analyzed first;
-a site inside a recursive cycle leaves its callee with nothing). In the
-other direction a callee is summarized rather than assumed hostile: the
-storage it may resize or overwrite, through its reference parameters, in
-globals, or in captured outer locals, is computed as a fixpoint over the
-call graph, and a call kills only what those effects can name. A kernel
+a site inside a recursive cycle leaves its callee with nothing). A thread's
+entry point and an `export fn`, which C may call with any arguments, enter
+with nothing. In the other direction a callee is summarized rather than
+assumed hostile: the storage it may resize or overwrite, through its
+reference parameters, in globals, or in captured outer locals, is computed
+as a fixpoint over the call graph, and a call kills only what those effects
+can name. A kernel
 `fn blur(src: u8[>..]&, dst: u8[>..]&)` that only reads and writes elements
 thus sees `src.len == W * W` when every caller established it, and leaves
 the caller's own facts about `src` intact.
@@ -3633,22 +3858,40 @@ the Linda tuple-space / coordination style.
   re-specializes it per program, exactly like a template instantiation.
 * Worker count is decided **at runtime** (no static maximum):
   `thread_spawn(worker, args…) -> i64` reserves a fresh stack block, copies
-  the args, starts the worker, and returns its id. IDs increase monotonically
+  the args, starts the worker, and returns its id. `worker` names a
+  `thread_fn`, directly or as a function parameter bound to one (§7.6), so
+  `fn spawn<W>(n: i32) -> i64 { thread_spawn(W, n) }` spawns whichever
+  worker its caller passes. IDs increase monotonically
   and are never reused. `hardware_threads() -> i64` exists for sizing, and
   reports no more workers than the implementation's address space for data
   stacks (§10.4) holds beside the main program, so a pool sized by it never
   exhausts it.
-  `thread_wait(id)` blocks until that worker's body has returned and all of
+  `thread_wait(id) -> bool` blocks until that worker has ended and all of
   its Goose storage has been released — enabling both scoped fork/join
   parallelism and orderly shutdown (send quit messages, then wait). Repeated
   waits on a completed id return immediately; multiple workers may wait for
-  the same id. A negative or never-issued id, or a worker waiting for itself,
-  aborts with a runtime diagnostic.
+  the same id. Every wait returns `false` for a contained worker that
+  aborted, and `true` otherwise. `thread_wait(id, msg) -> bool` waits the
+  same way and appends the abort's message to `msg`, a growable `u8` array:
+  what the abort would print after `goose runtime error: `, its location
+  included. The first such wait for the worker takes the message; later
+  waits, and a worker that returned, append nothing. A program that wants
+  the message asks for it once and keeps it. A negative or never-issued id,
+  or a worker waiting for itself, aborts with a runtime diagnostic.
+* `thread_spawn_contained(worker, args…) -> i64` starts a **contained**
+  worker, as `thread_spawn` does otherwise. An abort in it (§9.3) ends only
+  that worker, which releases what a return would, and leaves its message
+  for `thread_wait` instead of printing it. The program and other workers
+  run on. Resources it opened through `extern fn`
+  stay open. Guard-page hits, native stack exhaustion, `exit(code)`, and the
+  runtime's own failures still end the program, as does any abort on main's
+  thread. A worker it starts with `thread_spawn` is not contained.
 * A worker's return releases its copied arguments, stack block, every reserved
   and committed data-stack region, and active-worker record, whether or not
   anyone waits for it. The runtime retains no per-completed-worker record or
-  native handle. Native threads are detached; their final native stack/TLS
-  teardown occurs when the runtime entry wrapper returns, immediately after
+  native handle, except the id of each contained worker that aborted, so
+  that waits can answer, and its message until a wait takes it. Native
+  threads are detached; their final native stack/TLS teardown occurs when the runtime entry wrapper returns, immediately after
   publishing Goose cleanup completion. A child worker owns its storage
   independently and may outlive the worker that spawned it. Queued messages
   belong to their queues and remain available to receivers after the sender
@@ -3659,18 +3902,30 @@ the Linda tuple-space / coordination style.
   and writes its copies from then on. Nothing is shared: a worker that
   increments a global increments its own, and main's is what it was. A
   global whose type is not **flat** (§1.1) cannot be copied and is an error
-  in any function a `thread_fn` reaches. `const` globals with compile-time
-  initializers are static data (§1.2), read-only and therefore shared as
-  they are.
+  in any function a `thread_fn` reaches, unless it is a `let` or `const`
+  global whose references all lead to static data, as a string literal's
+  do (`let NAMES = ["a", "b"];`): its copy views the same read-only bytes,
+  which no program can tell from a copy of its own. `const` globals with
+  compile-time initializers are static data (§1.2), read-only and
+  therefore shared as they are.
 * Args and queue elements must be **flat** types (§1.1); values are copied
   in and out, which is cheap because Goose values are contiguous. A
   `thread_fn`'s parameters have no defaults (§7.1): `thread_spawn` passes
   every argument.
 * **Typed queues**: conceptually one queue per flat element type;
-  `qput(v)`, `qget<T>() -> T` (blocking), `qpoll<T>() -> T, bool`
+  `qput(v) -> bool`, `qget<T>() -> T` (blocking), `qpoll<T>() -> T, bool`
   (non-blocking; bool = got one; on a miss the value is T's zero value —
-  zeroed scalars, empty arrays, variant 0) select the queue by type. Queues
-  live outside stack memory (runtime-internal allocation permitted here).
+  zeroed scalars, empty arrays, variant 0), `qget<T>(ms: i64) -> T, bool`
+  (as `qpoll`, after waiting at most `ms` milliseconds; zero or less does
+  not wait) and `qlimit<T>(n: i64)` select the queue by type. Queues live
+  outside stack memory (runtime-internal allocation permitted here).
+* **Bounded queues**: `qput` never blocks. It returns `true` once the value
+  is queued, and `false` at once, queueing nothing, when the queue holds its
+  limit of messages. A call statement drops the result (§7.1), so `qput(v);`
+  ignores a refusal. A queue has no limit until `qlimit<T>(n)` gives it one
+  of `n` messages; lowering a limit below what the queue holds keeps the
+  messages queued, and puts fail until fewer than `n` remain. A limit of
+  zero or less aborts with a runtime diagnostic.
 
 ### 11.3 Dynamic stacks (future)
 
@@ -3694,8 +3949,9 @@ The language's own functions:
 | `abort(msg: u8[:])`, `exit(code: i64)` | end the program; both diverge (§9.3) |
 | `copy(x) -> T` | a fresh copy of the stored value `x` names (§4.1) |
 | `default<T>() -> T` | the value a fixed-size `T` has before anything is written to it (§4.2) |
-| `hardware_threads() -> i64`, `thread_spawn(worker, args…) -> i64`, `thread_wait(id)` | workers (§11.2) |
-| `qput(v)`, `qget<T>() -> T`, `qpoll<T>() -> T, bool` | the typed queues (§11.2) |
+| `hardware_threads() -> i64`, `thread_spawn(worker, args…) -> i64`, `thread_spawn_contained(worker, args…) -> i64`, `thread_wait(id) -> bool`, `thread_wait(id, msg) -> bool` | workers (§11.2) |
+| `qput(v) -> bool`, `qget<T>() -> T`, `qget<T>(ms) -> T, bool`, `qpoll<T>() -> T, bool` | the typed queues (§11.2) |
+| `qlimit<T>(n)` | a queue's limit of messages (§11.2) |
 | `to_bytes(a) -> u8[>..]`, `to_bytes(a, out)` | an array's image — a varint byte count then its element region — fresh, or appended to a growable `u8` array (§3.9, `design/serialization.md`) |
 | `bytes_of(a) -> u8[:]` | the element region alone, as a view: no copy, and never writable |
 | `from_bytes<T[>..]>(b: u8[:]) -> T[>..], bool` | a *verified* array from an untrusted image; empty and `false` if it is not one. Also builds `T[>..<]` and the `T[]` family |
@@ -3864,14 +4120,6 @@ the end, each with where its resolution lives.
     non-negativity already does — the narrow, checkable version of "track
     that this `u64` fits `i64`". Until then, the open-addressed map in
     `bench/goose/words.goose` keeps the four checks around `slots[idx]`.
-0e. **Per-array index types** — an index validated once against a specific
-    array, so repeated `a[i]` and indirect `a[b[i]]` need no further check.
-    Goose is unusually well placed for this: specializations already carry
-    each reference's root (§10.2), and a grow-only `[>..]` shrinks only at an
-    operation on the array itself (§5.1), so such an index could only be
-    invalidated by one the analysis sees. This
-    could extend §10.5 by making index validity a type property, rather
-    than relying only on dataflow analysis.
 0f. **Bounds-check analysis, known gaps** (§10.5) — a loop's exit condition
     is a disjunction (`!(i < n && p)`), which a difference-constraint domain
     cannot represent, so post-loop bounds rest on the inferred invariants
@@ -3879,8 +4127,8 @@ the end, each with where its resolution lives.
     blocks so the conditions never merge, which is available here too. A
     64-bit value loaded from an array has no known range (a narrower one
     has its type's, as a variable does), so indirect indexing
-    (`dist[out[k]]`, `bench/goose/graph_csr.goose`) keeps its check — see
-    0e. Release-mode wrapping (§6.2) is deliberate and stays, so the
+    (`dist[out[k]]`, `bench/goose/graph_csr.goose`) keeps its check unless
+    what is stored has an index type (§3.11). Release-mode wrapping (§6.2) is deliberate and stays, so the
     analysis proves absence of wrap explicitly where it needs to.
 0c. **Pointee writes through optionals** — a narrowed optional writes
     through fine, but there is no way to write through an optional without
@@ -3928,13 +4176,19 @@ the end, each with where its resolution lives.
     say which versions it wants (an AVX-512 version is not faster for
     every loop).
 13. **Labels for `break`** — if early-out patterns demand them.
-15. **Wasm fallback** — index-based reference representation details.
+15. **Wasm fallback** — index-based reference representation details
+    (`docs/design/wasm.md` compares the options).
 16. **Relative-reference region tracking** — copies of values containing
     *self-relative* references are currently rejected outright (§3.9; the
     `in pool` form already copies); track the region an offset ranges over so
     whole-region copies (and serialization moves) can be proven safe.
 ### Resolved
 
+0e. **Per-array index types** — DONE, see §3.11 and §7.14
+    (`docs/design/index_types.md`): `u32 in a` is an index validated once
+    against a grow-only global `a`, which then never shrinks, so indexing
+    `a` with it, and another array once their lengths are related, needs no
+    check; `checkfree fn` makes a check left in a function an error.
 0b. **Reference address identity** — DONE, see §3.8: `r1 .== r2` /
     `r1 .!= r2` compare references by address; `==` stays the pointee
     comparison.
@@ -4137,8 +4391,10 @@ field       := ("let" | "const")? ident ":" type ("=" expr)? | "pad" intlit?
 typealias   := "type" declname "=" type ";"
 generics    := "<" ident (":" type)? ("," ident (":" type)?)* ">"
 
-fndecl      := ("export" strlit? | "extern" strlit?)? "simd"? "recursive"? ("fn" | "thread_fn")
+fndecl      := "checkfree"? ("export" strlit? | "extern" strlit?)? "checkfree"? "simd"?
+               "inline"? "recursive"? ("fn" | "thread_fn")
                declname generics? "(" params? ")" ("->" rettypes)? (blockexpr | ";")
+                                                 // checkfree at most once (§7.14)
                                                  // nested: ident only
 params      := param ("," param)* ","?
 param       := "var"? ident (":" type ("=" expr)?)?
@@ -4149,7 +4405,10 @@ globaldecl  := ("reusable" ("[" "]")?)? ("let" | "var" | "const") declname (":" 
                                                  // no initializer: var with a type only
 
 type        := "const"? (prim | qname tyargs? | "(" type ")") postfix*
+             | "const"? indextype                // no postfix (§3.11)
                                                  // const: the first & or [:] (§9.5)
+indextype   := ("u8"|"u16"|"u32"|"u64") ("in" | "upto") qname
+                                                 // parenthesized as a for binder's type
 prim        := "bool"|"varint"|"i8"|…|"u64"|"f32"|"f64"
              | "fn" ( "(" types? ")" ("->" (type | "(" types ")"))? )?
 tyargs      := "<" type ("," type)* ","? ">"

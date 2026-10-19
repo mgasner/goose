@@ -50,7 +50,7 @@ inline bool CodeGen::SimpleText(Call *c, TypeExpr *t) {
 }
 
 inline void CodeGen::RenderLit(Loc &out, const string &text) {
-    L("memcpy(", Top(out.stk), ", ", StrRaw(text), ", ", text.size(), ");");
+    L("GS_MEMCPY(", Top(out.stk), ", ", StrRaw(text), ", ", text.size(), ");");
     Bump(out.stk, cat(text.size()));
     L(out.lenlv, " += ", text.size(), ";");
 }
@@ -564,7 +564,7 @@ inline vector<string> CodeGen::EmitStr(Call *c, vector<Node *> &an, Dst d0, Line
         if (!SimpleText(context, t)) {
             auto b = RenderToTemp(a, context);
             L("int64_t ", n, " = ", b.hdr, ".len;");
-            L("memcpy(", Top(stk), ", ", b.hdr, ".base, (size_t)", n, ");");
+            L("GS_MEMCPY(", Top(stk), ", ", b.hdr, ".base, (size_t)", n, ");");
         } else if (t->kind == TY_ARRAY || t->kind == TY_SLICE) {
             auto se = GenSrcElems(a);
             L("int64_t ", n, " = ", se.n, ";");

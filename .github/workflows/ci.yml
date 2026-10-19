@@ -78,6 +78,21 @@ jobs:
       - name: Test
         run: python test/run_tests.py --exe build/${{ runner.os == 'Windows' && 'Debug/goose.exe' || 'goose' }} --profile baseline --cc native --require-clang
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The VS Code extension's tests: its grammar, its reading of the
+      # compiler's diagnostics, and the language server over its own
+      # protocol, against the compiler just built.
+      - name: Test the VS Code extension
+        working-directory: vscode
+        env:
+          GOOSE_TEST_COMPILER: ${{ github.workspace }}/build/${{ runner.os == 'Windows' && 'Debug/goose.exe' || 'goose' }}
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+
   sanitize:
     name: Linux / ASan + UBSan
     runs-on: ubuntu-latest

@@ -496,7 +496,7 @@ inline void CodeGen::FixedLocal(TypeExpr *t, string &name, const string &init, b
     SaveBase(forlocal, stk, cat("(uint8_t *)", name));
     Bump(stk, cat("sizeof(", CT(t), ")"));
     name = cat("(*", name, ")");
-    if (init == "{0}") L("memset(&", name, ", 0, sizeof(", name, "));");
+    if (init == "{0}") L("GS_MEMZERO(&", name, ", sizeof(", name, "));");
     else if (!init.empty()) L(name, " = ", init, ";");
 }
 
@@ -511,6 +511,36 @@ inline string CodeGen::Snapshot(TypeExpr *vt, const string &x) {
 inline string CodeGen::GenPure(Node *n) {
     if (Is<IntLit>(n) || Is<FltLit>(n) || Is<BoolLit>(n)) return GenX(n);
     return Snapshot(n->exprtype, GenX(n));
+}
+
+// An integer `/` or `%` at storage s, through runtime.h's gs_div_/gs_mod_
+// macros. Those name their operands more than once, so an operand that is
+// not already a C name or a number is read into a temp first; a signed `%`
+// also gets the temp it keeps the remainder in.
+inline string CodeGen::DivX(bool div, IntStorage s, const string &l, const string &r,
+                            Line line) {
+    auto pure = [&](const string &x) {
+        auto core = x;
+        while (core.size() > 2 && core.front() == '(' && core.back() == ')' &&
+               core.find_first_of("()", 1) == core.size() - 1)
+            core = core.substr(1, core.size() - 2);
+        auto name = !core.empty() && !isdigit((uint8_t)core[0]);
+        auto num = !core.empty() && isdigit((uint8_t)core[0]);
+        for (auto ch : core) {
+            if (!isalnum((uint8_t)ch) && ch != '_') name = false;
+            if (!isdigit((uint8_t)ch) && !strchr("uUlL", ch)) num = false;
+        }
+        if (name || num) return core;
+        auto t = T();
+        L(IntCT(s), " ", t, " = ", x, ";");
+        return t;
+    };
+    auto a = pure(l), b = pure(r);
+    if (div) return cat("gs_div_", IntSfx(s), "(", a, ", ", b, ", ", LocArgs(line), ")");
+    if (IsUnsigned(s)) return cat("gs_mod_", IntSfx(s), "(", a, ", ", b, ", ", LocArgs(line), ")");
+    auto t = T();
+    L("int64_t ", t, ";");
+    return cat("gs_mod_", IntSfx(s), "(", t, ", ", a, ", ", b, ", ", LocArgs(line), ")");
 }
 
 // The two minima are written as a subtraction: C has no negative decimal
@@ -579,8 +609,17 @@ inline CodeGen::Loc CodeGen::IndexLoc(Loc lv, Node *idxnode, Line ln, bool nobc)
         return r;
     }
     assert(IsFix(v.elem));   // Variable elements are never indexed (TC).
-    return BytesLoc(cat("(", v.elems, " + ", ix, " * ", FixedSize(v.elem), ")"), v.elem,
-                    lv);
+    // A number of 2, 4 or 8 bytes is indexed through a pointer to its type,
+    // which keeps the index scaled in the address. As a byte offset the C
+    // compiler folds the scale into the index's own shift (`(j >> 5) * 4`
+    // becomes `(j >> 3) & -4`) and loses the scaled addressing mode.
+    auto esz = FixedSize(v.elem);
+    if ((v.elem->kind == TY_INT || v.elem->kind == TY_FLT) && (esz == 2 || esz == 4 || esz == 8)) {
+        auto r = BytesLoc(v.elems, v.elem, lv);
+        r.s = cat("(((", CT(v.elem), " *)(", v.elems, "))[", ix, "])");
+        return r;
+    }
+    return BytesLoc(cat("(", v.elems, " + ", ix, " * ", esz, ")"), v.elem, lv);
 }
 
 // A path whose address takes no check and calls nothing: a variable, or a
@@ -700,23 +739,38 @@ inline CodeGen::Loc CodeGen::GenLoc(Node *n) {
 
 // Whether a destination's C lvalue names the same storage wherever in its
 // statement it is evaluated: a variable, or a field of a fixed-size value
-// down from one, with no index on the way (and no reference that can be
-// rebound, which the caller sees as Loc::viaref). An assignment stores to
-// such a destination as it is spelled, a member store the C compiler's
+// or an element of a fixed-size array down from one, at an index that takes
+// no check, which IndexLoc holds in a temporary (and no reference that can
+// be rebound, which the caller sees as Loc::viaref). An assignment stores
+// to such a destination as it is spelled, a member store the C compiler's
 // type-based alias analysis tells apart from other structs' fields, where
 // a store through a pointer taken first is to any value of the field's type.
+// Spelled like the destination's loads, it is also one location to gcc's
+// loop invariant motion, which keeps an element a loop reads and writes in
+// a register (and so lets the loop vectorize) only then.
 inline bool CodeGen::StableDest(Node *n) {
-    while (auto d = Is<Dot>(n)) {
-        if (!d->IsField()) return false;
-        auto ot = d->obj->exprtype;
-        if (ot && ot->kind == TY_REF) {
-            if (ot->ref->lenstorage >= 0) return false;
-            ot = ot->ref->sub;
+    auto fixed = [&](TypeExpr *t) {
+        if (t && t->kind == TY_REF) {
+            if (t->ref->lenstorage >= 0) return (TypeExpr *)nullptr;
+            t = t->ref->sub;
         }
-        if (!ot || !IsFix(ot)) return false;
-        n = d->obj;
+        return t && IsFix(t) ? t : nullptr;
+    };
+    for (;;) {
+        if (auto d = Is<Dot>(n)) {
+            if (!d->IsField() || !fixed(d->obj->exprtype)) return false;
+            n = d->obj;
+        } else if (auto ix = Is<Index>(n)) {
+            auto at = fixed(ix->obj->exprtype);
+            if (!at || at->kind != TY_ARRAY || at->arr->akind != A_FIXED || fillvalues.count(ix))
+                return false;
+            auto il = Is<IntLit>(ix->idx);
+            if (!ix->nobc && !(il && il->val >= 0 && il->val < ArrSize(at->arr))) return false;
+            n = ix->obj;
+        } else {
+            return Is<Ident>(n) != nullptr;
+        }
     }
-    return Is<Ident>(n) != nullptr;
 }
 
 // A fresh statement-scoped stack for a bytes-class temporary, returned in
@@ -927,7 +981,7 @@ inline string CodeGen::AdaptToFixed(Loc lv, TypeExpr *et, Line ln) {
             L("case ", TagConst(ei, (int)vi), ":");
             ind++;
             if (psz)
-                L("memcpy(&", tv, ".u.v_", Sanitize(ei->en->variants[vi].name), ", ",
+                L("GS_MEMCPY(&", tv, ".u.v_", Sanitize(ei->en->variants[vi].name), ", ",
                   lv.s, " + ", ts, ", ", psz, ");");
             L("break;");
             ind--;
@@ -1075,6 +1129,109 @@ inline string CodeGen::GenTruth(Node *n) {
     return x;
 }
 
+// Whether a && or || takes the unconditional form of Binary::CgX: in a loop
+// that can be straight-line code, a right operand that can neither fail nor
+// have an effect, evaluated whatever the left gave (§6.11).
+inline bool CodeGen::SpeculativeForm(Binary *b) {
+    auto budget = 24;
+    return InStraightLoop() && Speculatable(b->right, b->specidx > 0, true, budget);
+}
+
+// n where it is a && or || that GenBranch emits as branches on its operands.
+inline Binary *CodeGen::ChainOp(Node *n) {
+    auto b = Is<Binary>(n);
+    return b && (b->op == T_ANDAND || b->op == T_OROR) && !SpeculativeForm(b) ? b : nullptr;
+}
+
+// n where it is an inlined call of a bool function that GenBranch emits as
+// branches from where the callee's value is decided.
+inline InlineBlock *CodeGen::BranchCall(Node *n) {
+    auto ib = Is<InlineBlock>(n);
+    return ib && ib->exprtype && ib->exprtype->kind == TY_BOOL && !AdtFrom(ib) ? ib : nullptr;
+}
+
+// Whether a condition, under any `!`s, is one of those.
+inline bool CodeGen::BranchChain(Node *n) {
+    for (auto u = Is<Unary>(n); u && u->op == T_NOT; u = Is<Unary>(n)) n = u->child;
+    return ChainOp(n) || BranchCall(n);
+}
+
+// A branch to `lbl` taken where n's truth value is `when`, falling through
+// where it is not. A && or || (ChainOp) is a chain of branches on its
+// operands, the right one's statements running only where the left did not
+// settle the value: in a loop's condition, clang ran a 0/1 flag set in an
+// `if` and then tested slower than this chain, which is what C's own &&
+// compiles to (§6.11). An inlined bool call (BranchCall) branches where its
+// body returns or ends, on the value it returns, as the C compiler finds C
+// after inlining it; a constant there is a jump or nothing. Each operand at
+// a leaf is evaluated in a scope of its own, whose data-stack restores run
+// once its truth value is taken, ahead of its branch, so neither path skips
+// them; a branch out of the scopes down to `exitscope`, an inlined call's
+// own and its arguments', restores theirs on its way.
+inline void CodeGen::GenBranch(Node *n, bool when, string lbl, int exitscope) {
+    if (auto u = Is<Unary>(n); u && u->op == T_NOT)
+        return GenBranch(u->child, !when, lbl, exitscope);
+    if (auto b = ChainOp(n)) {
+        // A && is false, and a || true, as soon as one operand is.
+        if ((b->op == T_ANDAND) != when) {
+            GenBranch(b->left, when, lbl, exitscope);
+            GenBranch(b->right, when, lbl, exitscope);
+            return;
+        }
+        auto skip = Lbl();
+        GenBranch(b->left, !when, skip);
+        GenBranch(b->right, when, lbl, exitscope);
+        L(skip, ":;");
+        return;
+    }
+    if (auto ib = BranchCall(n)) {
+        // The arguments bound in a scope of their own.
+        PushSc(SC_PLAIN);
+        Dst d;
+        d.k = DK_BRANCH;
+        d.s = lbl;
+        d.t = ib->exprtype;
+        d.when = when;
+        d.exitscope = exitscope >= 0 ? exitscope : (int)cscopes.size() - 1;
+        ib->EmitBody(*this, d);
+        PopSc();
+        return;
+    }
+    auto jump = [&](const string &c) {
+        auto restores = false;
+        if (exitscope >= 0)
+            for (auto i = exitscope; i < (int)cscopes.size(); i++)
+                restores = restores || !cscopes[i].saves.empty();
+        if (!restores) {
+            L(c.empty() ? "" : cat("if (", c, ") "), "goto ", lbl, ";");
+            return;
+        }
+        if (!c.empty()) {
+            L("if (", c, ") {");
+            ind++;
+        }
+        EmitExitRestores(exitscope);
+        L("goto ", lbl, ";");
+        if (!c.empty()) {
+            ind--;
+            L("}");
+        }
+    };
+    if (auto bl = Is<BoolLit>(n)) {
+        if (bl->val == when) jump("");
+        return;
+    }
+    PushSc(SC_PLAIN);
+    auto x = GenTruth(n);
+    if (!cscopes.back().saves.empty()) {
+        auto t = T();
+        L("uint8_t ", t, " = (uint8_t)(", x, " != 0);");
+        x = t;
+    }
+    PopSc();
+    jump(when ? x : cat("!(", x, ")"));
+}
+
 // Whether evaluating n, the right operand of && or || or a part of it, has
 // no effect but its value and cannot fail, so that Binary::CgX may evaluate
 // it whatever the left operand gave. It calls nothing and writes nothing; it
@@ -1158,6 +1315,7 @@ inline bool CodeGen::Speculatable(Node *n, bool idxok, bool truth, int &budget) 
     if (auto c = Is<AsCast>(n)) {
         auto st = c->child->exprtype, tt = c->totype;
         if (!st || !tt || !(IsIntT(st) || st->kind == TY_FLT)) return false;
+        if (tt->ix && !c->nobc) return false;   // Its bounds check may fail.
         if (tt->kind == TY_INT) {
             if (!IsIntT(st) || !IsIntT(tt)) return false;
             auto [slo, shi] = IntRange(st->intstorage);
@@ -1416,6 +1574,28 @@ inline string CodeGen::GenPureVal(Node *n) {
     return Snapshot(et, GenVal(n));
 }
 
+// An operand whose value must not change before it is used: when `later`,
+// the code that runs between, has statements, its value lands in a temp
+// (GenPureVal). Code without statements calls nothing and assigns
+// nothing, so the operand's expression stands as it is -- unless its own
+// statements left more than a variable's name in it, which may hold a
+// call that C could order after the later operands. A number is converted
+// to the operand's type as the temp would have converted it: a literal 1
+// shifted at u64 must not shift as a C int.
+inline string CodeGen::GenOperandVal(Node *n, bool later) {
+    auto et = OperandT(n->exprtype);
+    if (later || IsBytesT(et)) return GenPureVal(n);
+    auto x = GenVal(n);
+    if (HasStmts(n) && !IsCName(x)) return Snapshot(et, x);
+    if (et->kind == TY_INT || et->kind == TY_FLT) return cat("(", CT(et), ")(", x, ")");
+    return x;
+}
+
+inline bool CodeGen::IsCName(const string &x) {
+    return !x.empty() && !isdigit((unsigned char)x[0]) &&
+           all_of(x.begin(), x.end(), [](char c) { return isalnum((unsigned char)c) || c == '_'; });
+}
+
 inline bool CodeGen::HasStmts(Node *n) {
     if (!n) return false;
     if (Is<Call>(n) || IsCtl(n) || Is<StrLit>(n)) return true;
@@ -1499,9 +1679,8 @@ inline void CodeGen::GenElemwiseInto(TypeExpr *t, TType op, Line line, const str
             case T_PLUS: case T_PLUSEQ:   return cat("gs_add_", sfx, "(", a, ", ", c, ovf, ")");
             case T_MINUS: case T_MINUSEQ: return cat("gs_sub_", sfx, "(", a, ", ", c, ovf, ")");
             case T_MUL: case T_MULEQ:     return cat("gs_mul_", sfx, "(", a, ", ", c, ovf, ")");
-            case T_DIV: case T_DIVEQ:
-                return cat("gs_div_", sfx, "(", a, ", ", c, ", ", LocArgs(line), ")");
-            default: return cat("gs_mod_", sfx, "(", a, ", ", c, ", ", LocArgs(line), ")");
+            case T_DIV: case T_DIVEQ: return DivX(true, tt->intstorage, a, c, line);
+            default: return DivX(false, tt->intstorage, a, c, line);
         }
     });
 }
@@ -1581,7 +1760,11 @@ inline string CodeGen::GenElemwise(Binary *b, const string &l, const string &r) 
     return tv;
 }
 
-inline string CodeGen::GenSlice(SliceExpr *se) {
+// A slice expression's value, in a new temp, or with `into` (a variable of
+// the slice's C type) in that variable's members: the members are computed
+// from temps only, so writing one cannot change the other, and TinyCC is
+// spared building a temp and copying it.
+inline string CodeGen::GenSlice(SliceExpr *se, const string &into) {
     auto lv = GenLoc(se->obj);
     if (lv.t->kind == TY_REF) DerefLoc(lv);
     auto v = ArrayView(lv);
@@ -1604,19 +1787,27 @@ inline string CodeGen::GenSlice(SliceExpr *se) {
     if (!se->nobc)
         L("if (", lov, " < 0 || ", hiv, " < ", lov, " || ", hiv, " > ", lenv,
           ") gs_abort(GS_E_SLICE, ", LocArgs(se->line), ");");
-    auto t = T();
     // Adapted contexts (slice constructing an array) leave an array
     // exprtype on the node; the slice value's own type comes from the
     // source element.
     auto et = se->exprtype->kind == TY_SLICE ? se->exprtype : ast.SliceOf(v.elem, se->line);
+    string data, len;
     if (IsFix(v.elem)) {
         auto dp = v.typedelems ? v.elems
                                : cat("(", CT(v.elem), " *)(", v.elems, ")");
-        L(CT(et), " ", t, " = { ", dp, " + ", lov, ", ", hiv, " - ", lov, " };");
+        data = cat(dp, " + ", lov);
+        len = cat(hiv, " - ", lov);
     } else {
         // Whole-array slices only (TC): elements are sequential bytes.
-        L(CT(et), " ", t, " = { ", v.elems, ", ", lenv, " };");
+        data = v.elems;
+        len = lenv;
     }
+    if (!into.empty()) {
+        L(into, ".data = ", data, "; ", into, ".len = ", len, ";");
+        return into;
+    }
+    auto t = T();
+    L(CT(et), " ", t, " = { ", data, ", ", len, " };");
     return t;
 }
 

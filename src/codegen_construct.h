@@ -41,8 +41,8 @@ inline void CodeGen::StoreWhole(const string &p, TypeExpr *t, const string &x) {
     }
     auto w = T();
     L(sz == 8 ? "uint64_t " : sz == 4 ? "uint32_t " : "uint16_t ", w, ";");
-    L("memcpy(&", w, ", &", v, ", ", sz, ");");
-    L("memcpy(", p, ", &", w, ", ", sz, ");");
+    L("GS_MEMCPY(&", w, ", &", v, ", ", sz, ");");
+    L("GS_MEMCPY(", p, ", &", w, ", ", sz, ");");
 }
 
 inline void CodeGen::EmitLenCheck(IntStorage ls, const string &n) {
@@ -292,7 +292,7 @@ inline void CodeGen::EmitCopyElems(const string &stk, TypeExpr *elem, const stri
         ind++;
         auto sz = T();
         L("int64_t ", sz, " = ", SizeX(elem, p), ";");
-        L("memcpy(", Top(stk), ", ", p, ", (size_t)", sz, ");");
+        L("GS_MEMCPY(", Top(stk), ", ", p, ", (size_t)", sz, ");");
         Bump(stk, sz);
         L(p, " += ", sz, ";");
         ind--;
@@ -444,7 +444,7 @@ inline void CodeGen::GenConstruct(Node *n, const string &stk, TypeExpr *want, co
             L("*", Top(stk), " = 0;");
             Bump(stk, "1");
         } else {
-            L("memset(", Top(stk), ", 0, ", FixedSize(et), ");");
+            L("GS_MEMZERO(", Top(stk), ", ", FixedSize(et), ");");
             Bump(stk, cat(FixedSize(et)));
         }
         return;
@@ -455,7 +455,7 @@ inline void CodeGen::GenConstruct(Node *n, const string &stk, TypeExpr *want, co
         assert(!lenlv.empty());
         L(lenlv, " = ", s2->val.size(), ";");
         if (!s2->val.empty()) {
-            L("memcpy(", Top(stk), ", ", StrRaw(s2->val), ", ", s2->val.size(), ");");
+            L("GS_MEMCPY(", Top(stk), ", ", StrRaw(s2->val), ", ", s2->val.size(), ");");
             Bump(stk, cat(s2->val.size()));
         }
         return;
@@ -472,7 +472,7 @@ inline void CodeGen::GenConstruct(Node *n, const string &stk, TypeExpr *want, co
             EmitLenStore(stk, LenStore(et->arr), cat(s->val.size()));
         }
         if (!s->val.empty()) {
-            L("memcpy(", Top(stk), ", ", StrRaw(s->val), ", ", s->val.size(), ");");
+            L("GS_MEMCPY(", Top(stk), ", ", StrRaw(s->val), ", ", s->val.size(), ");");
             Bump(stk, cat(s->val.size()));
         }
         return;
@@ -550,7 +550,7 @@ inline void CodeGen::ConstructFromLoc(Loc lv, TypeExpr *et, const string &stk,
         assert(!lv.val);
         auto sz = T();
         L("int64_t ", sz, " = ", SizeX(et, lv.s), ";");
-        L("memcpy(", Top(stk), ", ", lv.s, ", (size_t)", sz, ");");
+        L("GS_MEMCPY(", Top(stk), ", ", lv.s, ", (size_t)", sz, ");");
         Bump(stk, sz);
         return;
     }
@@ -771,7 +771,7 @@ inline void CodeGen::EmitRzCopy(Loc lv, TypeExpr *et, const string &stk, const s
     auto len = T();
     L("int64_t ", len, " = ", lv.lenlv, ";");
     if (prefix) {
-        L("memcpy(", Top(stk), ", ", lv.s, ", ", prefix, ");");
+        L("GS_MEMCPY(", Top(stk), ", ", lv.s, ", ", prefix, ");");
         Bump(stk, cat(prefix));
     }
     EmitCopyElems(stk, elem, cat("(", lv.s, ") + ", prefix), len);
@@ -790,7 +790,7 @@ inline void CodeGen::FoBytes(TypeExpr *t, const string &obj, const string &p, bo
         auto at = off ? cat("(", p, " + ", off, ")") : p;
         if (fields[i].ispad) {
             if (fields[i].padsize <= 0) continue;
-            if (tobytes) L("memset(", at, ", 0, ", fields[i].padsize, ");");
+            if (tobytes) L("GS_MEMZERO(", at, ", ", fields[i].padsize, ");");
             off += fields[i].padsize;
             continue;
         }
@@ -882,7 +882,7 @@ inline void CodeGen::GenVarEnumFromLoc(Loc lv, TypeExpr *et, const string &stk) 
         if (!lv.val) {
             auto sz = T();
             L("int64_t ", sz, " = ", SizeX(lv.t, lv.s), ";");
-            L("memcpy(", Top(stk), ", ", lv.s, ", (size_t)", sz, ");");
+            L("GS_MEMCPY(", Top(stk), ", ", lv.s, ", (size_t)", sz, ");");
             Bump(stk, sz);
         } else {
             EmitValStore(stk, lv.t, lv.s);
@@ -899,7 +899,7 @@ inline void CodeGen::GenVarEnumFromLoc(Loc lv, TypeExpr *et, const string &stk) 
         L("case ", TagConst(ei, (int)vi), ":");
         ind++;
         if (psz) {
-            L("memcpy(", Top(stk), ", &", sv, ".u.v_",
+            L("GS_MEMCPY(", Top(stk), ", &", sv, ".u.v_",
               Sanitize(ei->en->variants[vi].name), ", ", psz, ");");
             Bump(stk, cat(psz));
         }
@@ -962,7 +962,7 @@ inline void CodeGen::FixedLitAtStk(Node *n, const string &stk) {
     auto et = n->exprtype;
     auto Gap = [&](int64_t bytes) {
         if (bytes <= 0) return;
-        L("memset(", Top(stk), ", 0, ", bytes, ");");
+        L("GS_MEMZERO(", Top(stk), ", ", bytes, ");");
         Bump(stk, cat(bytes));
     };
     // `fieldoff` is the field's byte offset within the value, which is
@@ -1215,7 +1215,7 @@ inline void CodeGen::StructLitAt(StructLit *sl, const string &base, bool inroot,
             auto path = cat(b, ".", Sanitize(fields[i].name));
             if (!init) {   // Omitted optional: null.
                 assert(ft->kind == TY_REF);
-                L("memset(&", path, ", 0, sizeof(", path, "));");
+                L("GS_MEMZERO(&", path, ", sizeof(", path, "));");
                 continue;
             }
             if (ft->kind == TY_REF && ft->ref->lenstorage >= 0) {
@@ -1237,7 +1237,7 @@ inline void CodeGen::StructLitAt(StructLit *sl, const string &base, bool inroot,
         auto si = SI(et);
         // Nothing writes the C object of a struct or a variant without
         // fields, and copying one nothing wrote is undefined.
-        if (LastRealField(si->st->fields) < 0) L("memset(&", base, ", 0, sizeof(", base, "));");
+        if (LastRealField(si->st->fields) < 0) L("GS_MEMZERO(&", base, ", sizeof(", base, "));");
         fieldset(base, si->st->fields, si->ftypes, StructLayout(si), 0);
         return;
     }
@@ -1245,7 +1245,7 @@ inline void CodeGen::StructLitAt(StructLit *sl, const string &base, bool inroot,
         auto ei = EIVar(et);
         auto vi = ei->en->VariantIndex(et->var->variant);
         if (LastRealField(ei->en->variants[vi].fields) < 0)
-            L("memset(&", base, ", 0, sizeof(", base, "));");
+            L("GS_MEMZERO(&", base, ", sizeof(", base, "));");
         fieldset(base, ei->en->variants[vi].fields, ei->vftypes[vi], VariantLayout(ei, vi), 0);
         return;
     }
@@ -1426,7 +1426,7 @@ inline void CodeGen::GenFrameObjLit(StructLit *sl, StructInst *si, const string 
         }
         if (!init || Is<NullLit>(init)) {
             assert(ft->kind == TY_REF && ft->ref->optional);
-            L("memset(&", flv, ", 0, sizeof(", flv, "));");
+            L("GS_MEMZERO(&", flv, ", sizeof(", flv, "));");
             continue;
         }
         // Only the `in pool` form can be a frame object's field (C.2), so
@@ -1450,7 +1450,7 @@ inline void CodeGen::GenFieldInits(StructLit *sl, const vector<Field> &fields,
     for (size_t i = 0; i < fields.size(); i++) {
         if (fields[i].ispad) {
             auto n = fields[i].padsize > 0 ? fields[i].padsize : 0;
-            if (n) { L("memset(", Top(stk), ", 0, ", n, ");"); Bump(stk, cat(n)); }
+            if (n) { L("GS_MEMZERO(", Top(stk), ", ", n, ");"); Bump(stk, cat(n)); }
             continue;
         }
         auto init = sl->InitFor((int)i);
@@ -1459,7 +1459,7 @@ inline void CodeGen::GenFieldInits(StructLit *sl, const vector<Field> &fields,
             // Relative-reference slot: store from the plain reference.
             if (!init) {
                 if (ft->ref->lenstorage == IS_VARINT) { L("*", Top(stk), " = 0;"); Bump(stk, "1"); }
-                else { L("memset(", Top(stk), ", 0, ", IntSize((IntStorage)ft->ref->lenstorage), ");");
+                else { L("GS_MEMZERO(", Top(stk), ", ", IntSize((IntStorage)ft->ref->lenstorage), ");");
                        Bump(stk, cat(IntSize((IntStorage)ft->ref->lenstorage))); }
                 continue;
             }
@@ -1472,7 +1472,7 @@ inline void CodeGen::GenFieldInits(StructLit *sl, const vector<Field> &fields,
         if (!init) {
             // Omitted optional: null (checked by TC that a default exists otherwise).
             assert(ft->kind == TY_REF && ft->ref->optional);
-            L("memset(", Top(stk), ", 0, ", FixedSize(ft), ");");
+            L("GS_MEMZERO(", Top(stk), ", ", FixedSize(ft), ");");
             Bump(stk, cat(FixedSize(ft)));
             continue;
         }

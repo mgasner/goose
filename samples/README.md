@@ -2,7 +2,8 @@
 
 If you have not written Goose before, read [`docs/tutorial.md`](../docs/tutorial.md)
 first: it introduces the language by example and says which of these to read
-when.
+when. [`docs/reference.md`](../docs/reference.md) then covers the whole
+language, topic by topic.
 
 These short, self-contained programs demonstrate common programming tasks
 using Goose's memory model: flat data, references into growing arrays,

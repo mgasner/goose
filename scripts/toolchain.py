@@ -12,6 +12,7 @@ intent.
 
 import concurrent.futures
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -173,10 +174,11 @@ def native_imports(text):
 
 # What the compiler says when asked for the link inputs of a package it was
 # not built with (the runners then skip that module's fixtures, rather than
-# have the compiler build the package), and what a gfx test prints when
-# there is no GPU device to run on.
+# have the compiler build the package), and what the gfx package reports
+# when there is no GPU device to run on, whatever a program prefixes it with
+# (Mini Doom's "mini doom: ").
 GFX_UNAVAILABLE = "built without the package gfx"
-GFX_NO_DEVICE = "gfx: no GPU device"
+GFX_NO_DEVICE = "no GPU device"
 PHYSICS_UNAVAILABLE = "built without the package physics"
 UI_UNAVAILABLE = "built without the package gfx"
 AUDIO_UNAVAILABLE = "built without the package gfx"
@@ -679,7 +681,18 @@ def run_capture(argv, cwd=None, stdin_path=None):
     argv = [str(a) for a in argv]
     stdin_f = open(stdin_path, "rb") if stdin_path else None
     try:
-        r = subprocess.run(argv, cwd=cwd, stdin=stdin_f, capture_output=True)
+        # Linux will not run a file that a process holds open for writing
+        # (ETXTBSY). A program this process has just copied can still be open
+        # in a child that another runner thread started during the copy, until
+        # that child execs, so the run is retried for a moment.
+        for attempt in range(100):
+            try:
+                r = subprocess.run(argv, cwd=cwd, stdin=stdin_f, capture_output=True)
+                break
+            except OSError as e:
+                if e.errno != errno.ETXTBSY or attempt == 99:
+                    raise
+                time.sleep(0.01)
     finally:
         if stdin_f:
             stdin_f.close()

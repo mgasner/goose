@@ -1,0 +1,53 @@
+A=3
+flag=true
+text=hi
+3
+3
+3
+first=14
+second=15
+Pair<i32> { 14, 15 }
+first:14
+shadow
+second:15
+shadow
+0
+0
+0
+0
+false
+false
+Pair<u8> { 0, 0 }
+Pair<u8> { 0, 0 }
+0
+0
+1
+1
+11
+3
+3
+13
+4
+4
+14
+7
+-2
+97
+1.5
+-2.5
+true
+word
+1
+99
+0
+1
+42
+2
+99
+0
+1
+42
+1
+2
+ordinary fields
+ordinary types

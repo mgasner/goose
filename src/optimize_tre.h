@@ -140,7 +140,7 @@ struct TailRecursion {
     // specialization key — so the reference keeps the root the checker gave
     // it, and the rule it exists to protect still holds.
     bool Rebinds(Call *c, vector<pair<VarDef *, Node *>> &out) {
-        auto an = c->ArgNodes();
+        auto an = c->ValueArgNodes();
         if (an.size() != sp->params.size()) return false;
         for (size_t i = 0; i < an.size(); i++) {
             auto p = sp->params[i];

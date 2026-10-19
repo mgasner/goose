@@ -28,8 +28,10 @@
 
 This tutorial introduces Goose through examples. It assumes some experience
 with C, C++, Rust, Go, or a similar language and focuses on Goose's
-differences. Start here, consult [the specification](goose_spec.md) for exact
-rules, and see [`samples/`](../samples/README.md) for complete programs.
+differences. Start here, go on to [the language reference](reference.md)
+for the whole language topic by topic, consult [the specification](goose_spec.md)
+for exact rules, and see [`samples/`](../samples/README.md) for complete
+programs.
 
 Much of the syntax is familiar: braces, `let`, `fn`, `struct`, and `match`.
 The main difference is how arrays store and manage data. We start with where
@@ -212,6 +214,9 @@ fn divide(a: i64, b: i64) -> i64, bool {
 
 let q, ok = divide(7, 2);
 ```
+
+Variables (or fields, or elements) that already exist take them with `=`:
+`q, ok = divide(9, 3);`.
 
 Only `return` and a call's results carry several values, so a branch can't
 end in `a, b`: `return if c { 1, 2 } else { 3, 4 };` is an error, and each
@@ -1653,6 +1658,9 @@ saying which. The signatures that may cross are the ones from
 
 ## 20. Where to go next
 
+* **[`docs/reference.md`](reference.md)** — the whole language, topic by
+  topic, with a compiling example for every rule: where to go after this
+  tutorial, and where to look things up.
 * **[`samples/`](../samples/README.md)** — thirty-one complete programs in
   reading order, each one commented for what it demonstrates. Start with
   `01_tour` and `02_memory`, then jump to whatever looks like your problem.

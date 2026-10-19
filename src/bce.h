@@ -32,7 +32,8 @@
 // declaration and assignment equalities with recognizable right-hand sides,
 // ++/--/+=/-= which shift facts in place when the pre-state provably cannot
 // wrap at the variable's width, and completed checks: past `a[i]` the
-// program only continues with 0 <= i < len. Condition facts are suppressed
+// program only continues with 0 <= i < len. A `!=` is strict against a side
+// the facts already order (`len != 0` is `len >= 1`). Condition facts are suppressed
 // when evaluating the condition itself may have changed tracked state (a
 // mutating call inside it), since the comparison then ran against pre-kill
 // values.
@@ -55,7 +56,18 @@
 // of the two ranges, on a one-shot base. That is what proves a row-major
 // index — `y * W + x` against a `W * H` length — and the interval is only
 // stated when it fits the expression's own width, since §6.2 arithmetic wraps
-// there in release builds.
+// there in release builds. A sum whose one operand varies within a small
+// range is also related to the other operand: `i * 4 + b` for b in 0..3 lies
+// within three of `i * 4`.
+//
+// A multiple of a term by a constant (`x * m`, `x << k`) and a floor
+// quotient of one (`x >> k`, a nonnegative `x / m`) are Lin bases, which
+// remember their operand: two with the same m relate as their operands do,
+// scaled (`2 * i <= 2 * n - 2` from `i < n`) or divided and rounded up
+// (`j >> 5 <= ((n + 31) >> 5) - 1` from `j < n`), and the same multiple of
+// one base is one base, so `4 * i` and `4 * i + 4` bound a slice four long.
+// A completed check or a length that bounds a quotient bounds its operand in
+// turn (QuotBack): `resize((n + 31) >> 5)` puts n below 2^53.
 //
 // Aliasing uses the checker's reference provenance (VarDef::ref.root chains):
 // a write or grow/shrink kills the length bases of every place it may name.
@@ -86,11 +98,14 @@
 // Loops: a body is first walked in a kills-only mode to invalidate whatever
 // any earlier iteration may have changed, then walked for real; while-loop
 // condition facts re-establish at every body entry. Invariants (v >= 0,
-// v <= len(P), and wrap-freedom for the bridges above) are inferred by a
+// v <= len(P) + c, and wrap-freedom for the bridges above) are inferred by a
 // recording pass that checks every write of an eligible variable preserves
 // them, then granted as axioms to the judging pass — this is what proves the
 // classic `var i = 0; while i < a.len { ... a[i] ...; i++; }` and the
-// post-loop `a[start..i]` slice. Growth alone never breaks `v <= len(P)`, so
+// post-loop `a[start..i]` slice. The declaration picks c: 0, or what a start
+// above the length needs (`var j = 1` before `while j + 4 <= a.len`), and
+// also -1 where the start is below it, as a masked probe index stays.
+// Growth alone never breaks `v <= len(P) + c`, so
 // only a shrink disqualifies P. Globals get the same treatment across the
 // whole program (RunAll's first phase), which is what a cursor kept in a
 // global needs: its upper bound comes from the loop condition, its lower
@@ -134,6 +149,31 @@ struct BCE {
     int idxelided = 0, idxtotal = 0, slelided = 0, sltotal = 0;
     map<pair<int, int>, pair<int, int>> lineout;   // (file, line) -> (elided, kept).
 
+    // checkfree (docs/design/index_types.md): the source lines each checkfree
+    // function's text spans, nested functions and blocks included, and every
+    // check kept on one of them, with why, once per line and reason. A check
+    // belongs to the text it was written in, as for --bce-test: every
+    // specialization of it, every inlined copy and whatever the optimizer
+    // restated it as.
+    struct Span { SFunction *sf; int file, lo, hi; };
+    vector<Span> checkfreespans;
+    struct KeptCheck { Line line; string why; };
+    vector<KeptCheck> checkfreefails;
+
+    void CheckfreeSpans() {
+        for (auto sf : ast.functions) {
+            if (!sf->checkfree || !sf->body) continue;
+            auto hi = sf->line.line;
+            function<void(Node *)> last = [&](Node *n) {
+                if (!n) return;
+                if (n->line.fileidx == sf->line.fileidx) hi = std::max(hi, n->line.line);
+                n->Children(last);
+            };
+            last(sf->body);
+            checkfreespans.push_back({ sf, sf->line.fileidx, sf->line.line, hi });
+        }
+    }
+
     BCE(Ast &_ast) : ast(_ast) {}
 
     // ------------------------------------------------------------------
@@ -152,6 +192,14 @@ struct BCE {
 
     struct Fact { Base l, r; int64_t c; };   // l <= r + c.
     struct Term { bool ok = false; Base b; int64_t off = 0; };
+
+    // A one-shot base that is an exact multiple of a term, tmp == x * m, or
+    // a floor quotient of one, tmp == floor(x / m), m >= 1. Two of these
+    // with the same m relate as their operands do (LinRelate), which is what
+    // compares `2 * i + 1` with a `2 * n` length or `j >> 5` with a
+    // `(n + 31) >> 5` one. A quotient is `exact` once x's term is known to
+    // be the value the machine divided rather than one that wrapped.
+    struct Lin { int tmp; Term x; int64_t m; bool quot, exact; };
 
     // The generation of each variable or place id a kill has bumped, by id;
     // the others are at 0. A body bumps few, and a flow is copied at every
@@ -189,9 +237,13 @@ struct BCE {
             return r;
         }
     };
+    // The Lin bases a flow has made, with their operands named as that flow
+    // names them: a shift reinterprets a variable's base in place
+    // (ShiftCore), so the operands move with the facts, path by path.
     struct Flow {
         vector<Fact> facts;
         Gens vgen, pgen;   // By var id / place id.
+        small_vector<Lin, 4> lins;
     };
     Flow flow;
     int nextgen = 0;
@@ -283,6 +335,7 @@ struct BCE {
         // A limited array's static capacity, which its length never exceeds;
         // -1 for every other place.
         int64_t cap = -1;
+        TypeExpr *arr = nullptr;   // The array's type, for an array's place.
     };
     vector<Place> places;
     map<pair<VarDef *, vector<int>>, int> placeids;
@@ -399,6 +452,7 @@ struct BCE {
             P.ultv = u;
         }
         P.lenmut = arr && t->arr->akind != A_VAR;
+        if (arr) P.arr = t;
         if (arr && t->arr->akind == A_LIMITED && t->arr->size >= 0) P.cap = t->arr->size;
         P.slice = slice;
         P.inelem = slice || (arr && t->arr->akind != A_GROW && t->arr->akind != A_GROWSHRINK);
@@ -516,7 +570,9 @@ struct BCE {
         // Every plain assignment `v = e` (not the declaration) provably
         // lowers or keeps v (setdec), or raises or keeps it (setinc).
         bool setdec = true, setinc = true;
-        vector<int> le;          // Surviving `v <= len(P)` candidates.
+        // Surviving `v <= len(P) + c` candidates, (P, c); the declaration
+        // decides c (RecordSet).
+        vector<pair<int, int64_t>> le;
         bool declseen = false;
     };
     map<VarDef *, Cand> cands;
@@ -531,7 +587,7 @@ struct BCE {
 
     // Granted invariants for the judging pass.
     set<VarDef *> ge0;
-    map<VarDef *, vector<int>> lelen;
+    map<VarDef *, vector<pair<int, int64_t>>> lelen;   // v <= len(P) + c, as (P, c).
     map<VarDef *, int> mono;   // +1 nondecreasing / -1 nonincreasing, wrap-free.
 
     // While recording: the variables whose assumed invariants some query or
@@ -588,7 +644,8 @@ struct BCE {
     // The call graph over live specializations: callees per caller, the
     // number of ordinary call sites per callee, and the callees also reached
     // some way a site cannot describe (a thread spawn, print's format
-    // overloads), plus the order every callee precedes its callers in.
+    // overloads, an export's C wrapper), plus the order every callee
+    // precedes its callers in.
     map<FnSpec *, vector<FnSpec *>> callees;
     map<FnSpec *, int> nsites;
     set<FnSpec *> opaquesites;
@@ -614,6 +671,52 @@ struct BCE {
     map<FnSpec *, Sites> sites;
 
     // ------------------------------------------------------------------
+    // Index and bound types (§3.11). A value of one is below its array's
+    // length (at most it, for a bound) whenever it can be observed, and the
+    // array never shrinks, so the axiom holds against the length's current
+    // generation. Each such array has a place from the prescan on, so that
+    // every kill of its length reaches it.
+
+    set<VarDef *> indexarrays;       // Every array an index type names.
+    map<VarDef *, int> ixpid;        // Its place in this body.
+    // One-shot bases standing for a value of an index or bound type read out
+    // of storage: its array's place and the slack (-1, or 0 for a bound).
+    map<int, pair<int, int>> tmplen;
+
+    void IndexPlaces() {
+        ixpid.clear();
+        tmplen.clear();
+        for (auto a : indexarrays) ixpid[a] = PlaceOfVar(a);
+    }
+
+    // The place and slack of base b's index type, or a pid of -1.
+    pair<int, int> IndexBoundOf(const Base &b) {
+        if (b.kind == BK_TMP) {
+            auto it = tmplen.find(b.id);
+            return it == tmplen.end() ? pair { -1, 0 } : it->second;
+        }
+        if (b.kind != BK_VAR) return { -1, 0 };
+        auto t = varof[b.id]->type;
+        if (!IsIndexT(t)) return { -1, 0 };
+        auto it = ixpid.find(t->ix->arr);
+        return { it == ixpid.end() ? -1 : it->second, t->ix->upto ? 0 : -1 };
+    }
+
+    // A value of index or bound type t that no other term names: a fresh
+    // base, non-negative, below the array's length.
+    Term IndexTypeTerm(TypeExpr *t) {
+        if (mode == M_KILLS || !IsIndexT(t)) return {};
+        auto it = ixpid.find(t->ix->arr);
+        if (it == ixpid.end() || it->second < 0) return {};
+        auto m = TmpBase();
+        auto hi = t->intstorage == IS_U64 ? LENMAX
+                                          : std::min(IntRange(t->intstorage).second, LENMAX);
+        tmpival[m.id] = { 0, hi };
+        tmplen[m.id] = { it->second, t->ix->upto ? 0 : -1 };
+        return Term { true, m, 0 };
+    }
+
+    // ------------------------------------------------------------------
     // The query: prove l <= r + c from facts + axioms, by shortest path.
 
     bool Query(Base l, Base r, int64_t c) {
@@ -630,7 +733,8 @@ struct BCE {
     // Shortest paths from `l` to each base in `to`: one run serves every
     // target, which is what relating a call's arguments pairwise needs. The
     // graph is the facts and the bases they name, few enough to sit in place.
-    small_vector<int64_t, 4> DistsFrom(Base l, span<const Base> to) {
+    // With `rev`, the paths run the other way: from each base in `to` to `l`.
+    small_vector<int64_t, 4> DistsFrom(Base l, span<const Base> to, bool rev = false) {
         small_vector<Base, 16> nodes = { Zero(), l };
         auto add = [&](const Base &b) {
             for (auto &x : nodes) if (x == b) return;
@@ -638,14 +742,20 @@ struct BCE {
         };
         for (auto &b : to) add(b);
         for (auto &f : flow.facts) { add(f.l); add(f.r); }
-        // Length bases contributed by granted v <= len(P) invariants.
+        // Length bases of index and bound types' arrays.
+        if (!ixpid.empty())
+            for (size_t i = 0; i < nodes.size(); i++) {
+                auto [pid, slack] = IndexBoundOf(nodes[i]);
+                if (pid >= 0) add(LenBase(pid));
+            }
+        // Length bases contributed by granted v <= len(P) + c invariants.
         if (!lelen.empty())
             for (size_t i = 0; i < nodes.size(); i++) {
                 if (nodes[i].kind != BK_VAR) continue;
                 auto it = lelen.find(varof[nodes[i].id]);
                 if (it != lelen.end()) {
                     NoteAxiom(it->first);
-                    for (auto pid : it->second) add(LenBase(pid));
+                    for (auto [pid, c] : it->second) add(LenBase(pid));
                 }
             }
         auto idx = [&](const Base &b) {
@@ -680,23 +790,33 @@ struct BCE {
                     NoteAxiom(v);
                     edges.push_back({ 0, (int)i, 0 });
                 }
+                if (IsIndexT(t)) edges.push_back({ 0, (int)i, 0 });   // Unsigned, u64 too.
                 auto it = lelen.find(v);
                 if (it != lelen.end())
-                    for (auto pid : it->second) {
+                    for (auto [pid, c] : it->second) {
                         auto li = idx(LenBase(pid));
-                        if (li >= 0) edges.push_back({ (int)i, li, 0 });
+                        if (li >= 0) edges.push_back({ (int)i, li, c });
                     }
             }
         }
+        // Index and bound types: v <= len(P) + slack.
+        if (!ixpid.empty())
+            for (size_t i = 0; i < nodes.size(); i++) {
+                auto [pid, slack] = IndexBoundOf(nodes[i]);
+                if (pid < 0) continue;
+                auto li = idx(LenBase(pid));
+                if (li >= 0) edges.push_back({ (int)i, li, slack });
+            }
         small_vector<int64_t, 16> dist;
         dist.resize(nodes.size(), INF);
         dist[idx(l)] = 0;
         for (size_t round = 0; round < nodes.size(); round++) {
             auto changed = false;
             for (auto &e : edges) {
-                if (dist[e.a] == INF) continue;
-                auto nd = SatAdd(dist[e.a], e.w);
-                if (nd < dist[e.b]) { dist[e.b] = nd; changed = true; }
+                auto a = rev ? e.b : e.a, b = rev ? e.a : e.b;
+                if (dist[a] == INF) continue;
+                auto nd = SatAdd(dist[a], e.w);
+                if (nd < dist[b]) { dist[b] = nd; changed = true; }
             }
             if (!changed) break;
         }
@@ -751,12 +871,15 @@ struct BCE {
     // stated when the machine's own arithmetic agrees with it: §6.2 wraps at
     // the operation's width in release builds, so a result the facts place
     // outside that width is not the value the program computed.
-    Term IvalTerm(TypeExpr *t, int64_t lo, int64_t hi) {
-        if (!t || t->kind != TY_INT || t->intstorage == IS_U64 ||
-            t->intstorage == IS_VARINT)
-            return {};
+    static bool FitsType(TypeExpr *t, int64_t lo, int64_t hi) {
+        if (!t || t->kind != TY_INT || t->intstorage == IS_U64 || t->intstorage == IS_VARINT)
+            return false;
         auto [tlo, thi] = IntRange(t->intstorage);
-        if (lo < tlo || hi > thi) return {};
+        return lo >= tlo && hi <= thi;
+    }
+
+    Term IvalTerm(TypeExpr *t, int64_t lo, int64_t hi) {
+        if (!FitsType(t, lo, hi)) return {};
         auto m = TmpBase();
         tmpival[m.id] = { lo, hi };
         return Term { true, m, 0 };
@@ -773,6 +896,8 @@ struct BCE {
             return {};
         auto lt = TermOf(b->left), rt = TermOf(b->right);
         if (!lt.ok || !rt.ok) return {};
+        if (rt.b.kind == BK_ZERO && rt.off >= 1) return ScaledTerm(t, lt, rt.off);
+        if (lt.b.kind == BK_ZERO && lt.off >= 1) return ScaledTerm(t, rt, lt.off);
         auto li = BoundsOf(lt), ri = BoundsOf(rt);
         if (!li.ok || !ri.ok) return {};
         int64_t c[4];
@@ -799,13 +924,156 @@ struct BCE {
         auto lo = minus ? li.lo - ri.hi : li.lo + ri.lo;
         auto hi = minus ? li.hi - ri.lo : li.hi + ri.hi;
         if (lo < -CCAP || hi > CCAP) return {};
-        auto r = IvalTerm(OpType(b), lo, hi);
-        if (r.ok && minus) exactdiffs.insert(r.b.id);
-        return r;
+        auto s = IvalTerm(OpType(b), lo, hi);
+        if (!s.ok) return {};
+        if (minus) exactdiffs.insert(s.b.id);
+        // Against an operand whose partner varies little, the result is that
+        // operand plus a small range: `i * 4 + b` for b in 0..3 stays within
+        // three of `i * 4`, which a length of `n * 4` bounds. The partner
+        // lies in [plo, phi] (negated for a subtrahend).
+        auto near = [&](const Term &x, int64_t plo, int64_t phi) {
+            if (!SmallOff(plo) || !SmallOff(phi) || !SmallOff(phi - plo)) return;
+            AddFactB(s.b, x.b, SatAdd(x.off, phi));               // s <= x + phi.
+            AddFactB(x.b, s.b, SatSub(0, SatAdd(x.off, plo)));    // x + plo <= s.
+        };
+        if (minus) {
+            near(lt, -ri.hi, -ri.lo);
+        } else {
+            near(lt, ri.lo, ri.hi);
+            near(rt, li.lo, li.hi);
+        }
+        return s;
     }
     // The interval terms above of a subtraction: the machine computed the
     // mathematical difference (DiffOf).
     set<int> exactdiffs;
+
+    // ------------------------------------------------------------------
+    // Scaled and quotient bases (Lin).
+
+    static Base TmpB(int id) { return Base { BK_TMP, id, 0 }; }
+    static constexpr size_t MAXLINS = 16;
+
+    Lin *LinOf(const Base &b) {
+        if (b.kind != BK_TMP) return nullptr;
+        for (auto &l : flow.lins) if (l.tmp == b.id) return &l;
+        return nullptr;
+    }
+
+    // Whether a quotient's operand term is the value the machine shifted.
+    // A sum with a positive offset is, once the quotient is known to be
+    // nonnegative: the i64 sum could only have wrapped to a value near
+    // -2^63, which every shift short of 63 leaves negative.
+    bool LinExact(Lin &l) {
+        if (!l.exact && l.quot && l.x.off > 0 && Query(Zero(), TmpB(l.tmp), 0)) l.exact = true;
+        return l.exact;
+    }
+
+    // Records l, making room by dropping one no fact names any more.
+    void AddLin(const Lin &l) {
+        auto &ls = flow.lins;
+        if (ls.size() >= MAXLINS) {
+            size_t drop = 0;
+            for (size_t i = 0; i < ls.size(); i++)
+                if (!Mentioned(TmpB(ls[i].tmp))) { drop = i; break; }
+            ls.erase(ls.begin() + drop);
+        }
+        ls.push_back(l);
+    }
+
+    // States what the operands of a new Lin base and of each earlier one
+    // with the same m show about the two bases, then records the new one:
+    // `x <= y + c` gives `x * m <= y * m + c * m`, and for floor quotients
+    // `x / m <= y / m + ceil(c / m)`. Only bases some fact names are worth
+    // relating; the others can no longer meet a length or a bound.
+    void LinRelate(Lin l) {
+        small_vector<Base, 4> to;
+        small_vector<int, 4> who;
+        if (LinExact(l))
+            for (size_t i = 0; i < flow.lins.size(); i++) {
+                auto &e = flow.lins[i];
+                if (e.m == l.m && e.quot == l.quot && Mentioned(TmpB(e.tmp)) && LinExact(e)) {
+                    to.push_back(e.x.b);
+                    who.push_back((int)i);
+                }
+            }
+        if (!to.empty()) {
+            auto fwd = DistsFrom(l.x.b, to), bwd = DistsFrom(l.x.b, to, true);
+            // From `xb <= yb + d` and the operands' offsets, the bound
+            // between the Lin bases.
+            auto scaled = [&](int64_t d, int64_t xoff, int64_t yoff) -> int64_t {
+                if (d == INF) return INF;
+                auto c = SatAdd(d, SatSub(xoff, yoff));
+                if (c == INF || c <= -CCAP || c >= CCAP) return INF;
+                if (l.quot) return c >= 0 ? (c + l.m - 1) / l.m : -((-c) / l.m);
+                int64_t r;
+                return MulIn(c, l.m, r) ? r : INF;
+            };
+            for (size_t k = 0; k < to.size(); k++) {
+                auto &e = flow.lins[who[k]];
+                auto c1 = scaled(fwd[k], l.x.off, e.x.off);
+                if (c1 != INF) AddFactB(TmpB(l.tmp), TmpB(e.tmp), c1);
+                auto c2 = scaled(bwd[k], e.x.off, l.x.off);
+                if (c2 != INF) AddFactB(TmpB(e.tmp), TmpB(l.tmp), c2);
+            }
+        }
+        AddLin(l);
+    }
+
+    // `x * m` for a constant m >= 1, where x's bounds show the product fits
+    // its type: the base of an earlier multiple of the same operand base,
+    // offset by m times the operands' difference (so `4 * i` and
+    // `4 * i + 4` share one), or a new base related to the earlier ones.
+    Term ScaledTerm(TypeExpr *t, const Term &x, int64_t m) {
+        auto xi = BoundsOf(x);
+        int64_t lo, hi;
+        if (!xi.ok || !MulIn(xi.lo, m, lo) || !MulIn(xi.hi, m, hi) || !FitsType(t, lo, hi))
+            return {};
+        if (x.b.kind == BK_ZERO) return IvalTerm(t, lo, hi);
+        if (m == 1) return x;
+        for (auto &e : flow.lins) {
+            int64_t d;
+            if (!e.quot && e.m == m && e.x.b == x.b && MulIn(x.off - e.x.off, m, d) && SmallOff(d))
+                return Term { true, TmpB(e.tmp), d };
+        }
+        auto r = IvalTerm(t, lo, hi);
+        if (xi.lo >= 0) AddFactB(x.b, r.b, SatSub(0, x.off));   // x <= x * m.
+        LinRelate(Lin { r.b.id, x, m, false, true });
+        return r;
+    }
+
+    // `x << k` for a constant count, masked to the operation's width (§6.2):
+    // x times 2^k.
+    Term ShlTerm(Binary *b) {
+        if (mode == M_KILLS) return {};
+        auto t = OpType(b);
+        if (!t || t->kind != TY_INT || t->intstorage == IS_U64 || t->intstorage == IS_VARINT)
+            return {};
+        auto kt = TermOf(b->right);
+        if (!kt.ok || kt.b.kind != BK_ZERO) return {};
+        auto k = kt.off & (IntBits(t->intstorage) - 1);
+        if (k >= 60) return {};
+        auto xt = TermOf(b->left);
+        if (!xt.ok) return {};
+        return ScaledTerm(t, xt, int64_t(1) << k);
+    }
+
+    // A check or a length that bounds a floor quotient bounds its operand:
+    // q <= U gives x <= U * m + m - 1, and q >= L gives x >= L * m. A sieve
+    // gets the bound on n that its `i << 1` needs from `resize((n + 31) >> 5)`.
+    void QuotBack(const Term &t) {
+        if (!t.ok || mode == M_KILLS) return;
+        auto l = LinOf(t.b);
+        if (!l || !l->quot || !LinExact(*l)) return;
+        auto x = l->x;
+        auto m = l->m;
+        auto up = Dist(t.b, Zero()), dn = Dist(Zero(), t.b);
+        int64_t v;
+        if (up != INF && up < CCAP && MulIn(SatAdd(up, 1), m, v))
+            AddFactB(x.b, Zero(), SatSub(SatSub(v, 1), x.off));
+        if (dn != INF && dn > -CCAP && MulIn(SatSub(0, dn), m, v))
+            AddFactB(Zero(), x.b, SatSub(x.off, v));
+    }
 
     // ------------------------------------------------------------------
     // Term extraction: a machine integer expression as base + offset. Offset
@@ -836,7 +1104,8 @@ struct BCE {
             auto v = id->vdef;
             if (!v || !v->type || v->type->kind != TY_INT) return {};
             auto s = v->type->intstorage;
-            if (s == IS_U64 || s == IS_VARINT) return {};
+            // A u64 of an index type is below a length, so within i64.
+            if ((s == IS_U64 && !v->type->ix) || s == IS_VARINT) return {};
             return Term { true, VarBase(v), 0 };
         }
         if (auto d = Is<Dot>(n); d && d->member == B_LEN) return LenTermOf(d->obj);
@@ -859,20 +1128,28 @@ struct BCE {
         }
         if (auto b = Is<Binary>(n); b && b->op == T_MUL)
             return Derived(n, [&] { return MulTerm(b); });
+        if (auto b = Is<Binary>(n); b && b->op == T_SHL)
+            return Derived(n, [&] { return ShlTerm(b); });
         if (auto b = Is<Binary>(n); b && (b->op == T_MOD || b->op == T_BITAND))
             return Derived(n, [&] { return RangedOpTerm(b); });
         if (auto b = Is<Binary>(n); b && (b->op == T_DIV || b->op == T_SHR))
             return Derived(n, [&] { return QuotTerm(b); });
-        if (auto ac = Is<AsCast>(n)) return Derived(n, [&] { return CastTerm(ac); });
-        if (auto d = Is<Dot>(n); Is<Index>(n) || (d && d->IsField()))
-            return Derived(n, [&] { return LoadTerm(n); });
+        if (auto ac = Is<AsCast>(n))
+            return Derived(n, [&] {
+                auto t = CastTerm(ac);
+                return t.ok ? t : IndexTypeTerm(ac->totype);
+            });
         // A spliced-in call body (or a bare block) is its value expression.
         if (auto ib = Is<InlineBlock>(n)) return BlockValueTerm(ib->body, ib->sf);
         if (auto bl = Is<Block>(n)) return BlockValueTerm(bl, nullptr);
         // A value read out of storage or returned by a call has no base, but
         // a narrow integer type still bounds it.
         if (Is<Index>(n) || Is<Dot>(n) || Is<Call>(n))
-            return Derived(n, [&] { return TypeRangeTerm(n); });
+            return Derived(n, [&] {
+                return IsIndexT(n->exprtype) ? IndexTypeTerm(n->exprtype) : TypeRangeTerm(n);
+            });
+        // Any other value of an index or bound type: a branch's, a match's.
+        if (IsIndexT(n->exprtype)) return Derived(n, [&] { return IndexTypeTerm(n->exprtype); });
         return {};
     }
 
@@ -990,7 +1267,21 @@ struct BCE {
         if (k == (shift ? 0 : 1)) return xt;
         auto iv = BoundsOf(xt);
         auto bounded = iv.ok && (shift || iv.lo >= 0);
-        if (!nonneg && !bounded) return {};
+        // As a floor quotient by m: a shift floors whatever the sign (§6.2),
+        // a division where the dividend is nonnegative.
+        auto m = shift ? (k < 60 ? int64_t(1) << k : 0) : k;
+        auto lin = m >= 2 && m < CCAP && xt.b.kind != BK_ZERO && (shift || nonneg);
+        if (!nonneg && !bounded && !lin) return {};
+        auto exact = shift ? NoWrap(xt, t->intstorage) : nonneg;
+        // The same dividend base again: the same quotient, or one whole steps
+        // from it where both operands are exact.
+        if (lin)
+            for (auto &e : flow.lins) {
+                if (!e.quot || e.m != m || !(e.x.b == xt.b)) continue;
+                auto d = xt.off - e.x.off;
+                if (d == 0 || (exact && LinExact(e) && d % m == 0))
+                    return Term { true, TmpB(e.tmp), d / m };
+            }
         auto q = TmpBase();
         if (bounded) {
             tmpival[q.id] = shift ? pair<int64_t, int64_t> { iv.lo >> k, iv.hi >> k }
@@ -1001,6 +1292,7 @@ struct BCE {
             auto below = (shift || k >= 2) && Query(Zero(), xt.b, SatSub(xt.off, 1));
             AddFactB(q, xt.b, below ? SatSub(xt.off, 1) : xt.off);
         }
+        if (lin) LinRelate(Lin { q.id, xt, m, true, exact });
         return Term { true, q, 0 };
     }
 
@@ -1036,19 +1328,6 @@ struct BCE {
             if (!rt.ok || !CmpAdmissible(rt) || !Query(Zero(), rt.b, SatSub(rt.off, 1))) return;
         }
         b->nonneg = true;
-    }
-
-    // An element or field loaded from memory holds a value of its type, so
-    // one narrower than 64 bits lies in the type's range (§3.1) as a
-    // variable of that type does (the storage-range axiom): `T[s[i]]`
-    // against a `T[256]` needs no guard for a `u8` s. A wider one says
-    // nothing (TODO 0f).
-    Term LoadTerm(Node *n) {
-        if (mode == M_KILLS) return {};
-        auto t = n->exprtype;
-        if (!t || t->kind != TY_INT || IntBits(t->intstorage) >= 64) return {};
-        auto [lo, hi] = IntRange(t->intstorage);
-        return IvalTerm(t, lo, hi);
     }
 
     // A numeric cast whose value is inside the target's range is the
@@ -1180,6 +1459,7 @@ struct BCE {
         auto lb = LenBase(pid);
         AddFactB(lb, t.b, t.off);
         AddFactB(t.b, lb, SatSub(0, t.off));
+        QuotBack(t);
     }
 
     // Could place P name the same array as a write whose target is the exact
@@ -1208,6 +1488,27 @@ struct BCE {
         return Reach(P.rootv) || (P.ultkind == UK_OWNED ? Reach(P.ultv) : true);
     }
 
+    // Whether two array (or element) types are surely different types: an
+    // array is of one type, so places of two such are different arrays,
+    // whatever reference reaches either.
+    static bool DistinctTypes(TypeExpr *a, TypeExpr *b) {
+        if (!a || !b) return false;
+        if (a->kind != b->kind) return true;
+        switch (a->kind) {
+            case TY_INT:
+                if (a->intstorage != b->intstorage || !a->ix != !b->ix) return true;
+                return a->ix && (a->ix->arr != b->ix->arr || a->ix->upto != b->ix->upto);
+            case TY_FLT: return a->fltstorage != b->fltstorage;
+            case TY_STRUCT: return a->struc->st != b->struc->st;
+            case TY_ENUM: return a->enu->en != b->enu->en;
+            case TY_ARRAY:
+                return a->arr->akind != b->arr->akind || DistinctTypes(a->arr->sub, b->arr->sub);
+            case TY_SLICE: return DistinctTypes(a->sub, b->sub);
+            case TY_REF: return DistinctTypes(a->ref->sub, b->ref->sub);
+            default: return false;
+        }
+    }
+
     // Kills for a grow/shrink builtin; the receiver itself gets the exact
     // delta when one is known, possible aliases the directional bump. Returns
     // the receiver's place id (or -1).
@@ -1215,6 +1516,9 @@ struct BCE {
         if (recv) NoteStorage(ExprTarget(recv));
         auto failidx = false, crossed = false;
         auto pid = recv ? PlaceOf(recv, &failidx, &crossed) : -1;
+        auto rt = recv ? recv->exprtype : nullptr;
+        if (rt && rt->kind == TY_REF) rt = rt->ref->sub;
+        if (rt && rt->kind != TY_ARRAY) rt = nullptr;
         // A receiver reached through an element (a[i].f.push(...)) is an
         // element-interior array, which only references into the element
         // measure -- unless a reference read on the way led out of the
@@ -1225,6 +1529,7 @@ struct BCE {
         }
         for (size_t i = 0; i < places.size(); i++) {
             if (!places[i].lenmut) continue;
+            if ((int)i != pid && DistinctTypes(places[i].arr, rt)) continue;
             if (!AffectedByWrite((int)i, pid, UK_OPAQUE, nullptr, nullptr)) continue;
             if ((int)i == pid && exact != INT64_MIN) ExactLenStep(pid, exact);
             else BumpPlace((int)i, dir);
@@ -1232,10 +1537,17 @@ struct BCE {
         return pid;
     }
 
-    void StorageWriteKill(int tk, VarDef *tu, VarDef *chainroot) {
+    void StorageWriteKill(int tk, VarDef *tu, VarDef *chainroot, TypeExpr *only = nullptr) {
         NoteStorage(UltTarget(tk, tu));
         for (size_t i = 0; i < places.size(); i++)
-            if (AffectedByWrite((int)i, -1, tk, tu, chainroot)) BumpPlace((int)i, 0);
+            if (!OtherArray((int)i, only) && AffectedByWrite((int)i, -1, tk, tu, chainroot))
+                BumpPlace((int)i, 0);
+    }
+
+    // Whether place i is surely not an array of type `only`, the one a write
+    // can change (null: any).
+    bool OtherArray(int i, TypeExpr *only) {
+        return only && places[i].arr && DistinctTypes(places[i].arr, only);
     }
 
     // A slice stored into a slot: a slice variable, a field or element in
@@ -1376,9 +1688,11 @@ struct BCE {
 
     // A write into the storage place recvpid names, by the aliasing rules of
     // a direct write to it.
-    void KillPlaceWrite(int recvpid) {
+    void KillPlaceWrite(int recvpid, TypeExpr *only = nullptr) {
         for (size_t i = 0; i < places.size(); i++)
-            if (AffectedByWrite((int)i, recvpid, UK_OPAQUE, nullptr, nullptr)) BumpPlace((int)i, 0);
+            if (!OtherArray((int)i, only) &&
+                AffectedByWrite((int)i, recvpid, UK_OPAQUE, nullptr, nullptr))
+                BumpPlace((int)i, 0);
     }
 
     // A write into storage a parameter root class names. None of this
@@ -1388,9 +1702,10 @@ struct BCE {
     // local may be hit. Any other class -- the one an inlined body's
     // parameter kept, which stands for this body's arguments to it -- may
     // name whatever is reachable.
-    void KillClassWrite(VarDef *cls) {
+    void KillClassWrite(VarDef *cls, TypeExpr *only = nullptr) {
         auto own = ownclasses.count(cls) != 0;
         for (size_t i = 0; i < places.size(); i++) {
+            if (OtherArray((int)i, only)) continue;
             auto &P = places[i];
             auto hit = own ? P.ultkind == UK_OPAQUE ||
                                  (P.ultkind == UK_OWNED && OwnerTarget(P.ultv).kind == TG_VAR)
@@ -1428,18 +1743,22 @@ struct BCE {
 
     // Whether a value of type t holds a length by value: a slice, an array
     // other than a fixed one, or a fixed array, struct or enum holding one.
-    // A nominal type whose instance is not at hand counts as one.
-    static bool HoldsLen(TypeExpr *t, int depth = 0) {
+    // A nominal type whose instance is not at hand counts as one. With
+    // `refs`, a reference anywhere in it counts too: storing one redirects
+    // whatever place is reached through it.
+    static bool HoldsLen(TypeExpr *t, bool refs = false, int depth = 0) {
         if (!t || depth > 32) return true;
         auto any = [&](const vector<TypeExpr *> &fts) {
-            for (auto ft : fts) if (ft && HoldsLen(ft, depth + 1)) return true;
+            for (auto ft : fts) if (ft && HoldsLen(ft, refs, depth + 1)) return true;
             return false;
         };
         switch (t->kind) {
             case TY_SLICE:
                 return true;
+            case TY_REF:
+                return refs;
             case TY_ARRAY:
-                return t->arr->akind != A_FIXED || HoldsLen(t->arr->sub, depth + 1);
+                return t->arr->akind != A_FIXED || HoldsLen(t->arr->sub, refs, depth + 1);
             case TY_STRUCT:
                 return !t->struc->inst || any(t->struc->inst->ftypes);
             case TY_ENUM: case TY_VARIANT: {
@@ -1495,6 +1814,13 @@ struct BCE {
         if (!Is<SliceExpr>(lv) && KillSliceArg(a, lv)) return;
         auto t = ArgTarget(a);
         NoteStorage(t);
+        // An array of scalars holds no other array, so a write through it
+        // changes the length of an array of its own type only.
+        auto at = lv->exprtype;
+        if (at && at->kind == TY_REF) at = at->ref->sub;
+        auto sub = at && at->kind == TY_ARRAY ? at->arr->sub : nullptr;
+        auto only = sub && (sub->kind == TY_INT || sub->kind == TY_FLT || sub->kind == TY_BOOL)
+                        ? at : nullptr;
         switch (t.kind) {
             case TG_NONE:
                 return;
@@ -1502,15 +1828,15 @@ struct BCE {
                 // The argument's own place is the precise target; a struct
                 // or a slice expression has none, so all of the variable goes.
                 auto pid = Is<SliceExpr>(lv) ? -1 : PlaceOf(lv);
-                if (pid >= 0) KillPlaceWrite(pid);
-                else StorageWriteKill(UK_OWNED, t.v, t.v);
+                if (pid >= 0) KillPlaceWrite(pid, only);
+                else StorageWriteKill(UK_OWNED, t.v, t.v, only);
                 return;
             }
             case TG_CLASS:
-                KillClassWrite(t.v);
+                KillClassWrite(t.v, only);
                 return;
             default:
-                StorageWriteKill(UK_OPAQUE, nullptr, nullptr);
+                StorageWriteKill(UK_OPAQUE, nullptr, nullptr, only);
                 return;
         }
     }
@@ -1758,7 +2084,7 @@ struct BCE {
             st.wrapfree = st.wrapfree && nowrap;
             st.ge0 = st.ge0 && nowrap;
             for (auto pit = st.le.begin(); pit != st.le.end();)
-                if (Query(VarBase(v), LenBase(*pit), -c)) ++pit;      // v <= len - c.
+                if (Query(VarBase(v), LenBase(pit->first), SatSub(pit->second, c))) ++pit;
                 else pit = st.le.erase(pit);
         } else if (c < 0) {
             auto nowrap = Query(Zero(), VarBase(v), SatSub(c, lo));   // v >= lo - c.
@@ -1773,10 +2099,27 @@ struct BCE {
         auto it = cands.find(v);
         if (it == cands.end()) return;
         auto &st = it->second;
+        // The declaration's value decides how far above len(P) the bound
+        // sits: `var j = 1` before a loop that strides j up to `j + 4 <=
+        // len` stays within len + 1, and a value below len, such as a masked
+        // index, can keep strictly below it, which bounds an index by
+        // itself.
+        if (isdecl && !st.declseen) {
+            vector<pair<int, int64_t>> le;
+            for (auto [pid, c] : st.le) {
+                auto d = t.ok ? Dist(t.b, LenBase(pid)) : INF;
+                if (d == INF) continue;
+                auto need = SatAdd(d, t.off);
+                if (!SmallOff(need)) continue;
+                le.push_back({ pid, std::max<int64_t>(need, 0) });
+                if (need < 0) le.push_back({ pid, -1 });
+            }
+            st.le = std::move(le);
+        }
         if (isdecl) st.declseen = true;
         st.ge0 = st.ge0 && NoWrap(t, v->type->intstorage) && Query(Zero(), t.b, t.off);
         for (auto pit = st.le.begin(); pit != st.le.end();)
-            if (t.ok && Query(t.b, LenBase(*pit), SatSub(0, t.off))) ++pit;
+            if (t.ok && Query(t.b, LenBase(pit->first), SatSub(pit->second, t.off))) ++pit;
             else pit = st.le.erase(pit);
         Unassume(v, st);
     }
@@ -1816,7 +2159,7 @@ struct BCE {
         auto it = lelen.find(v);
         if (it != lelen.end()) {
             NoteAxiom(v);
-            for (auto pid : it->second) AddFactB(vb, LenBase(pid), 0);
+            for (auto [pid, c] : it->second) AddFactB(vb, LenBase(pid), c);
         }
     }
 
@@ -1849,6 +2192,9 @@ struct BCE {
             if (l == r) continue;
             f.c = SatAdd(f.c, l ? c : -c);
         }
+        for (auto &l : flow.lins)
+            if (l.x.b == vb) l.x.off = SatSub(l.x.off, c);
+        erase_if(flow.lins, [](const Lin &l) { return !SmallOff(l.x.off); });
     }
 
     void ShiftWrite(VarDef *v, int64_t c) {
@@ -1877,6 +2223,19 @@ struct BCE {
             AddFactB(nb, t.b, t.off);
             AddFactB(t.b, nb, SatSub(0, t.off));
         }
+    }
+
+    // `v + rhs` for the compound assignment `v += rhs` (or `-=`), which a
+    // plain assignment's rules then read: one node per assignment, so that
+    // terms derived from it are memoized like any other operand's.
+    map<Assign *, Binary *> compoundsums;
+    Binary *CompoundSum(Assign *a) {
+        auto &bin = compoundsums[a];
+        if (!bin) {
+            bin = ast.New<Binary>(a->line, a->op == T_PLUSEQ ? T_PLUS : T_MINUS, a->lval, a->rhs);
+            bin->exprtype = a->lval->exprtype;
+        }
+        return bin;
     }
 
     void VarKillWrite(VarDef *v) {
@@ -2041,8 +2400,9 @@ struct BCE {
             SlotWriteKill(tk, tu);
             return;
         }
-        auto scalar = pt && (pt->kind == TY_INT || pt->kind == TY_FLT || pt->kind == TY_BOOL);
-        if (!scalar) StorageWriteKill(tk, tu, nullptr);
+        // A value holding no length and no reference changes no length
+        // where it lands, whatever else it overwrites.
+        if (HoldsLen(pt, true)) StorageWriteKill(tk, tu, nullptr);
         if (pt && pt->kind == TY_INT) {
             if (tk == UK_OWNED) {
                 if (tu->type && tu->type->kind == TY_INT) {
@@ -2082,8 +2442,117 @@ struct BCE {
             auto ok = proven();
             if (ok) { ix->nobc = true; idxelided++; }
             RecordLine(ix->line, ok);
+            if (!ok) KeptInCheckfree(ix->line, KeptWhy(ix->idx, ix->obj, it, lent, -1));
         }
         CheckedFacts(it, lent, -1);
+    }
+
+    // A conversion into an index or bound type (§3.11): the check `a[x]`
+    // would make, or for a bound, that x <= a.len.
+    void JudgeIndexCast(AsCast *ac) {
+        if (mode == M_KILLS) return;
+        auto t = ac->totype;
+        auto pit = ixpid.find(t->ix->arr);
+        auto lent = pit != ixpid.end() && pit->second >= 0
+                        ? Term { true, LenBase(pit->second), 0 } : Term {};
+        auto slack = t->ix->upto ? 0 : -1;
+        auto xt = TermOf(ac->child);
+        auto proven = [&] {
+            return lent.ok && xt.ok && Query(Zero(), xt.b, xt.off) &&
+                   Query(xt.b, lent.b, SatAdd(SatSub(lent.off, xt.off), slack));
+        };
+        if (probing) {
+            if (!proven()) probefail = true;
+            return;
+        }
+        if (mode == M_JUDGE) {
+            idxtotal++;
+            auto ok = proven();
+            if (ok) { ac->nobc = true; idxelided++; }
+            RecordLine(ac->line, ok);
+            if (!ok) KeptInCheckfree(ac->line, KeptWhy(ac->child, nullptr, xt, lent, slack, t));
+        }
+        CheckedFacts(xt, lent, slack);
+    }
+
+    // ------------------------------------------------------------------
+    // checkfree: why a check stayed, in the terms of the analysis's known
+    // limits (docs/implementation.md §9.1).
+
+    string ExprText(Node *n) {
+        string s;
+        dumpwritten = true;
+        n->Dump(s, 0);
+        dumpwritten = false;
+        return s;
+    }
+
+    void KeptInCheckfree(Line l, const string &why) {
+        // The innermost function whose text holds the line.
+        const Span *in = nullptr;
+        for (auto &sp : checkfreespans)
+            if (sp.file == l.fileidx && l.line >= sp.lo && l.line <= sp.hi &&
+                (!in || sp.hi - sp.lo < in->hi - in->lo))
+                in = &sp;
+        if (!in) return;
+        auto msg = cat("checkfree fn ", in->sf->qname, " keeps a bounds check: ", why);
+        for (auto &f : checkfreefails)
+            if (f.line.fileidx == l.fileidx && f.line.line == l.line && f.why == msg) return;
+        checkfreefails.push_back({ l, msg });
+    }
+
+    // Index (or converted value) x against the length lent of obj, or for a
+    // conversion (obj null) of the array index type `into` names, which a
+    // check with this slack compared it with.
+    string KeptWhy(Node *x, Node *obj, const Term &xt, const Term &lent, int64_t slack,
+                   TypeExpr *into = nullptr) {
+        auto xs = ExprText(x);
+        auto against = obj ? cat(ExprText(obj), ".len") : cat(into->ix->arr->name, ".len");
+        if (!lent.ok)
+            return cat("the length of ", obj ? ExprText(obj) : string(into->ix->arr->name),
+                       " is not one the analysis tracks here");
+        auto t = x->exprtype;
+        // Its type's range is all a loaded plain integer is known by.
+        if ((Is<Index>(x) || Is<Dot>(x) || Is<Call>(x)) && !IsIndexT(t))
+            return cat(xs, " is read out of an element, a field or a call result, whose "
+                       "value the analysis does not know; an index type (`u32 in a`) for "
+                       "what is stored there carries it (§3.11)");
+        if (!xt.ok) {
+            if (Is<Ident>(x) && t && t->kind == TY_INT && t->intstorage == IS_U64)
+                return cat(xs, " is a u64 variable, which the analysis does not track; an i64 "
+                           "or an index type is");
+            return cat("the analysis cannot relate ", xs, " to ", against);
+        }
+        if (!Query(Zero(), xt.b, xt.off)) return cat("nothing shows ", xs, " >= 0");
+        auto rel = slack < 0 ? " < " : " <= ";
+        if (IsIndexT(t) && obj)
+            return cat("nothing shows ", xs, rel, against, "; ", xs, " is a ", TypeName(t),
+                       ", so `assert(", ExprText(obj), ".len >= ", t->ix->arr->name,
+                       ".len)` where neither changes after it would settle it");
+        return cat("nothing shows ", xs, rel, against);
+    }
+
+    // The errors, each where the check is, with its source line.
+    // The checks kept in checkfree functions, as one error reporting them
+    // all: each at its line, which the text echoes.
+    CompileError CheckfreeError() {
+        CompileError e;
+        for (auto &f : checkfreefails) {
+            Diagnostic d;
+            d.where = LocOf(f.line);
+            d.message = f.why;
+            d.text = ast.DiagnosticText(d, true);
+            if (!e.msg.empty()) e.msg += "\n";
+            e.msg += d.text;
+            e.diags.push_back(std::move(d));
+        }
+        return e;
+    }
+
+    static string TypeName(TypeExpr *t) {
+        string s;
+        t->Dump(s);
+        return s;
     }
 
     // What a completed check proves: execution only continues past one with
@@ -2095,6 +2564,7 @@ struct BCE {
         if (!x.ok) return;
         AddFactB(Zero(), x.b, x.off);
         if (lent.ok) AddFactB(x.b, lent.b, SatAdd(SatSub(lent.off, x.off), slack));
+        QuotBack(x);
     }
 
     // One bound of a slice expression, as a term in the state at the moment
@@ -2143,6 +2613,21 @@ struct BCE {
                   Query(hit.b, lent.b, SatSub(lent.off, hit.off));
         if (ok) { se->nobc = true; slelided++; }
         RecordLine(se->line, ok);
+        if (!ok) {
+            string why;
+            if (!lent.ok)
+                why = cat("the length of ", ExprText(se->obj),
+                          " is not one the analysis tracks here");
+            else if (!lot.ok || !hit.ok)
+                why = "the analysis cannot relate the slice's bounds to the length";
+            else if (!Query(Zero(), lot.b, lot.off))
+                why = "nothing shows the lower bound >= 0";
+            else if (!Query(lot.b, hit.b, SatSub(hit.off, lot.off)))
+                why = "nothing shows the lower bound <= the upper bound";
+            else
+                why = cat("nothing shows the upper bound <= ", ExprText(se->obj), ".len");
+            KeptInCheckfree(se->line, cat("slice ", ExprText(se), ": ", why));
+        }
     }
 
     // ------------------------------------------------------------------
@@ -2209,21 +2694,13 @@ struct BCE {
             case T_GTEQ: le(rs, ls, 0); break;
             case T_EQ:   le(ls, rs, 0); le(rs, ls, 0); break;
             default:
-                // != alone bounds nothing, but over the integers it makes a
-                // bound the facts already prove strict: `i <= n` and
-                // `i != n` give `i < n`, the scan-then-test idiom. Only
-                // where a side is a length or a variable that indexes or
-                // bounds an array, which keeps the two queries off the
-                // many character tests a parser makes.
-                if (ls.diff || rs.diff || (!IndexRelevant(lt) && !IndexRelevant(rt))) break;
-                if (Query(lt.b, rt.b, SatSub(rt.off, lt.off))) le(ls, rs, -1);
-                else if (Query(rt.b, lt.b, SatSub(lt.off, rt.off))) le(rs, ls, -1);
+                // != alone bounds nothing, but against a side the facts
+                // already order it is strict: `len != 0` is `len >= 1`.
+                if (ls.diff || rs.diff) break;
+                if (Query(rt.b, lt.b, SatSub(lt.off, rt.off))) le(rs, ls, -1);
+                else if (Query(lt.b, rt.b, SatSub(rt.off, lt.off))) le(ls, rs, -1);
                 break;
         }
-    }
-
-    bool IndexRelevant(const Term &t) {
-        return t.b.kind == BK_LEN || (t.b.kind == BK_VAR && relpids.count(varof[t.b.id]));
     }
 
     // `x - y` as its two terms, when the subtraction is the mathematical
@@ -2561,6 +3038,13 @@ struct BCE {
                     r.facts.push_back({ f.l, f.r, std::max(f.c, g.c) });
                     break;
                 }
+        for (auto &l : a.lins)
+            for (auto &k : b.lins)
+                if (l.tmp == k.tmp && l.x.b == k.x.b && l.x.off == k.x.off) {
+                    r.lins.push_back(l);
+                    r.lins.back().exact = l.exact && k.exact;
+                    break;
+                }
         r.vgen = Gens::Max(a.vgen, b.vgen);
         r.pgen = Gens::Max(a.pgen, b.pgen);
         return r;
@@ -2607,6 +3091,7 @@ struct BCE {
                 classparams[p->ref.Root()].push_back((int)j);
         }
         for (auto cr : sp->classroots) if (cr) ownclasses.insert(cr);
+        IndexPlaces();
         Mark(sp->body);
     }
 
@@ -2639,7 +3124,7 @@ struct BCE {
                     // shrink (or a re-bound access path) rules P out.
                     if (shrunk.count(pid) || vbumped.count(places[pid].rootv)) continue;
                     if (c.le.size() >= 8) break;
-                    c.le.push_back(pid);
+                    c.le.push_back({ pid, 0 });
                 }
         }
         if (!cands.empty()) {
@@ -2754,8 +3239,9 @@ struct BCE {
         ast.ForEachRootTree([&](Node *n) { ScanCalls(n, nullptr, uses); });
         // The optimizer's count is the authority on how a specialization is
         // reached: a use this scan did not see is one it cannot describe.
+        // An export's C wrapper passes whatever its C caller does.
         for (auto sp : ast.fnspecs)
-            if (sp->live && uses[sp] != sp->uses) opaquesites.insert(sp);
+            if (sp->live && (uses[sp] != sp->uses || sp->sf->isexport)) opaquesites.insert(sp);
         set<FnSpec *> visited;
         function<void(FnSpec *)> visit = [&](FnSpec *sp) {
             if (!visited.insert(sp).second) return;
@@ -2874,6 +3360,9 @@ struct BCE {
     }
 
     void RunAll() {
+        for (auto t : ast.alltypes)
+            if (IsIndexT(t) && t->ix->arr) indexarrays.insert(t->ix->arr);
+        CheckfreeSpans();
         BuildCallGraph();
         ComputeEffects();
         ValidateGlobalInvariants();
@@ -2883,6 +3372,7 @@ struct BCE {
             if ((*it)->live && (*it)->body) RunSpec(*it);
         // Global initializers: judged with no surrounding context.
         ResetSpecState();
+        IndexPlaces();
         // They need their own prescan now that the last body's places have
         // been discarded, including places a call can invalidate.
         ast.ForEachRootTree([&](Node *n) { Mark(n); });
@@ -3008,6 +3498,8 @@ inline void Assign::BceMark(BCE &b) {
             (c >= 0 ? b.wkinds[v].inc : b.wkinds[v].dec) = true;
         } else if (BCE::IsUnitStep(this, v)) {
             b.wkinds[v].inc = true;
+        } else if ((op == T_PLUSEQ || op == T_MINUSEQ) && !BCE::WritesVar(rhs, v)) {
+            b.wkinds[v].setw = true;   // v = v + rhs (Assign::BceWalk).
         } else {
             b.wbad.insert(v);
         }
@@ -3069,6 +3561,12 @@ inline bool Index::BceWalk(BCE &b) {
     // the index must not replace that earlier receiver's length proof.
     if (b.nextgen != gen && lent.b.kind != BCE::BK_ZERO) lent = BCE::Term {};
     b.JudgeIndex(this, lent);
+    return true;
+}
+
+inline bool AsCast::BceWalk(BCE &b) {
+    b.Walk(child);
+    if (totype && totype->ix) b.JudgeIndexCast(this);
     return true;
 }
 
@@ -3198,6 +3696,10 @@ inline bool Call::BceWalk(BCE &b) {
                 // to_bytes(a, out) appends the image to `out`, which is the
                 // argument rather than the receiver; the one-argument form
                 // builds a fresh value and grows nothing.
+                if (arg0) b.GrowShrinkKill(arg0, 1);
+                break;
+            case B_THREAD_WAIT:
+                // thread_wait(id, msg) appends the abort's message to msg.
                 if (arg0) b.GrowShrinkKill(arg0, 1);
                 break;
             case B_POP: {
@@ -3649,6 +4151,7 @@ inline bool VarDecl::BceWalk(BCE &b) {
 
 inline bool Assign::BceWalk(BCE &b) {
     b.WalkLvalParts(lval);
+    auto gen = b.nextgen;
     b.Walk(rhs);
     if (op == T_DOTASSIGN) {
         // A rebound field or element slot lies in storage behind the chain's
@@ -3685,7 +4188,9 @@ inline bool Assign::BceWalk(BCE &b) {
                 if (lit && !lit->uns && BCE::SmallOff(lit->val))
                     b.ShiftWrite(v, op == T_PLUSEQ ? lit->val : -lit->val);
                 else if (BCE::IsUnitStep(this, v)) b.StepWrite(v);
-                else b.VarKillWrite(v);
+                // As `v = v + rhs`, unless the rhs changed what v + rhs
+                // would read (Binary::BceWalk's effectful terms).
+                else b.SetWrite(v, b.nextgen == gen ? b.CompoundSum(this) : nullptr, false);
             } else {
                 b.VarKillWrite(v);
             }
@@ -3714,8 +4219,8 @@ inline bool Assign::BceWalk(BCE &b) {
         return true;
     };
     if (Is<Index>(lval)) return elemwrite();
-    if (lt && (lt->kind == TY_INT || lt->kind == TY_FLT || lt->kind == TY_BOOL))
-        return true;                    // A scalar field write cannot change a length.
+    if (lt && !BCE::HoldsLen(lt, true))
+        return true;                    // Nor can a field write of a value without one.
     auto ch = b.ChainOf(lval);
     if (ch.kind == BCE::CH_INDEX) return elemwrite();
     if (ch.kind == BCE::CH_FAIL || !ch.root) {

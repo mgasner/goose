@@ -26,9 +26,8 @@ DEFAULT_NAMES = ["graph", "graph_csr", "words", "strlist", "sexp", "records_var"
                  "lru", "scene", "calc", "respond", "blur", "blur_assert",
                  "blur_rows"]
 
-# See run_bench.py: the large sizes need more than the runtime's default
-# reservation, and this is the largest that keeps u32 relative references
-# storable without a range check.
+# Match run_bench.py's explicit 2 GB reservation: the largest that keeps u32
+# relative references storable without a range check.
 STACK_RESERVE = "GS_STACK_RESERVE=2147483648ull"
 
 
@@ -67,9 +66,15 @@ def main():
 
     rows = []
     for n in args.names.split(","):
-        shutil.copy(HERE / "goose" / f"{n}.goose", gendir)
+        source = tc.decode((HERE / "goose" / f"{n}.goose").read_bytes())
         row = {"name": n, "stat": ""}
         for mode in ("bce", "nobce"):
+            # A checkfree contract deliberately rejects --no-bce. Remove only
+            # the annotation in this diagnostic copy, leaving runtime checks
+            # enabled and the algorithm unchanged.
+            text = source if mode == "bce" else re.sub(
+                r"\bcheckfree(?=\s+(?:inline|simd|recursive|fn|thread_fn)\b)", "", source)
+            tc.write_text(gendir / f"{n}.goose", text)
             cfile = gendir / f"{n}-{mode}.c"
             cfile.unlink(missing_ok=True)
             gargs = ["-O2", "--standalone"] + (["--no-bce"] if mode == "nobce" else [])

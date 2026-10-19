@@ -1,9 +1,10 @@
 """Packages from git sources (docs/design/packages.md §4.6), offline: a bare
 repository this runner makes, declared by its file:// URL at a tag and at a
 commit, fetched into GOOSE_HOME (which run_tests.py points under build/),
-fetched again by `goose fetch --update` after the tag moved, and a library
-requiring the package at another ref than the root declares. Concurrent
-fetches share a cold cache, including a submodule and an abandoned checkout."""
+fetched again by `goose fetch --update` after the tag moved, rejected under
+`--offline` until fetched, and a library requiring the package at another ref
+than the root declares. Concurrent fetches share a cold cache, including a
+submodule and an abandoned checkout."""
 import os
 import shutil
 import subprocess
@@ -146,8 +147,21 @@ def check_git_packages(exe, base, *, jit):
         if not warning and "warning:" in err:
             raise RuntimeError(f"{path.name}: unexpected warning:\n{err}")
 
+    # Under --offline nothing is fetched: a package not in the cache is an
+    # error at its import, naming goose fetch; a fetched one is used.
+    offline = subprocess.run([exe, "check", "--offline", use_tag], cwd=base, env=env,
+                             capture_output=True, timeout=60)
+    err = tc.decode(offline.stderr)
+    if (offline.returncode != 1 or "use_tag.goose:1: error: the package gitpkg from" not in err
+            or "is not fetched" not in err or "`goose fetch` fetches it" not in err or
+            tc.sanitizer_failure(err)):
+        raise RuntimeError(f"expected --offline to reject the unfetched package "
+                           f"(exit {offline.returncode}):\n{err}")
+    if list((Path(home) / "pkg").glob("gitpkg-*")):
+        raise RuntimeError("--offline fetched the package")
     concurrent_fetch(use_tag)
     expect(use_tag, "5")
+    goose("check", "--offline", use_tag)
     # Simulate an interrupted commit fetch. Only the lock holder may clean
     # this up, and the waiting processes must use its completed checkout.
     caches = list((Path(home) / "pkg").glob("gitpkg-*/v1"))

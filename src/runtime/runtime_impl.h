@@ -22,32 +22,91 @@ static const char *gs_errmsgs[] = {
     "slice not from this pool",
     "non-null relative reference encodes as null",
     "pop_n count negative or beyond the array's length",
+    "queue limit of zero or less",
 };
 
-/* Ends the process with `code`, its streams flushed: every runtime error
-   and exit() comes here. The first thread to call it ends the process
-   without the C library's teardown, which two threads running at once
-   crash in on Windows, and which nothing of the program needs; any later
-   caller waits for that. Under TinyCC the program runs inside the
-   compiler, where exit() on the main thread returns to it instead. */
+/* Ends the process with `code`, its streams flushed: exit() and every
+   runtime error but a contained worker's abort come here. The first thread
+   to call it ends the process without the C library's teardown, which two
+   threads running at once crash in on Windows, and which nothing of the
+   program needs; any later caller waits for that. Under TinyCC the program
+   runs inside the compiler, where exit() on the main thread returns to it
+   instead. */
 static GS_NORETURN void gs_end(int code);
+
+#include <setjmp.h>
+#include <stdarg.h>
+/* No abort is raised in a signal handler, so the jump leaves the signal
+   state alone. */
+#ifdef _WIN32
+#define gs_setjmp(b)  setjmp(b)
+#define gs_longjmp    longjmp
+#else
+#define gs_setjmp(b)  _setjmp(b)
+#define gs_longjmp    _longjmp
+#endif
 
 GS_API GS_NORETURN void gs_panic(const char *msg) {
     fprintf(stderr, "goose runtime error: %s\n", msg);
     gs_end(1);
 }
 
-GS_API GS_NORETURN void gs_abort(int err, const char *file, int line) {
-    fprintf(stderr, "goose runtime error: %s (%s:%d)\n", gs_errmsgs[err], file, line);
+/* Where an abort in a contained worker returns to (gs_run_contained), and
+   the message it leaves there for thread_wait; NULL on every other thread. */
+typedef struct {
+    jmp_buf jump;
+    uint8_t *msg;
+    int64_t len;
+} gs_contained;
+static GS_TLS gs_contained *gs_contain;
+
+/* The end of a failed check or abort(msg) (§9.3), whose message is `len`
+   bytes at `msg` and the location after it. A contained worker's keeps the
+   message, without the "goose runtime error: " every printed one starts
+   with, and ends that worker; anything else's prints it and ends the
+   process. */
+static GS_NORETURN void gs_fail(const void *msg, int64_t len, const char *file, int line) {
+    static const char lead[] = "goose runtime error: ";
+    int64_t pre = sizeof lead - 1;
+    int64_t loc = snprintf(NULL, 0, " (%s:%d)\n", file, line);
+    uint8_t *text = (uint8_t *)malloc((size_t)(pre + len + loc + 1));
+    if (!text) {
+        if (gs_contain) gs_panic("out of memory recording an aborted thread");
+        fputs(lead, stderr);
+        fwrite(msg, 1, (size_t)len, stderr);
+        fprintf(stderr, " (%s:%d)\n", file, line);
+        gs_end(1);
+    }
+    memcpy(text, lead, (size_t)pre);
+    if (len) memcpy(text + pre, msg, (size_t)len);
+    snprintf((char *)text + pre + len, (size_t)loc + 1, " (%s:%d)\n", file, line);
+    if (gs_contain) {
+        memmove(text, text + pre, (size_t)(len + loc - 1));
+        gs_contain->msg = text;
+        gs_contain->len = len + loc - 1;
+        gs_longjmp(gs_contain->jump, 1);
+    }
+    fwrite(text, 1, (size_t)(pre + len + loc), stderr);
     gs_end(1);
+}
+
+/* gs_fail with the message printf formats. */
+static GS_NORETURN void gs_failf(const char *file, int line, const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    gs_fail(buf, n < 0 ? 0 : n < (int)sizeof buf ? n : (int)sizeof buf - 1, file, line);
+}
+
+GS_API GS_NORETURN void gs_abort(int err, const char *file, int line) {
+    gs_fail(gs_errmsgs[err], (int64_t)strlen(gs_errmsgs[err]), file, line);
 }
 
 GS_API GS_NORETURN void gs_abort_msg(const uint8_t *msg, int64_t len, const char *file,
                                      int line) {
-    fputs("goose runtime error: ", stderr);
-    fwrite(msg, 1, (size_t)len, stderr);
-    fprintf(stderr, " (%s:%d)\n", file, line);
-    gs_end(1);
+    gs_fail(msg, len, file, line);
 }
 
 GS_API GS_NORETURN void gs_exit(int64_t code) {
@@ -55,40 +114,31 @@ GS_API GS_NORETURN void gs_exit(int64_t code) {
 }
 
 GS_API GS_NORETURN void gs_idxfail(int64_t i, int64_t n, const char *file, int line) {
-    fprintf(stderr, "goose runtime error: index %lld out of bounds (length %lld) "
-            "(%s:%d)\n", (long long)i, (long long)n, file, line);
-    gs_end(1);
+    gs_failf(file, line, "index %lld out of bounds (length %lld)", (long long)i, (long long)n);
 }
 
 GS_API GS_NORETURN void gs_divfail(const char *file, int line) {
-    fprintf(stderr, "goose runtime error: division by zero (%s:%d)\n", file, line);
-    gs_end(1);
+    gs_failf(file, line, "division by zero");
 }
 
 GS_API GS_NORETURN void gs_divovf(const char *file, int line) {
-    fprintf(stderr, "goose runtime error: integer overflow in division (%s:%d)\n", file, line);
-    gs_end(1);
+    gs_failf(file, line, "integer overflow in division");
 }
 
 GS_API GS_NORETURN void gs_ovf(int64_t a, const char *op, int64_t b, const char *type,
                                const char *file, int line) {
-    fprintf(stderr, "goose runtime error: integer overflow (debug): %lld %s %lld at %s "
-            "(%s:%d)\n", (long long)a, op, (long long)b, type, file, line);
-    gs_end(1);
+    gs_failf(file, line, "integer overflow (debug): %lld %s %lld at %s", (long long)a, op,
+             (long long)b, type);
 }
 
 GS_API GS_NORETURN void gs_ovf_neg(int64_t a, const char *type, const char *file, int line) {
-    fprintf(stderr, "goose runtime error: integer overflow (debug): -(%lld) at %s (%s:%d)\n",
-            (long long)a, type, file, line);
-    gs_end(1);
+    gs_failf(file, line, "integer overflow (debug): -(%lld) at %s", (long long)a, type);
 }
 
 /* The message of a failing `as` check, with the source value as text. */
 static GS_NORETURN void gs_asfail(const char *why, const char *num, const char *type,
                                   const char *file, int line) {
-    fprintf(stderr, "goose runtime error: as conversion %s (debug): %s as %s (%s:%d)\n",
-            why, num, type, file, line);
-    gs_end(1);
+    gs_failf(file, line, "as conversion %s (debug): %s as %s", why, num, type);
 }
 
 GS_API GS_NORETURN void gs_asfail_i(const char *why, int64_t v, const char *type,
@@ -236,6 +286,8 @@ GS_API void gs_release_regions(void) {
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <io.h>
+#include <fcntl.h>
 
 static size_t gs_page_size = 0;
 #define GS_COMMIT_CHUNK (1u << 20)
@@ -950,13 +1002,22 @@ GS_API int64_t gs_spans_regrow(uint8_t *base, int64_t *n, uint8_t **top, int64_t
    positions, every search, tests one byte at a time, a single byte by
    memchr. No load reaches past the range: its last part is tested as the
    range's last whole block, with the positions before it, already tested,
-   shifted out of the result. */
+   shifted out of the result.
 
+   The set is a ByteSet the program wrote, read here as a gs_byteset: may_alias
+   keeps gcc's type-based alias analysis from taking those for two objects,
+   which at -O2 had it drop the program's stores to a set it then searched. */
+
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
+#define GS_MAY_ALIAS __attribute__((may_alias))
+#else
+#define GS_MAY_ALIAS
+#endif
 #pragma pack(push, 1)
 typedef struct {
     uint8_t members[256];
     uint8_t kind, invert, bytes[3], lo[16], hi[16];
-} gs_byteset;
+} GS_MAY_ALIAS gs_byteset;
 #pragma pack(pop)
 
 static int64_t gs_scan_any_bytes(const uint8_t *p, int64_t n, const gs_byteset *s) {
@@ -1202,6 +1263,13 @@ GS_API void gs_rt_start(int argc, char **argv, uint64_t reserve, uint64_t gap,
     // and interleaves correctly with stderr diagnostics. Revisit if print
     // throughput ever matters.
     setvbuf(stdout, NULL, _IONBF, 0);
+    #ifdef _WIN32
+        // The bytes a program writes are the bytes that come out, '\n' one
+        // byte as on every other platform, rather than a "\r\n" the CRT's
+        // text mode makes of it byte by byte.
+        _setmode(_fileno(stdout), _O_BINARY);
+        _setmode(_fileno(stderr), _O_BINARY);
+    #endif
     gs_regions_init();
     gs_regions_begin(mainregions);
     gs_native_stack_init();
@@ -1513,4 +1581,3 @@ GS_API void gs_out_f32(float v) {
 }
 GS_API void gs_out_bool(int64_t v) { fputs(v ? "true" : "false", stdout); }
 GS_API void gs_out_bytes(const uint8_t *p, int64_t len) { fwrite(p, 1, (size_t)len, stdout); }
-GS_API void gs_out_nl(void) { fputc('\n', stdout); }

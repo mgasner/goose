@@ -360,6 +360,30 @@ inline bool TypeCheck::IsFlat(TypeExpr *t) {
     }
 }
 
+// Whether a value of type t holds an index or bound type at any depth,
+// through references and slices too: what may not reach code that neither
+// keeps the array's length nor is checked against it (§3.11).
+inline bool TypeCheck::HoldsIndexT(TypeExpr *t) {
+    set<void *> seen;
+    function<bool(TypeExpr *)> walk = [&](TypeExpr *t) -> bool {
+        switch (t->kind) {
+            case TY_INT: return t->ix != nullptr;
+            case TY_REF: return walk(t->ref->sub);
+            case TY_SLICE: return walk(t->sub);
+            case TY_ARRAY: return walk(t->arr->sub);
+            case TY_STRUCT: case TY_ENUM: case TY_VARIANT: {
+                // An instance once: a recursive type reaches itself again.
+                auto key = t->kind == TY_STRUCT ? (void *)GetStructInst(t)
+                           : (void *)GetEnumInst(t->kind == TY_ENUM ? t : t->var->adt);
+                if (!seen.insert(key).second) return false;
+                return AnyField(t, walk);
+            }
+            default: return false;
+        }
+    };
+    return walk(t);
+}
+
 // Whether a value of type t can hold a plain reference or a slice at any
 // depth -- the only kinds that can point into an arbitrary array. A
 // self-relative reference points within its own root array and an
@@ -445,7 +469,15 @@ inline bool TypeCheck::VerifiableElem(TypeExpr *t, TypeExpr *elem, string &why) 
 // for a fixed-size T only; DefaultValue builds it for any.
 inline bool TypeCheck::HasDefault(TypeExpr *t, string &why) {
     switch (t->kind) {
-        case TY_INT: case TY_FLT: case TY_BOOL: case TY_SLICE: return true;
+        case TY_INT:
+            // The array may be empty, so not even 0 is an index of it (§3.11).
+            if (t->ix) {
+                why = cat(TypeStr(t), " has no value every state of ", t->ix->arr->name,
+                          " allows");
+                return false;
+            }
+            return true;
+        case TY_FLT: case TY_BOOL: case TY_SLICE: return true;
         case TY_REF:
             if (t->ref->optional) return true;
             why = cat(TypeStr(t), " is a non-optional reference");
@@ -544,6 +576,7 @@ inline void TypeCheck::RequireComplete(TypeExpr *t, Line l) {
 inline void TypeCheck::ValidateType(TypeExpr *t, Line l, int pos) {
     switch (t->kind) {
         case TY_GENERIC:
+            if (t->named->opaque) return;
             Error(l, cat("unknown type: ", t->named->name));
         case TY_UNRESOLVED:
             assert(false);
@@ -976,6 +1009,37 @@ inline void TypeCheck::ResolvePools() {
     }
 }
 
+// Index and bound types name a global array the same way (§3.11), resolved
+// once so that the array is part of the type's identity from the first
+// comparison on. Copies of a type share the detail, so each resolves once.
+inline void TypeCheck::ResolveIndexTypes() {
+    for (auto t : ast.alltypes) {
+        if (t->kind != TY_INT || !t->ix || t->ix->arr) continue;
+        auto g = ast.LookupGlobal(t->ix->name, t->ix->ns);
+        if (!g || g->defs.empty())
+            Error(t->line, cat("in ", t->ix->name, ": the array of an index type must be a "
+                               "global variable; a local or parameter has no name where a "
+                               "type is declared (§3.11)"));
+        t->ix->arr = g->defs[0];
+        indexarrays.insert(t->ix->arr);
+    }
+}
+
+// The array must never shrink, which only a grow-only one can promise
+// (§5.1), and must be indexable: fixed-size elements.
+inline void TypeCheck::ValidateIndexType(TypeExpr *t) {
+    auto a = t->ix->arr;
+    auto at = a->type;
+    if (!at || !IsArrayKind(at, A_GROW) || !a->isvar)
+        Error(t->line, cat("in ", a->name, ": the array of an index type must be a grow-only "
+                           "resizable global var (", a->name, ": T[>..]), not ",
+                           at ? TypeStr(at) : string("an unresolved type"),
+                           ", since the type relies on its length never going down (§3.11)"));
+    if (ClassOf(at->arr->sub) != SC_FIXED)
+        Error(t->line, cat("in ", a->name, ": ", TypeStr(at), " holds variable-size elements, "
+                           "which cannot be indexed, so nothing can be an index of it (§3.11)"));
+}
+
 // The pool a reference rooted at `r` points into, or null. A global names
 // itself; a synthetic parameter class names what every call site that
 // reaches this specialization passed, which is part of its key.
@@ -1055,6 +1119,36 @@ inline bool TypeCheck::CanContainWalk(TypeExpr *t, TypeExpr *of) {
     if (loaded) return true;
     if (t->kind == TY_ARRAY) return CanContain(t->arr->sub, of);
     return AnyField(t, [&](TypeExpr *ft) { return CanContain(ft, of); });
+}
+
+// CanContain up to qualifiers and storage forms: false only where no part
+// of t by value may be an `of` (MaySameType), so a `const` pointee or a
+// loaded field type never makes two such types miss.
+inline bool TypeCheck::MayHoldValueOf(TypeExpr *t, TypeExpr *of) {
+    if (MaySameType(t, of)) return true;
+    if (t->kind == TY_ARRAY) return MayHoldValueOf(t->arr->sub, of);
+    return AnyField(t, [&](TypeExpr *ft) { return MayHoldValueOf(ft, of); });
+}
+
+// Whether a and b may be one type up to qualifiers and storage forms: of
+// one kind, the same struct or enum, integers of one width (a varint loads
+// as any), floats of one width, arrays of one kind of such elements.
+inline bool TypeCheck::MaySameType(TypeExpr *a, TypeExpr *b) {
+    auto adt = [](TypeExpr *x) { return x->kind == TY_ENUM || x->kind == TY_VARIANT; };
+    if (adt(a) || adt(b))
+        return adt(a) && adt(b) &&
+               (a->kind != TY_ENUM || b->kind != TY_ENUM || a->enu->en == b->enu->en);
+    if (a->kind != b->kind) return false;
+    switch (a->kind) {
+        case TY_STRUCT: return a->struc->st == b->struc->st;
+        case TY_INT:
+            return a->intstorage == b->intstorage || a->intstorage == IS_VARINT ||
+                   b->intstorage == IS_VARINT;
+        case TY_FLT: return a->fltstorage == b->fltstorage;
+        case TY_ARRAY:
+            return a->arr->akind == b->arr->akind && MaySameType(a->arr->sub, b->arr->sub);
+        default: return true;
+    }
 }
 
 // The pointee type a reference or slice type reaches: for a slice, its

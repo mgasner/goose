@@ -204,6 +204,25 @@ bool LoadSharedSymbols(const string &path, vector<pair<string, const void *>> &o
     return true;
 }
 
+string MacSdkPath() {
+    string sdk;
+    #ifdef __APPLE__
+        // As TinyCC finds the SDK's libraries (tccmacho.c's
+        // tcc_add_macos_sdkpath): the SDK xcode-select made active, which
+        // libxcselect knows without running xcrun.
+        if (auto xcs = dlopen("libxcselect.dylib", RTLD_GLOBAL | RTLD_LAZY)) {
+            auto f = (int (*)(unsigned, char **))dlsym(xcs, "xcselect_host_sdk_path");
+            char *path = nullptr;
+            if (f) f(1, &path);
+            if (path) {
+                sdk = path;
+                free(path);
+            }
+        }
+    #endif
+    return sdk;
+}
+
 string CommandLineText(const vector<string> &argv) {
     string s;
     for (auto &a : argv) {

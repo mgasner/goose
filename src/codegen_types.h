@@ -356,6 +356,9 @@ inline int64_t CodeGen::FixedSize(TypeExpr *t) {
 inline string CodeGen::Sanitize(string_view name) {
     string s(name);
     if (s.empty()) s = "_";
+    // `result#1`, a name the parser makes that no program can write
+    // (Parser::ParseMultiAssign); a local's C name is unique either way.
+    for (auto &c : s) if (c == '#') c = '_';
     return s + "_g";
 }
 
@@ -384,8 +387,15 @@ inline string CodeGen::Unique(string base) {
 
 inline string CodeGen::Mangle(TypeExpr *t) {
     switch (t->kind) {
-        case TY_INT:
-            return t->intstorage == IS_VARINT ? "vi" : IntSfx(t->intstorage);
+        case TY_INT: {
+            if (t->intstorage == IS_VARINT) return "vi";
+            if (!t->ix) return IntSfx(t->intstorage);
+            // An index type is a C integer, but its array is part of its
+            // identity, which per-type artifacts such as a verifier depend on.
+            auto [it, fresh] = ixmangles.try_emplace(t->ix->arr, (int)ixmangles.size());
+            (void)fresh;
+            return cat(IntSfx(t->intstorage), t->ix->upto ? "b" : "x", it->second);
+        }
         case TY_FLT: return t->fltstorage == FS_F32 ? "f32" : "f64";
         case TY_BOOL: return "b";
         case TY_STRUCT: {
@@ -489,11 +499,13 @@ inline string CodeGen::CT(TypeExpr *t) {
                 // after it.
                 Append(tdecls, "typedef struct { ", NameCT(t->sub), " *data; int64_t len; } ",
                        name, ";\n\n");
+                slicects.insert(name);
                 CT(t->sub);
                 return name;
             }
             auto e = IsBytesT(t->sub) ? string("uint8_t") : CT(t->sub);
             Append(d, "typedef struct { ", e, " *data; int64_t len; } ", name, ";\n");
+            slicects.insert(name);
             break;
         }
         case TY_ARRAY: {
@@ -818,6 +830,7 @@ inline bool CodeGen::NeedsVerifyWalk(TypeExpr *t) {
     if (!IsFix(t)) return true;
     switch (t->kind) {
         case TY_BOOL: return true;
+        case TY_INT:  return t->ix != nullptr;         // checked against its array
         case TY_REF:  return t->ref->lenstorage >= 0;
         case TY_ENUM: return true;                     // the tag is range-checked
         case TY_ARRAY:
@@ -957,7 +970,20 @@ inline void CodeGen::EmitVerifyWalk(string &b, TypeExpr *t, TypeExpr *elem, cons
             VNeed(b, q, "1");
             Append(b, "    if (p[", q, "] > 1) return -1;\n    ", q, "++;\n");
             return;
-        case TY_INT: {   // varint field: only its length matters to the walk
+        case TY_INT: {
+            if (t->ix) {
+                // An index or bound type: an image's value must be one of the
+                // array as it is now, which it stays (§3.11).
+                auto sz = IntSize(t->intstorage);
+                auto v = VTmp();
+                VNeed(b, q, cat(sz));
+                Append(b, "    { ", IntCT(t->intstorage), " ", v, "; GS_MEMCPY(&", v, ", p + ", q,
+                       ", ", sz, "); if ((uint64_t)", v, t->ix->upto ? " > " : " >= ",
+                       "(uint64_t)", GlobalLenLv(t->ix->arr), ") return -1; ", q, " += ", sz,
+                       "; }\n");
+                return;
+            }
+            // A varint field: only its length matters to the walk.
             auto v = VTmp();
             Append(b, "    { uint64_t ", v, "u; int64_t ", v, " = gs_uleb_check(p + ", q,
                    ", e, &", v, "u); if (!", v, ") return -1; ", q, " += ", v, "; }\n");
@@ -1166,7 +1192,7 @@ inline bool CodeGen::HasFieldDefaults(TypeExpr *t) {
 // checker builds its default as a literal (TypeCheck::CheckBuiltin).
 inline void CodeGen::EmitDefaultInto(const string &lv, TypeExpr *t) {
     assert(!HasFieldDefaults(t));
-    L("memset(&", lv, ", 0, sizeof(", lv, "));");
+    L("GS_MEMZERO(&", lv, ", sizeof(", lv, "));");
 }
 
 // ------------------------------------------------------------------

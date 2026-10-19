@@ -137,8 +137,10 @@ debug information and no optimization for the C compiler; packages stay
 release builds), `--standalone` (no runtime object), `-o <exe>`, `--cc
 <name|path>` (§6.1), `--dry-run` (print every command and write nothing),
 `-v` (print every command as it runs), and the ones shared with the
-plumbing: `-D`, `--include`, `--stack-reserve`, `--stdlib`. `run` takes the
-same except `-o`, `--standalone` and `--debug`.
+plumbing: `-D`, `--include`, `--stack-reserve`, `--stdlib`, and `--offline`
+(fetch nothing: a package not in the cache is an error at its import, which
+`fetch` resolves; what an editor's checks pass). `run` takes the same except
+`-o`, `--standalone` and `--debug`.
 
 ## 4. Packages
 
@@ -324,8 +326,10 @@ static C runtime on Windows, in two forms: what an AOT program links, and a
 shared library the JIT loads. Both are built in one go, by the first `run` or
 `build` that reaches the package; `check` never builds. Inputs are stamped:
 a path package rebuilds when any of its C sources (by path, modification
-time and size), its sidecar or the set of its extern fns changes, a git
-checkout never (it never changes).
+time and size), its sidecar or the set of its extern fns changes, and every
+package, a git checkout included, when `goose.h` does: the header the
+compiler gives native C for the values it cannot declare itself, a
+builder's `gs_rref` (spec §7.10).
 
 ### 5.1 Plain C sources
 
@@ -572,7 +576,8 @@ writes `link-cc.rsp` and `link-msvc.rsp` under `pkg/…/<config>/` through the
 same wrapper and file-API probe as §5.2 (`cmake/package.cmake`, shared by
 the two). The compiler is built knowing that directory, as it knows
 `GOOSE_GFX_LINK_PATH` today, and looks there, then beside its own binary,
-then in `GOOSE_HOME`, for a builtin package's response file. A builtin
+for a builtin package's response file, as it does for the package's sources.
+A builtin
 package for a plain-C sidecar is the same minus `add_subdirectory`: CMake
 compiles `c_sources` itself.
 
@@ -583,6 +588,14 @@ The release binaries and CI configure with `all`; a developer's first
 `cmake -B build` builds the compiler alone in a fraction of the time, and
 the graphics samples still run, after one fetch and build into `~/.goose`,
 shared by every worktree.
+
+A release (`.github/workflows/release.yml`, laid out by
+`scripts/package_release.py`) has no build tree to look in: each builtin
+package is under `pkg/<name>/` beside the compiler, its sources without
+their vendored dependencies, and the static libraries of its link closure in
+`lib/`, which its response files there name relative to themselves. A link
+takes a copy of those under `GOOSE_HOME/build/builtin/` with the paths made
+absolute, one per place the compiler is unpacked.
 
 ### 7.2 What stays in the compiler
 
@@ -717,7 +730,10 @@ until the new one covers it.
   turn out to be used in anger, `goose vendor`.
 * **Fetching without git** (GitHub tarballs over HTTPS), and prebuilt
   package binaries, when the three platforms times the configurations are
-  worth it.
+  worth it. `goose.h` repeats layouts codegen emits (`gs_stack`, `gs_rhdr`,
+  `gs_rref`), and a part built from source is rebuilt when it changes; a
+  prebuilt one would need those layouts to carry a version it is checked
+  against.
 * **Package data at run time**: a library's files reachable through a
   `package_dir("gfx")` in JIT and copied beside the executable by `build`.
   `embed_file` covers fonts and tables until then.

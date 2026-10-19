@@ -67,7 +67,7 @@ recursive fn build(depth: i64, seed: u64) -> SNode& {
 }
 
 // world = parent ∘ local: a 3x3 product and a transformed translation.
-fn compose(p: Xf&, l: Xf&, w: Xf&) {
+checkfree fn compose(p: Xf&, l: Xf&, w: Xf&) {
     for i in 3 {
         for j in 3 {
             var s: f32 = 0.0;
@@ -80,7 +80,7 @@ fn compose(p: Xf&, l: Xf&, w: Xf&) {
     w.t.z = p.m[6] * l.t.x + p.m[7] * l.t.y + p.m[8] * l.t.z + p.t.z;
 }
 
-recursive fn update(n: SNode&, parent: Xf&) {
+checkfree recursive fn update(n: SNode&, parent: Xf&) {
     compose(parent, n.local, n.world);
     for k in n.kids { update(k, n.world); }
 }

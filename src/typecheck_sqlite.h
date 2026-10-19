@@ -430,7 +430,6 @@ inline bool TypeCheck::LowerSqliteCall(Call *c, Ident *id) {
     for (auto s : fv->body->stmts) body->stmts.push_back(s);
     body->tail = fv->body->tail;
     auto merged = SqlBlock(fv->line, { SQL_ROW }, body);
-    merged->col = fv->col;
     retarget("each", args);
     c->trailing = merged;
     return true;

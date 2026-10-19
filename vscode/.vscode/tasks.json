@@ -1,0 +1,10 @@
+{
+  "version": "2.0.0",
+  "tasks": [{
+    "label": "bundle",
+    "type": "npm",
+    "script": "bundle",
+    "problemMatcher": [],
+    "presentation": { "reveal": "silent" }
+  }]
+}

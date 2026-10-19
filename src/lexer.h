@@ -70,6 +70,31 @@ inline const char *TName(TType t) {
 inline bool IsIdentStart(char c) { return isalpha((uint8_t)c) || c == '_'; }
 inline bool IsIdentCont(char c)  { return isalnum((uint8_t)c) || c == '_'; }
 
+// The UTF-8 sequence at p, where its bytes make one; empty for a byte that
+// is no character on its own, which a message must not quote: a diagnostic
+// is text, and the server sends it as JSON, which is UTF-8 throughout.
+inline string_view Utf8CharAt(const char *p) {
+    auto c = (uint8_t)*p;
+    size_t len = c < 0x80 ? 1 : c >= 0xC2 && c < 0xE0 ? 2 : c >= 0xE0 && c < 0xF0 ? 3 : c >= 0xF0 && c < 0xF5 ? 4 : 0;
+    for (size_t i = 1; i < len; i++)
+        if (((uint8_t)p[i] & 0xC0) != 0x80) return {};
+    return string_view(p, len);
+}
+
+// What a message calls the character at p: quoted, with its code point
+// where it is not ASCII, or the byte's value where it is no character.
+inline string QuotedCharAt(const char *p) {
+    auto seq = Utf8CharAt(p);
+    if (seq.empty()) return cat("byte ", (int)(uint8_t)*p);
+    auto s = cat("'", seq, "'");
+    if (seq.size() == 1) return cat(s, " (", (int)(uint8_t)*p, ")");
+    uint32_t cp = (uint8_t)seq[0] & (0xFFu >> (seq.size() + 1));
+    for (size_t i = 1; i < seq.size(); i++) cp = (cp << 6) | ((uint8_t)seq[i] & 0x3F);
+    char buf[16];
+    snprintf(buf, sizeof buf, " (U+%04X)", (unsigned)cp);
+    return s + buf;
+}
+
 // The lexer holds exactly one current token. The parser copies the whole Lexer
 // object where it needs to look ahead and backtrack, so it holds nothing
 // that is not that token's: the file name is a view of the driver's.
@@ -78,6 +103,14 @@ struct Lexer {
     const char *linestart = nullptr;
     int line = 1;
     string_view filename;
+    const char *source = nullptr;    // The whole text, for the line an error echoes.
+    int fileidx = 0;                 // The file's index in Ast::sources, for diagnostics.
+
+    // One past the previous token: where a construct that ended with it
+    // ends (Parser::PrevEnd).
+    const char *prevend = nullptr;
+    const char *prevendlinestart = nullptr;
+    int prevendline = 1;
 
     // Current token.
     TType tok = T_EOF;
@@ -89,40 +122,107 @@ struct Lexer {
     bool smultiline = false;         // T_STRLIT: a """ string spanning lines.
     int tokline = 1;
     const char *toklinestart = nullptr;
+    // A token's scan is under way: an error raised now is the lexer's own,
+    // with the scan position inside the token (SkipBrokenToken).
+    bool scanning = false;
+    // The documentation above the current token: the run of // comment
+    // lines, each on a line of its own and directly below the one before,
+    // that ends on the line before the token; from the first // to the end
+    // of the last line. Empty for a token with none.
+    string_view doc;
+    // The `{` scanned so far less the `}`, the current token's included
+    // (DepthBefore).
+    int curlies = 0;
 
-    Lexer(string_view _filename, const char *source) : p(source), filename(_filename) {
+    Lexer(string_view _filename, const char *_source, int _fileidx = 0)
+        : p(_source), filename(_filename), source(_source), fileidx(_fileidx) {
         linestart = p;
         Next();
     }
 
     [[noreturn]] void Error(const string &msg) { ErrorAt(msg, tokline, toklinestart); }
 
-    // The token after the current one, without moving.
+    // How many braces are open before the current token, which is where a
+    // recovering parse is (Parser::SkipBody).
+    int DepthBefore() const { return curlies - (tok == T_LCURLY) + (tok == T_RCURLY); }
+
+    // The token after the current one, without moving. One the lexer
+    // rejects reads as the end: the scan that reaches it raises the error.
     TType PeekTok() const {
         auto copy = *this;
-        copy.Next();
+        try {
+            copy.Next();
+        } catch (CompileError &) {
+            return T_EOF;
+        }
         return copy.tok;
     }
 
+    // An error on a line of the source, which its text echoes, with a caret
+    // under the given position, else under the token's start where the line
+    // is the token's. The caret's column is the error's; it extends over the
+    // token where the caret is at one that lies on one line, else one byte.
     [[noreturn]] void ErrorAt(const string &msg, int errline, const char *errlinestart,
                               const char *caret = nullptr) {
-        auto s = cat(filename, ":", errline, ": error: ", msg);
+        auto d = Diagnose(msg, errline, errlinestart, caret);
+        throw CompileError { d.text, { d } };
+    }
+
+    // The diagnostic ErrorAt would throw, for one the parser reports and
+    // goes on past.
+    Diagnostic Diagnose(const string &msg, int errline, const char *errlinestart,
+                        const char *caret = nullptr) {
+        Diagnostic d;
+        d.where = { fileidx, errline, 0, 0, 0 };
+        d.message = msg;
         if (errlinestart) {
             auto end = errlinestart;
             while (*end && *end != '\n' && *end != '\r') end++;
-            Append(s, "\n", string_view(errlinestart, (size_t)(end - errlinestart)), "\n");
-            // Caret under the given position, else under the token start
-            // where we have it on this line.
             auto caretpos = caret ? caret : errlinestart == toklinestart ? attr.data() : nullptr;
             if (caretpos && caretpos >= errlinestart && caretpos <= end) {
-                for (auto q = errlinestart; q < caretpos; q++) s += *q == '\t' ? '\t' : ' ';
-                s += '^';
+                d.where.col = (int)(caretpos - errlinestart) + 1;
+                auto len = caretpos == attr.data() && attr.find('\n') == string_view::npos
+                               ? attr.size() : (size_t)0;
+                d.where.endline = errline;
+                d.where.endcol = d.where.col + (int)max<size_t>(len, 1);
             }
         }
-        throw CompileError { s };
+        d.text = RenderDiagnostic(d, filename, errlinestart ? string_view(source) : string_view(),
+                                  true);
+        return d;
+    }
+
+    // Where the parser recovers from an error the scan of a token raised
+    // (`scanning`: an escape, a character or a string the lexer rejected),
+    // the rest of that token is no token either: the scan goes on after
+    // the line, or for a """ string after its closing quotes where it has
+    // them.
+    void SkipBrokenToken() {
+        if (!scanning) return;
+        auto start = attr.data();
+        if (start[0] == '"' && start[1] == '"' && start[2] == '"') {
+            auto close = strstr(start + 3, "\"\"\"");
+            if (close) {
+                for (auto q = p; q < close; q++)
+                    if (*q == '\n') { line++; linestart = q + 1; }
+                p = close + 3;
+                Next();
+                return;
+            }
+        }
+        while (*p && *p != '\n') p++;
+        Next();
     }
 
     void Next() {
+        prevend = p;
+        prevendline = line;
+        prevendlinestart = linestart;
+        // The run of // comment lines on lines of their own, each directly
+        // below the one before, that the scan has passed: the token's
+        // documentation where it ends on the line above the token.
+        const char *docstart = nullptr, *docend = nullptr;
+        int docline = 0;
         again:
         for (;;) {
             auto c = *p;
@@ -133,12 +233,16 @@ struct Lexer {
         auto start = p;
         tokline = line;
         toklinestart = linestart;
+        doc = docstart && docline + 1 == line ? string_view(docstart, (size_t)(docend - docstart))
+                                              : string_view();
         // An error raised while the token is still being scanned puts its
         // caret at the token's start.
         attr = string_view(start, 0);
+        scanning = true;
         auto Set = [&](TType t) {
             tok = t;
             attr = string_view(start, (size_t)(p - start));
+            scanning = false;
         };
         auto c = *p++;
         switch (c) {
@@ -148,8 +252,8 @@ struct Lexer {
             case ')': Set(T_RPAREN);   return;
             case '[': Set(T_LBRACKET); return;
             case ']': Set(T_RBRACKET); return;
-            case '{': Set(T_LCURLY);   return;
-            case '}': Set(T_RCURLY);   return;
+            case '{': curlies++; Set(T_LCURLY); return;
+            case '}': curlies--; Set(T_RCURLY); return;
             case ',': Set(T_COMMA);    return;
             case ';': Set(T_SEMI);     return;
             case ':':
@@ -218,7 +322,17 @@ struct Lexer {
 
             case '/':
                 if (*p == '/') {
+                    // A comment with nothing but indentation before it on
+                    // its line joins the run directly above it, or starts
+                    // one; one after code on its line is no documentation.
+                    auto own = true;
+                    for (auto q = linestart; q < start; q++) own = own && (*q == ' ' || *q == '\t');
+                    if (own && (!docstart || docline + 1 != line)) docstart = start;
                     while (*p && *p != '\n') p++;
+                    if (own) {
+                        docend = p > start && p[-1] == '\r' ? p - 1 : p;
+                        docline = line;
+                    }
                     goto again;
                 }
                 if (*p == '*') {
@@ -337,8 +451,7 @@ struct Lexer {
                     if (it != keywords.end()) tok = it->second;
                     return;
                 }
-                Set(T_EOF);
-                Error(cat("illegal character: \'", string_view(start, 1), "\' (", (int)(uint8_t)c, ")"));
+                Error(cat("illegal character: ", QuotedCharAt(start)));
             }
         }
     }
@@ -418,7 +531,11 @@ struct Lexer {
                     p += 2;
                     return v;
                 }
-                default:   p -= 2; Error(cat("unknown escape sequence: \\", string_view(p + 1, 1)));
+                default: {
+                    p -= 2;
+                    auto seq = Utf8CharAt(p + 1);
+                    Error(cat("unknown escape sequence: \\", seq.empty() ? QuotedCharAt(p + 1) : string(seq)));
+                }
             }
         }
         if (!c || c == '\n') { p--; Error(cat("unterminated ", quote == '"' ? "string" : "character", " literal")); }

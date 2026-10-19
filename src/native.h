@@ -150,6 +150,27 @@ inline string SymbolTableSource(const string &pkgname, const vector<string> &nam
     return s;
 }
 
+// goose.h (src/runtime/goose.h): what C compiled on its own needs to take
+// the values an extern fn passes that it cannot spell itself, a builder's
+// gs_rref (spec §7.10). Every native part's C finds it in the part's build
+// directory, under include/.
+inline string GooseHeader() {
+    for (auto &rf : runtime_files)
+        if (string_view(rf.name) == "goose.h") return string(rf.text);
+    return {};
+}
+
+inline string NativeIncludeDir(const NativeBuild &out) { return cat(out.dir, "/include"); }
+
+inline void WriteGooseHeader(const NativeBuild &out) {
+    auto path = cat(NativeIncludeDir(out), "/goose.h");
+    auto text = GooseHeader();
+    string old;
+    LoadFile(path, old);
+    if (old != text && !WriteFileMakingDirs(path, text))
+        throw CompileError { cat("cannot write ", path) };
+}
+
 // --- CMake packages (§5.2) ----------------------------------------------------------
 
 // A link command fragment's words, as CMake's file API gives them: several
@@ -267,6 +288,8 @@ inline bool BuildCMakePart(const Ast &ast, int pkg, const Builder &b, bool wantj
         "endif()\n"
         "set(CMAKE_MSVC_RUNTIME_LIBRARY \"MultiThreaded\")\n"
         "set(CMAKE_POSITION_INDEPENDENT_CODE ON)\n"
+        "# goose.h, for every target of the package (GooseHeader).\n"
+        "include_directories(\"", NativeIncludeDir(out), "\")\n"
         "add_subdirectory(\"", root, "\" pkg EXCLUDE_FROM_ALL)\n"
         "if(NOT TARGET ", p.cmake_target, ")\n"
         "    message(FATAL_ERROR \"the package ", p.name, "'s sidecar names the CMake target ",
@@ -399,7 +422,8 @@ inline bool BuildNativePart(const Ast &ast, int pkg, const string &rootfile, con
     string externtext;
     for (auto &n : externs) Append(externtext, n, "\n");
     auto stampwant = cat(b.tc.id, "\n", FilesHash(inputs), "\n", Hex8(sidecartext), "\n",
-                         Hex8(externtext), "\n", wantjit ? "jit" : "aot", "\n");
+                         Hex8(externtext), "\n", Hex8(GooseHeader()), "\n",
+                         wantjit ? "jit" : "aot", "\n");
     auto stampfile = cat(dir, "/stamp");
     auto have = ReadStamp(stampfile);
     // A JIT build holds everything an AOT build has, and more. A CMake
@@ -414,6 +438,7 @@ inline bool BuildNativePart(const Ast &ast, int pkg, const string &rootfile, con
                           p.cmake_target.empty() ? "" : " with CMake"), !b.opts.dryrun);
     std::error_code ec;
     filesystem::create_directories(filesystem::path(dir), ec);
+    if (!b.opts.dryrun) WriteGooseHeader(out);
     if (!p.cmake_target.empty()) {
         if (!BuildCMakePart(ast, pkg, b, wantjit, externs, out)) return false;
         if (!b.opts.dryrun) WriteFileMakingDirs(stampfile, stampwant);
@@ -425,6 +450,7 @@ inline bool BuildNativePart(const Ast &ast, int pkg, const string &rootfile, con
     vector<string> flags;
     auto msvc = b.tc.style == "msvc";
     for (auto &i : p.cincludes) flags.push_back(cat(msvc ? "/I" : "-I", i));
+    flags.push_back(cat(msvc ? "/I" : "-I", NativeIncludeDir(out)));
     for (auto &d : p.cdefines) flags.push_back(cat(msvc ? "/D" : "-D", d));
     for (auto &f : msvc ? p.cflags_msvc : p.cflags_cc) flags.push_back(f);
     #ifndef _WIN32

@@ -51,6 +51,10 @@ public:
 // with `err` saying why, when it cannot be loaded or has no such table.
 bool LoadSharedSymbols(const string &path, vector<pair<string, const void *>> &out, string &err);
 
+// The macOS SDK this machine has active, where the C library's headers are;
+// "" elsewhere, or where none is installed.
+string MacSdkPath();
+
 // argv as one line a shell would read back as argv, for printing a command
 // (-v, --dry-run): arguments with spaces or shell characters are quoted.
 string CommandLineText(const vector<string> &argv);

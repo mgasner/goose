@@ -421,6 +421,144 @@ fn ref_down_twice(n: i64) -> i64 {
     return s * 10 + k;
 }
 
+// --- && and || conditions as branches -------------------------------------------
+
+// nqueen's search for the next free column: the loop exits on either branch.
+fn shape_chain_while(y: u32, n: i32, from: i32) -> i32 {
+    var i = from;
+    while i < n && y & (1 << i) != 0 { i++; }
+    return i;
+}
+
+fn ref_chain_while(y: u32, n: i32, from: i32) -> i32 {
+    var i = from;
+    while i < n {
+        if y & (1 << i) == 0 { break; }
+        i++;
+    }
+    return i;
+}
+
+// A || nested in a && exit, the spaces and tabs a parser skips.
+fn shape_chain_skip(s: u8[:], from: i64) -> i64 {
+    var i = from;
+    while i < s.len && (s[i] == ' ' || s[i] == '\t') { i++; }
+    return i;
+}
+
+fn ref_chain_skip(s: u8[:], from: i64) -> i64 {
+    var i = from;
+    loop {
+        if i >= s.len { break; }
+        if s[i] != ' ' {
+            if s[i] != '\t' { break; }
+        }
+        i++;
+    }
+    return i;
+}
+
+// if/else-if over a mixed and a negated condition.
+fn shape_chain_if(a: i64, b: i64, c: i64) -> i64 {
+    if a > 0 && (b > 0 || c > 0) { return 1; } else if !(a < 0 || b == c) { return 2; }
+    return 3;
+}
+
+fn ref_chain_if(a: i64, b: i64, c: i64) -> i64 {
+    if a > 0 {
+        if b > 0 { return 1; }
+        if c > 0 { return 1; }
+    }
+    if a < 0 { return 3; }
+    if b == c { return 3; }
+    return 2;
+}
+
+// A guard's condition, its else leaving the loop's iteration.
+fn shape_chain_guard(xs: i64[:], k: i64) -> i64 {
+    var s = 0;
+    for x in xs {
+        guard x != k && (x > 0 || x % 3 == 0) else { continue; }
+        s = s * 3 + x;
+    }
+    return s;
+}
+
+fn ref_chain_guard(xs: i64[:], k: i64) -> i64 {
+    var s = 0;
+    for x in xs {
+        if x == k { continue; }
+        if x <= 0 {
+            if x % 3 != 0 { continue; }
+        }
+        s = s * 3 + x;
+    }
+    return s;
+}
+
+// Each operand runs only where those before it leave the value open.
+var probes = 0;
+fn probe(v: bool) -> bool {
+    probes++;
+    return v;
+}
+
+fn shape_chain_order(a: bool, b: bool, c: bool) -> i64 {
+    probes = 0;
+    var r = 0;
+    if probe(a) || probe(b) && probe(c) { r = 1; }
+    return r * 100 + probes;
+}
+
+fn ref_chain_order(a: bool, b: bool, c: bool) -> i64 {
+    var n = 1;
+    var r = 0;
+    if a {
+        r = 1;
+    } else {
+        n = 2;
+        if b {
+            n = 3;
+            if c { r = 1; }
+        }
+    }
+    return r * 100 + n;
+}
+
+// An inlined bool call: its returns branch to the arms.
+fn clean(s: u8[:]) -> bool {
+    for c in s {
+        if c < 0x20 || c == '"' { return false; }
+    }
+    return true;
+}
+
+fn shape_chain_call(s: u8[:]) -> i64 {
+    if clean(s) { return s.len; }
+    return -1;
+}
+
+fn ref_chain_call(s: u8[:]) -> i64 {
+    for c in s {
+        if c < 0x20 { return -1; }
+        if c == '"' { return -1; }
+    }
+    return s.len;
+}
+
+// A value keeps its flag.
+fn keep_chain_value(a: i64, b: i64) -> bool { return a < b && b < 2 * a; }
+
+// So does a condition in a loop that can be straight-line code whose right
+// operand can be evaluated whatever the left gives (§6.11).
+fn keep_chain_spec(p: u8[64]&, q: u8[64]&, a: u8, b: u8) -> i64 {
+    var n = 0;
+    for j in 64 {
+        if p[j] == a && q[j] == b { n++; }
+    }
+    return n;
+}
+
 // --- driver -----------------------------------------------------------------------
 
 fn check(what: const u8[:], n: i64, ok: bool) {
@@ -429,7 +567,8 @@ fn check(what: const u8[:], n: i64, ok: bool) {
 
 // More calls of the small shape_ and keep_ functions, so that -O1 keeps each
 // a function of its own, whose C the runner reads.
-fn again(xs: f64[:], ys: f64[:], fs: f32[:], m: i64[37]&, node: Node&) {
+fn again(xs: f64[:], ys: f64[:], fs: f32[:], m: i64[37]&, node: Node&, longs: i64[:],
+         p: u8[64]&, q: u8[64]&) {
     print(shape_sum_dot(xs, ys) + shape_sum_dot(ys, xs) + shape_sum_dot(xs, xs) +
           shape_sum_dot(ys, ys) + shape_sum_dot(ys[1..], xs));
     print(shape_sum_f32(fs) + shape_sum_f32(fs[1..]) + shape_sum_f32(fs[2..]) +
@@ -446,6 +585,22 @@ fn again(xs: f64[:], ys: f64[:], fs: f32[:], m: i64[37]&, node: Node&) {
           shape_bound_all(node) || shape_bound_all(node) || shape_bound_all(node));
     print(shape_down_i8(1) + shape_down_i8(2) + shape_down_i8(3) + shape_down_i8(4));
     print(shape_down_u64(1) + shape_down_u64(2) + shape_down_u64(3) + shape_down_u64(4));
+    print(shape_chain_while(5, 9, 0) + shape_chain_while(7, 9, 1) + shape_chain_while(255, 6, 2) +
+          shape_chain_while(0, 9, 3));
+    print(shape_chain_skip(" \t x", 0) + shape_chain_skip("\t\t", 0) + shape_chain_skip("x ", 1) +
+          shape_chain_skip("", 0));
+    print(shape_chain_if(1, 0, 1) + shape_chain_if(0, 1, 2) + shape_chain_if(-1, 1, 1) +
+          shape_chain_if(0, 2, 2));
+    print(shape_chain_guard(longs, 8) + shape_chain_guard(longs, 3) + shape_chain_guard(longs[1..], 8) +
+          shape_chain_guard(longs[2..], 13));
+    print(shape_chain_order(false, true, true) + shape_chain_order(true, false, false) +
+          shape_chain_order(false, false, true) + shape_chain_order(false, true, false));
+    print(shape_chain_call("ab") + shape_chain_call("\"") + shape_chain_call("") +
+          shape_chain_call("xyz"));
+    print(keep_chain_value(3, 4) || keep_chain_value(4, 3) || keep_chain_value(1, 2) ||
+          keep_chain_value(5, 9));
+    print(keep_chain_spec(p, q, 1, 2) + keep_chain_spec(q, p, 2, 1) + keep_chain_spec(p, p, 0, 0) +
+          keep_chain_spec(q, q, 3, 3));
 }
 
 fn main() {
@@ -530,5 +685,56 @@ fn main() {
     print(shape_down_u8(0), " ", shape_down_u8(255), " ", shape_down_i8(127), " ",
           shape_down_i8(-128), " ", shape_down_u64(0), " ", shape_down_u64(6));
     print(shape_down_jumps(20), " ", keep_down_twice(20));
-    again(xs, ys, fs, m, node);
+
+    for y in 64 {
+        for n in 10 {
+            for from in n + 1 {
+                check("chain while", y, shape_chain_while(y as! u32, n as! i32, from as! i32) ==
+                      ref_chain_while(y as! u32, n as! i32, from as! i32));
+            }
+        }
+    }
+    check_skip("");
+    check_skip(" ");
+    check_skip("\t");
+    check_skip(" \t x");
+    check_skip("ab \t");
+    check_skip("  a\t ");
+    check_call("");
+    check_call("abc");
+    check_call("a\"c");
+    check_call("ab\n");
+    for a in -2..3 {
+        for b in -2..3 {
+            for c in -2..3 { check("chain if", a, shape_chain_if(a, b, c) == ref_chain_if(a, b, c)); }
+        }
+    }
+    var gs: i64[>..] = [];
+    for k in 20 { gs.push(k * 7 % 11 - 5); }
+    for k in -6..7 { check("chain guard", k, shape_chain_guard(gs, k) == ref_chain_guard(gs, k)); }
+    for k in 8 {
+        let a = k & 1 != 0;
+        let b = k & 2 != 0;
+        let c = k & 4 != 0;
+        check("chain order", k, shape_chain_order(a, b, c) == ref_chain_order(a, b, c));
+    }
+    var p: u8[64] = [0; 64];
+    var q: u8[64] = [0; 64];
+    for j in 64 {
+        p[j] = (j % 3) as u8;
+        q[j] = (j % 4) as u8;
+    }
+    print(shape_chain_guard(gs, 2), " ", shape_chain_order(false, true, true), " ",
+          keep_chain_value(3, 5), " ", keep_chain_spec(p, q, 1, 2));
+    again(xs, ys, fs, m, node, gs, p, q);
+}
+
+fn check_call(s: u8[:]) {
+    check("chain call", s.len, shape_chain_call(s) == ref_chain_call(s));
+}
+
+fn check_skip(s: u8[:]) {
+    for from in s.len + 1 {
+        check("chain skip", from, shape_chain_skip(s, from) == ref_chain_skip(s, from));
+    }
 }

@@ -1,0 +1,21 @@
+// An export's C wrapper passes whatever its C caller does, so the export
+// enters with nothing its Goose call sites proved; a plain function with
+// the same sites gets their facts (`recursive` keeps it out of line, as the
+// export is).
+export "c_pick" fn pick(dist: i32[:], i: i64) -> i32 {
+    return dist[i];                               // bce:keep (C callers pass unchecked arguments)
+}
+
+recursive fn pick_twin(dist: i32[:], i: i64) -> i32 {
+    return dist[i];                               // bce:elide (every site passes i < dist.len)
+}
+
+// A call of the wrapper from C, with an index the Goose sites never pass,
+// is embed/export_entry_bounds: from here, through an extern, it would be a
+// re-entry of the program, which aborts first (spec §7.11).
+
+fn main() {
+    var d: i32[>..] = [];
+    d.push(7);
+    print(pick(d, 0), " ", pick_twin(d, 0));
+}

@@ -288,7 +288,7 @@ struct BaseCaseInliner {
         // The arguments in parameter order, a UFCS receiver first: the checker
         // has already made each the node its parameter takes (an `&` it binds
         // by reference included), so a receiver binds as any argument does.
-        auto argnodes = c->ArgNodes();
+        auto argnodes = c->ValueArgNodes();
         if (argnodes.size() != K->params.size()) return nullptr;
         // Passed where a slice is expected, the call was checked as that
         // slice (§3.10), while the arms would yield the array itself: built

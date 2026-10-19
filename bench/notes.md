@@ -1,4 +1,101 @@
-## Reading the Rust rows
+## October 16, 2026 refresh
+
+The main tables are a fresh run of all sixteen benchmarks, at all three
+sizes, under MSVC, clang-cl, rustc and Goose's TinyCC backend. The compiler
+was rebuilt in Release from `f6d31d0e`, with the benchmark source changes in
+this refresh and no optional native packages:
+
+```powershell
+cmake -S . -B build-bench-refresh -DGOOSE_BUILTIN_LIBS=
+cmake --build build-bench-refresh --config Release --parallel 1 -- /nodeReuse:false
+python bench/run_bench.py --exe build-bench-refresh/Release/goose.exe
+```
+
+The default measurement policy is unchanged: two warm-ups, then the best
+of three whole-process runs, with checksum agreement across implementations.
+Input construction, validation, traversal, and teardown remain timed. No
+bounds checks are disabled in the headline measurements. The JIT rows also
+include compiling the program, and their peak memory includes this minimal
+compiler build; compare them separately from native executables.
+
+All 528 measurements succeeded. The 48 benchmark/size combinations agree
+across implementations and with the saved previous run's checksums (after
+normalizing line endings). The original and revised graph implementations
+also agree at V=1, V=2 and V=17.
+
+### Index types and checkfree kernels
+
+Both graph implementations now store destinations and queue entries as
+`u32 in dist`. The CSR implementation additionally stores prefix offsets as
+`u32 upto out`. The arrays still have four-byte elements and perform the
+same graph construction and four breadth-first searches. `dist` and `out`
+are initialized before constructing the typed values they validate.
+
+Both `bfs` functions are `checkfree`. A length assertion on the companion
+head/offset array states its relationship to `dist` once per search. Every
+access in traversal is then proven, including an index loaded from another
+array. The CSR successor offset widens the vertex to i64 before adding one,
+so the proof does not have to allow wrapping u32 arithmetic.
+
+At the source files' default sizes, `--bce-lines` reports:
+
+| source | index checks elided | slice checks elided | contract |
+|---|---:|---:|---|
+| graph | 12/12 | 0/0 | BFS |
+| graph_csr | 23/27 | 0/0 | BFS; four checks remain in construction |
+| blur | 20/20 | 0/0 | flat kernel |
+| blur_assert | 20/20 | 0/0 | flat kernel with explicit precondition |
+| blur_rows | 20/20 | 8/8 | row slices and stencil |
+| scene | 12/12 | 0/0 | composition and recursive update |
+
+The blur and scene annotations enforce existing elimination; they do not
+change the computation. An attempted LRU rewrite could not prove masked
+probe indices from a dynamic table length, so it was not adopted. This
+refresh makes no claim that every benchmark is entirely check-free.
+
+`bench/bce_ab.py` still supports the annotated sources: its `--no-bce`
+diagnostic copy removes only the `checkfree` annotations, since their purpose
+is to reject precisely that build. It retains runtime bounds checks and
+index-type validation. The ordinary source and all headline builds retain
+their contracts.
+
+### Paired comparison of the graph rewrite
+
+Original sources from `f6d31d0e` and the revised sources were built with
+the same fresh Release compiler and C toolchains. Each pair ran in
+alternating order, with two discarded warm-up pairs and five measured
+pairs. The table reports the best time of each version at V=2,000,000
+(16,000,000 edges, four searches); checksums agree in every run.
+
+| implementation | backend | original ms | revised ms | speedup |
+|---|---|---:|---:|---:|
+| graph | v145 | 4,708.4 | 3,883.8 | 1.21x |
+| graph | clang | 4,822.5 | 4,050.0 | 1.19x |
+| graph_csr | v145 | 809.6 | 749.1 | 1.08x |
+| graph_csr | clang | 744.0 | 633.2 | 1.17x |
+
+This measures the complete source rewrite, including global array placement,
+unsigned index storage and extraction of BFS. It does not isolate the cost
+of removing bounds checks alone. The entry widths and storage requirements
+are unchanged. The separate small-size CSR trials were not consistently faster;
+the improvement claim is for these large inputs.
+
+Raw full-suite measurements are saved locally in `bench/gen/results.json`;
+the paired samples and source snapshots are in `bench/gen/refresh/`.
+As with other generated benchmark files, that directory is ignored by Git.
+
+## Historical analysis through October 10, 2026
+
+**Everything below records earlier measurements and compiler experiments.**
+Those A/B studies were not all repeated for the October 16 refresh. Their
+times, elision counts, causal explanations and references to "this report"
+describe the older run, not the current tables. In particular, the old
+conclusion that graph indices loaded from memory cannot be proven is
+superseded by the index-type implementation above. Use the current generated
+tables and `summary.md` for present-day comparisons; the historical material
+is retained as a record of the experiments.
+
+## Reading the Rust rows (historical)
 
 The Rust comparisons use safe, idiomatic implementations. C++ has separate
 idiomatic and expert tiers. Where two Rust implementations differ in ownership

@@ -83,6 +83,9 @@ inline bool SameSource(const PackageSource &a, const PackageSource &b) {
 
 // `goose fetch --update`: refs that are not commits are fetched again.
 inline bool package_update = false;
+// `--offline`: nothing is fetched; a package whose checkout is not in the
+// cache is an error at its import, which `goose fetch` resolves.
+inline bool package_nofetch = false;
 
 inline bool IsCommitHash(const string &ref) {
     if (ref.size() < 7 || ref.size() > 40) return false;
@@ -215,7 +218,10 @@ inline string FetchPackage(const PackageSource &s, const string &name) {
     auto dir = GitCacheDir(s);
     std::error_code ec;
     auto have = filesystem::is_directory(filesystem::path(dir), ec);
-    auto update = have && package_update && !IsCommitHash(s.ref);
+    if (!have && package_nofetch)
+        throw CompileError { cat("the package ", name, " from ", s.text, " is not fetched, and "
+                                 "--offline fetches nothing: `goose fetch` fetches it") };
+    auto update = have && package_update && !IsCommitHash(s.ref) && !package_nofetch;
     if (!have || update) {
         auto parent = filesystem::path(dir).parent_path();
         filesystem::create_directories(parent, ec);

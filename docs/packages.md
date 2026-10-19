@@ -200,6 +200,20 @@ sidecar lists as not the package's:
 exclude = ["tools", "third_party/demo"];
 ```
 
+Most values an `extern fn` passes have layouts C can declare for itself, a
+slice as `{ data, len }`, say (spec §7.10). A builder, `u8[>..]&`, is the
+exception: C appends to it through the runtime, which `goose.h` gives C
+compiled on its own. The compiler puts that header on the include path of
+every native part, the program's own included, CMake targets too, and
+builds them all again when it changes:
+
+```c
+#include "goose.h"
+void mylib_name(gs_rref out, int64_t id) {   /* extern fn mylib_name(out: u8[>..]&, id: i64); */
+    gs_bld_append(out, "item", 4);
+}
+```
+
 A package's C is self-contained: two packages that must share C share a
 repository, as `gfx`, `audio` and `ui` do. A package whose functions keep
 one state for the process, or that may only be called from the main thread,

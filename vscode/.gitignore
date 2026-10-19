@@ -1,4 +1,5 @@
 node_modules/
+dist/
 *.vsix
 !goose-language.vsix
 .vscode-test/

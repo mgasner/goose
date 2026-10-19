@@ -385,6 +385,47 @@ inline string CodeGen::EnsureEr(FnSpec *sp) {
     return name;
 }
 
+// The members of C type ct in order, where a brace initializer of the
+// generated code gives them all; none for any other type.
+inline vector<string> CodeGen::BraceFields(const string &ct) {
+    if (ct == "gs_rref") return { "hdr", "stk" };
+    if (ct == "gs_rhdr") return { "base", "len" };
+    if (slicects.count(ct)) return { "data", "len" };
+    return {};
+}
+
+// The top-level elements of a brace initializer "{ a, b }", split at the
+// commas outside parentheses, brackets, braces and literals.
+inline vector<string> CodeGen::SplitBraceInit(const string &init) {
+    vector<string> parts;
+    auto trim = [](string s) {
+        auto b = s.find_first_not_of(' '), e = s.find_last_not_of(' ');
+        return b == string::npos ? string() : s.substr(b, e - b + 1);
+    };
+    if (init.size() < 2 || init.front() != '{' || init.back() != '}') return parts;
+    auto body = init.substr(1, init.size() - 2);
+    int depth = 0;
+    size_t start = 0;
+    for (size_t i = 0; i < body.size(); i++) {
+        auto c = body[i];
+        if (c == '"' || c == '\'') {
+            for (i++; i < body.size() && body[i] != c; i++)
+                if (body[i] == '\\') i++;
+        } else if (c == '(' || c == '[' || c == '{') {
+            depth++;
+        } else if (c == ')' || c == ']' || c == '}') {
+            depth--;
+        } else if (c == ',' && !depth) {
+            parts.push_back(trim(body.substr(start, i - start)));
+            start = i + 1;
+        }
+    }
+    parts.push_back(trim(body.substr(start)));
+    for (auto &p : parts)
+        if (p.empty()) return {};
+    return parts;
+}
+
 // Moves every declaration of an aggregate-typed C local (a struct, array,
 // slice or header typedef; never a scalar or a pointer) out of a finished
 // body into a block of declarations for the function's opening brace,
@@ -442,10 +483,26 @@ inline string CodeGen::HoistAggregateDecls(string &b) {
         }
         Append(decls, "    ", type, " ", name, ";\n");
         if (!init.empty()) {
-            // A brace initializer becomes a compound literal (C99).
             out.append(indent, ' ');
-            if (init[0] == '{') Append(out, name, " = (", type, ")", init, ";\n");
-            else Append(out, name, " = ", init, ";\n");
+            if (init[0] != '{') {
+                Append(out, name, " = ", init, ";\n");
+                continue;
+            }
+            // A brace initializer of a slice or core reference type gives
+            // every member, and becomes their assignments: TinyCC compiles
+            // a compound literal into a memset call that zeroes it, its
+            // stores, and a copy. The members' values never read the
+            // variable, whose declaration they initialized. Any other one
+            // becomes a compound literal (C99).
+            auto fs = BraceFields(type);
+            auto vals = fs.empty() ? vector<string>() : SplitBraceInit(init);
+            if (fs.empty() || vals.size() != fs.size()) {
+                Append(out, name, " = (", type, ")", init, ";\n");
+                continue;
+            }
+            for (size_t k = 0; k < fs.size(); k++)
+                Append(out, k ? " " : "", name, ".", fs[k], " = ", vals[k], ";");
+            out += '\n';
         }
     }
     b = out;
@@ -795,6 +852,15 @@ inline void CodeGen::EmitGlobalInit() {
     code += decls;
     code += body;
     code += "}\n\n";
+}
+
+// x, a pure expression, as a value of index or bound type t: checked below
+// (at most, for a bound) the length of the array t names (§3.11).
+inline string CodeGen::IndexTypeCheck(const string &x, TypeExpr *t, Line ln) {
+    auto n = GlobalLenLv(t->ix->arr);
+    if (!t->ix->upto) return cat("GS_IDX(", x, ", ", n, ", ", LocArgs(ln), ")");
+    return cat("((uint64_t)(", x, ") <= (uint64_t)(", n, ") ? (", x, ") : (gs_idxfail((int64_t)(",
+               x, "), (", n, "), ", LocArgs(ln), "), (int64_t)0))");
 }
 
 // A resizable global's receiving lvalue: its header's count, or the

@@ -59,6 +59,10 @@ Those, TinyCC's runtime headers, and on Windows the `.def` files naming what the
 system DLLs export, are staged into one directory, which is what the compiler
 hands `tcc_set_lib_path()`. `GOOSE_TCCLIB` overrides it; a `tcclib` directory
 beside the compiler binary wins over the build tree it was configured in.
+macOS keeps the C library's headers only in an SDK: the one xcode-select made
+active (found as TinyCC finds the SDK's libraries) comes before the one the
+compiler was configured with, so a compiler built elsewhere finds this
+machine's.
 
 ## Testing
 

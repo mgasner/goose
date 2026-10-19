@@ -3,12 +3,7 @@
 //
 // The nodes are a variable-mode enum in a grow-only pool, each as big as its
 // variant, linked to its children by 4-byte self-relative references. A
-// variable's name is stored inline in its node. A run's node pool, parser and
-// expressions are locals of the run, so each run parses into a fresh tree and
-// the previous run's tree is freed when the run's scope ends. The other
-// implementations keep the expressions in a field, which only
-// Calculator::Interpreter's prepare reads back after a run; that one parses
-// the program into a pool of its own instead.
+// variable's name is stored inline in its node.
 
 namespace calculator_ast;
 
@@ -25,11 +20,22 @@ enum Node {
 
 let CHAR_EOF: u8 = 0;
 
-// The program text is the growable last field.
-struct CalculatorAst { n: i64, result_val: u32, text: u8[>..] }
+// A struct holds at most one growable array, as its last field: here the
+// top-level expressions of the latest run's tree. The program text and the
+// node pool are growable arrays of the code that makes the benchmark, which
+// the struct refers to. Each run releases the previous run's tree and parses
+// into the emptied pool.
+struct CalculatorAst {
+    n: i64,
+    result_val: u32,
+    text: u8[>..]&,
+    nodes: Node..[>..]&,
+    expressions: (Node..&)[>..],
+}
 
-fn new_calculator_ast() -> CalculatorAst {
-    CalculatorAst { n: config_i64("Calculator::Ast", "operations"), result_val: 0, text: [] }
+fn new_calculator_ast(text: u8[>..]&, nodes: Node..[>..]&) -> CalculatorAst {
+    CalculatorAst { n: config_i64("Calculator::Ast", "operations"), result_val: 0, text: text, nodes: nodes,
+                    expressions: [] }
 }
 
 fn generate_random_program(s: CalculatorAst&, n: i64) -> u8[>..] {
@@ -217,13 +223,14 @@ fn prepare(s: CalculatorAst&) {
 }
 
 fn run(s: CalculatorAst&, iteration_id: i64) {
-    var nodes: Node..[>..] = [];
+    s.expressions = [];
+    s.nodes = [];
     var parser = new_parser(s.text);
-    let expressions = parser.parse(nodes);
-    s.result_val += expressions.len as! u32;
+    s.expressions.append(parser.parse(s.nodes));
+    s.result_val += s.expressions.len as! u32;
 
-    if expressions.len > 0 {
-        match expressions[expressions.len - 1] {
+    if s.expressions.len > 0 {
+        match s.expressions[s.expressions.len - 1] {
             Assignment &a => { s.result_val += checksum_str(a.name); },
             _ => {},
         }

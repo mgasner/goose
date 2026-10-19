@@ -22,6 +22,11 @@ add_executable(goose
     src/packages.h
     src/json.h
     src/native.h
+    src/lsp_rpc.h
+    src/lsp_analysis.h
+    src/lsp_workspace.h
+    src/lsp_features.h
+    src/lsp.h
     src/builtin.h
     src/includes.h
     src/utils.h
@@ -33,6 +38,8 @@ add_executable(goose
     src/clone.h
     src/parser.h
     src/resolve.h
+    src/expansion_bind.h
+    src/typecheck_expansion.h
     src/builtins.h
     src/typecheck.h
     src/type_queries.h
@@ -46,6 +53,7 @@ add_executable(goose
     src/optimize_basecase.h
     src/optimize_tre.h
     src/optimize_loops.h
+    src/optimize_reassoc.h
     src/bce.h
     src/codegen.h
     src/codegen_types.h
@@ -66,6 +74,7 @@ add_executable(goose
     src/runtime/runtime_threads.h
     src/runtime/runtime_ext.h
     src/runtime/runtime_os.h
+    src/runtime/goose.h
     src/gfx.h
     src/sqlite_check.h
     src/typecheck_sqlite.h

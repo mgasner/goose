@@ -15,7 +15,7 @@ import rng;
 let W = 2048;                            // BENCH_N
 let PASSES = 16;
 
-fn blur(src: u8[>..]&, dst: u8[>..]&) {
+checkfree fn blur(src: u8[>..]&, dst: u8[>..]&) {
     for y in 1..W - 1 {
         for x in 1..W - 1 {
             let i = y * W + x;

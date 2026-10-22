@@ -646,7 +646,7 @@ void CodeGen::EmitSpec(FnSpec *sp, bool er) {
     auto name = er ? ernames[sp] : curinfo->cname;
     // The signature and the entry code ahead of the first statement are the
     // declaration's line (--lines).
-    if (line_directives && sp->sf->line.line > 0)
+    if (line_marks && sp->sf->line.line > 0)
         Append(code, "#line ", sp->sf->line.line, " ", LineFile(sp->sf->line.fileidx), "\n");
     if (sp->sf->issimd) EmitSimdVersions(sp, name, params, fnbody);
     else Append(code, "static ", FnAttrs(sp), SigRet(sp), " ", name, "(", params, ") {\n", fnbody,
@@ -989,6 +989,83 @@ string CodeGen::ExportHeader() {
 void CodeGen::EmitMain() {
     Append(code, "int main(int argc, char **argv) {\n    gs_program_init(argc, argv);\n",
            MainCall(), "    gs_rt_stats();\n    return 0;\n}\n");
+}
+
+// --map: what the inspector (docs/design/inspect.md §3.2) needs beside the
+// debug information: the sources, every specialization's C function, the
+// fixed-size structs' layouts, and `table` from FinishLines.
+string CodeGen::SourceMap(const vector<array<int, 3>> &table) {
+    string j = "{\"version\": 1,\n\"files\": [";
+    for (size_t i = 0; i < ast.sources.size(); i++) {
+        std::error_code ec;
+        auto &f = ast.sources[i].first;
+        auto abs = std::filesystem::absolute(f, ec);
+        if (i) j += ", ";
+        JsonQuote(j, ec ? f : abs.lexically_normal().generic_string());
+    }
+    j += "],\n\"specs\": [";
+    auto types = [&](const vector<TypeExpr *> &ts) {
+        j += '[';
+        for (size_t i = 0; i < ts.size(); i++) {
+            if (i) j += ", ";
+            string t;
+            if (ts[i]) ts[i]->Dump(t);
+            JsonQuote(j, t);
+        }
+        j += ']';
+    };
+    auto first = true;
+    for (auto sp : livespecs) {
+        auto &si = sinfo[sp];
+        auto spec = [&](const string &cname) {
+            Append(j, first ? "\n " : ",\n ", "{\"c\": ");
+            first = false;
+            JsonQuote(j, cname);
+            j += ", \"goose\": ";
+            JsonQuote(j, sp->sf->qname);
+            j += ", \"params\": ";
+            types(sp->argtypes);
+            j += ", \"rets\": ";
+            types(sp->rets);
+            Append(j, ", \"file\": ", sp->sf->line.fileidx, ", \"line\": ", sp->sf->line.line,
+                   ", \"end\": ", sp->sf->end.line, "}");
+        };
+        spec(si.cname);
+        // The element-run twin (C.3) is the same source.
+        auto er = ernames.find(sp);
+        if (er != ernames.end() && !er->second.empty()) spec(er->second);
+    }
+    j += "],\n\"structs\": [";
+    first = true;
+    for (auto si : ast.structinsts) {
+        auto lo = layouts.find(pair<const void *, int>(si, -1));
+        if (lo == layouts.end() || si->sclass != SC_FIXED) continue;
+        Append(j, first ? "\n " : ",\n ", "{\"goose\": ");
+        first = false;
+        JsonQuote(j, si->st->qname);
+        j += ", \"args\": ";
+        types(si->args);
+        Append(j, ", \"size\": ", lo->second.size, ", \"fields\": [");
+        auto nf = 0;
+        for (size_t i = 0; i < si->st->fields.size() && i < lo->second.offs.size(); i++) {
+            auto &f = si->st->fields[i];
+            if (f.ispad) continue;
+            j += nf++ ? ", {\"name\": " : "{\"name\": ";
+            JsonQuote(j, f.name);
+            Append(j, ", \"offset\": ", lo->second.offs[i], ", \"type\": ");
+            string t;
+            if (si->ftypes[i]) si->ftypes[i]->Dump(t);
+            JsonQuote(j, t);
+            j += '}';
+        }
+        j += "]}";
+    }
+    j += "],\n\"lines\": [";
+    for (size_t i = 0; i < table.size(); i++)
+        Append(j, i ? (i % 8 ? ", " : ",\n ") : "\n ", "[", table[i][0], ", ", table[i][1], ", ",
+               table[i][2], "]");
+    j += "]}\n";
+    return j;
 }
 
 }  // namespace goose

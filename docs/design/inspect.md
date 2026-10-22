@@ -21,8 +21,8 @@ came from, through the C the compiler generated in between. It answers
 "what did this line compile to", "which function is this address in", and
 "what is at this offset in the file", for a program whose source is at hand,
 and as much of the same as the binary allows for one whose source is not.
-Written against the tree at `bd251f7`. The first step of the plan (§7),
-`--lines`, is implemented; the rest is not.
+Written against the tree at `bd251f7`. The first steps of the plan (§7),
+`--lines` and `--map`, are implemented; the rest is not.
 
 ## 1. Decisions
 
@@ -93,19 +93,24 @@ back to the debug map.
 ### 3.1 `#line`
 
 Under `--lines` (which `--debug` implies), the generated C carries a
-`#line N "file.goose"` before the C of each Goose statement whose line
-differs from the last one written. The place to do it is codegen's single
-line writer: `GenStmt` records the statement's line as the wanted one, and
-`L()` writes the directive when the wanted line differs from the one in
-force. A statement's own exit code -- restores, the jump past an `else` --
-returns to the enclosing statement's line once the nested one is done, so
-it is not charged to the last line of the block.
+`#line N "file.goose"` before each C line of a Goose statement. Codegen
+marks only where the line changes: `GenStmt` records the statement's line
+as the wanted one, and `L()`, codegen's single line writer, writes a marker
+when the wanted line differs from the one in force. The restores a
+statement's scope ends with are its own; what the enclosing statement
+emits after it is the enclosing line's again. A function's signature and
+its entry code are its declaration's line.
 
-Each function's text ends by returning to the C file's own numbering
-(`#line <n> "out.c"`), so that the runtime, declarations and the next
-function are not attributed to Goose. The C line number is known only once
-the file is assembled, so the directive is written as a marker and resolved
-in the pass that assembles it (`main.cpp`).
+The rest happens once the file is assembled (`FinishLines`,
+`codegen_emit.h`), because the passes over a function's text
+(`HoistAggregateDecls`, the top-cache markers) move and insert lines after
+codegen wrote them. `#line N` numbers only the line after it N, and the
+ones after that N+1 and on, so a statement whose C takes several lines
+needs the directive repeated before each of them, or its later
+instructions are charged to the Goose lines below it. After each function
+the C file's own numbering comes back (`#line <n> "out.c"`), so the
+runtime, the declarations and the next function are not charged to Goose.
+A line ending in a backslash takes no directive after it.
 
 What a line can and cannot say:
 
@@ -135,36 +140,52 @@ gives them, with `--lines` and clang 21 on arm64 macOS:
 
 | Sample | `-O0` Goose | `-O0` C | `-O2` Goose | `-O2` C | `-O2` line 0 |
 |---|---|---|---|---|---|
-| `01_tour` | 99.4% | 0.6% | 45.7% | 48.0% | 6.4% |
-| `09_sorting` | 99.8% | 0.2% | 57.2% | 35.7% | 7.0% |
-| `12_huffman` (`goose build --debug`) | 99.5% | 0.5% | | | |
+| `01_tour` | 99.4% | 0.6% | 46.2% | 47.7% | 6.2% |
+| `09_sorting` | 99.8% | 0.2% | 58.8% | 34.2% | 7.0% |
+| `12_huffman` | 99.4% | 0.6% | 70.9% | 26.8% | 2.4% |
 
 At `-O0` the rest is the C `main` that starts the runtime. At `-O2` the C
 share is runtime inlined into Goose functions (above), and line 0 is code
-clang merged from several lines. A breakpoint set by Goose file and line
-in lldb resolves to the statement's first instruction. The C of every
-sample is byte-identical to the C without `--lines` once the directives
-are removed.
+clang merged from several lines. Every Goose line the debug information
+names is one a directive named. A breakpoint set by Goose file and line in
+lldb resolves to the statement's first instruction. The C of every sample
+is byte-identical to the C without `--lines` once the directives are
+removed, and every test and sample that compiles gives C that clang
+accepts with them.
 
 ### 3.2 The map
 
-`--map prog.goosemap` writes JSON beside the C:
+`--map prog.goosemap` writes JSON beside the C (`CodeGen::SourceMap`),
+with or without `--lines`, and needs C output (`-o`, or `goose build`):
 
 ```json
-{ "version": 1,
-  "files": ["samples/01_tour.goose", "stdlib/std.goose"],
-  "specs": [{ "c": "sum_g_12", "goose": "sum", "types": ["i64"],
-              "file": 0, "line": 14, "end": 19 }],
-  "types": [{ "c": "Point_g", "goose": "Point", "size": 16,
-              "fields": [{ "name": "x", "offset": 0, "type": "f64" }] }],
-  "lines": [[1201, 0, 15, 5, 12], [1207, 1, 88, 3, 40]] }
+{"version": 1,
+"files": ["/abs/samples/01_tour.goose"],
+"specs": [
+ {"c": "main_g", "goose": "main", "params": [], "rets": [], "file": 0, "line": 39, "end": 166},
+ {"c": "divide_g", "goose": "divide", "params": ["i64", "i64"], "rets": ["i64", "bool"],
+  "file": 0, "line": 19, "end": 22}],
+"structs": [
+ {"goose": "Point", "args": [], "size": 16, "fields": [
+   {"name": "x", "offset": 0, "type": "f64"}, {"name": "y", "offset": 8, "type": "f64"}]}],
+"lines": [[1, -1, 0], [4301, 0, 39], [4303, 0, 45]]}
 ```
 
-`lines` maps a C line of the generated file to a Goose file, line and
-column, and to the spec whose source it is: through it, an address whose
-DWARF line is a C line (a build without `#line`) still reaches Goose, and an
-inlined body's lines name the spec that was inlined (its `FnSpec`) as well
-as the one it was inlined into (the function the C line is in).
+* `files` are absolute, as the directives name them.
+* `specs` has every live specialization's C function, and the element-run
+  twin's (C.3) as well, with the Goose name, the concrete parameter and
+  result types, and the declaration's lines.
+* `structs` has every fixed-size struct instance codegen laid out, with
+  its packed field offsets (C.1): what the hex view needs to show a value.
+* `lines` is a run-length table over the C the map was written with: from
+  the C line given on, the Goose file and line, file -1 being the C file's
+  own. An address whose debug line is a C line, from a build without
+  `--lines`, reaches Goose through it.
+
+Not yet in the map: columns (the statement's are known), Goose's inlining
+-- an inlined body's lines are the callee's, which the specs' ranges
+place, but a generic callee's specialization is not told apart -- and
+ADT layouts.
 
 ### 3.3 Cost
 
@@ -245,9 +266,8 @@ golden file. Instead:
 
 1. **`#line` behind `--lines`** (§3.1), and `--debug` implying it. Done:
    a breakpoint set by Goose file and line resolves in a `goose build
-   --debug` executable. Still to do: the test of §6 that the C is unchanged,
-   in the suite rather than by hand.
-2. **The map** (§3.2).
+   --debug` executable, and the suite checks the C is otherwise unchanged.
+2. **The map** (§3.2). Done, less what §3.2 lists as not yet in it.
 3. **`binary` additions** and the Mach-O reader: `sections`, `syms`, `hex`.
 4. **DWARF line programs**, `.dSYM` lookup: `source` and `at`.
 5. **The arm64 decoder**: `disasm`.

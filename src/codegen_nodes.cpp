@@ -12,6 +12,7 @@
 #include "builtins.h"
 #include "gfx.h"
 #include "typecheck.h"
+#include "json.h"
 #include "codegen.h"
 #include "codegen_calls.h"
 #include "codegen_builtins.h"

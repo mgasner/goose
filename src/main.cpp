@@ -720,7 +720,8 @@ Options:
   -O0, -O1, -O2         Inlining level (default -O2). The C compiler
                         optimizes at every level, unless --debug.
   --debug               Overflow, range and tag checks that name the source
-                        line they fail on, and the C built for a debugger.
+                        line they fail on, and the C built for a debugger,
+                        whose lines are the Goose source's.
 )", COMPILEOPTIONS,
 R"(  --cc name|path        The C compiler: msvc, clang-cl, clang, gcc, cc or a
                         path (or GOOSE_CC; by default the first one found).
@@ -838,6 +839,9 @@ Options:
   --include header.h    Have the C include this header (may be repeated).
   --jit                 Also run the program in this process.
   --emit-runtime out.c  Write the runtime's C.
+  --lines               Mark each statement's Goose line in the C (#line), so
+                        the C compiler's debug information and messages name
+                        Goose source. --debug implies it.
   --<package>-link msvc|cc
                         Print the response file that links the native part of
                         a package compiled into goose (--gfx-link cc).
@@ -1413,8 +1417,10 @@ int Main(int argc, char **argv) {
         else if (arg == "--refresh") refresh = true;
         else if (arg == "--debug") {
             debug = true;
+            line_directives = true;
             cdefines.push_back("GS_DEBUG=1");
         }
+        else if (arg == "--lines") line_directives = true;
         else if (arg == "-v") verbose = true;
         else if (arg == "--stats") stats = true;
         else if (arg == "--color" && i + 1 < argc) {
@@ -1652,6 +1658,8 @@ int Main(int argc, char **argv) {
             else
                 Append(out, RuntimeSections({ "runtime.h", "runtime_impl.h", "runtime_threads.h" }),
                        cg.head, RuntimeSections({ "runtime_ext.h", "runtime_os.h" }), cg.result);
+            if (line_directives)
+                out = ResetLineDirectives(out, outfile.empty() ? string("goose_jit.c") : outfile);
             return out;
         };
         if (!outfile.empty() && !nocgen) {

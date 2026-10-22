@@ -103,6 +103,10 @@ struct RelFacts {
     bool apart = false;
 };
 
+// --lines: the generated C says which Goose line each statement came from,
+// so the C compiler's debug information and diagnostics name Goose source.
+inline bool line_directives = false;
+
 struct CodeGen {
     Ast &ast;
 
@@ -552,6 +556,9 @@ struct CodeGen {
     unordered_map<FnSpec *, string> ernames;   // "" = ineligible.
     vector<FnSpec *> erqueue;
     string body;
+    // The Goose line the next C line is for (GenStmt sets it), and the one
+    // the last #line in body put in force (--lines).
+    Line wantline, linenow;
     int ind = 1;
     int tmpn = 0;
     int stknext = 0, stkmax = 0;
@@ -619,7 +626,27 @@ struct CodeGen {
     };
     vector<CScope> cscopes;
 
+    // A source file as #line names it: absolute, since the C compiler
+    // resolves a relative one against its own directory, not ours.
+    unordered_map<int, string> linefiles;
+    const string &LineFile(int fileidx) {
+        auto it = linefiles.find(fileidx);
+        if (it != linefiles.end()) return it->second;
+        string f = "?";
+        if (fileidx >= 0 && fileidx < (int)ast.sources.size()) {
+            std::error_code ec;
+            auto abs = std::filesystem::absolute(ast.sources[fileidx].first, ec);
+            f = ec ? ast.sources[fileidx].first : abs.lexically_normal().generic_string();
+        }
+        return linefiles.emplace(fileidx, CStr(f)).first->second;
+    }
+
     template<typename... Ts> void L(const Ts &...args) {
+        if (line_directives && wantline.line > 0 &&
+            (wantline.line != linenow.line || wantline.fileidx != linenow.fileidx)) {
+            Append(body, "#line ", wantline.line, " ", LineFile(wantline.fileidx), "\n");
+            linenow = wantline;
+        }
         body.append((size_t)ind * 4, ' ');
         Append(body, args...);
         body += '\n';
@@ -1563,5 +1590,34 @@ struct CodeGen {
                "\n/* ---- prototypes ---- */\n", protos, "\n/* ---- code ---- */\n", code);
     }
 };
+
+// The other half of --lines, once the file is assembled and its own line
+// numbers are known: after each function that put a Goose line in force,
+// the C file named `cname` numbers its lines again, so the runtime and the
+// declarations between functions are not charged to Goose source. Every
+// function's text ends in a `}` at the start of a line, and nothing else at
+// the top level is a lone `}`.
+inline string ResetLineDirectives(const string &text, const string &cname) {
+    string out;
+    out.reserve(text.size() + text.size() / 64);
+    auto goose = false;
+    size_t lineno = 0, pos = 0;
+    while (pos < text.size()) {
+        auto nl = text.find('\n', pos);
+        if (nl == string::npos) nl = text.size();
+        string_view line(text.data() + pos, nl - pos);
+        pos = nl + 1;
+        out.append(line);
+        out += '\n';
+        lineno++;
+        if (line.rfind("#line ", 0) == 0) goose = true;
+        else if (goose && line == "}") {
+            lineno++;
+            Append(out, "#line ", lineno + 1, " ", CodeGen::CStr(cname), "\n");
+            goose = false;
+        }
+    }
+    return out;
+}
 
 }  // namespace goose

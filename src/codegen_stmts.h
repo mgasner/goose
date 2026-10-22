@@ -38,6 +38,10 @@ size_t CodeGen::GenInlineArgs(Block *b) {
 }
 
 void CodeGen::GenStmt(Node *n) {
+    // The restores its scope ends with are its own line's; what the
+    // enclosing statement emits after it is the enclosing line's again.
+    auto outer = wantline;
+    if (n->line.line > 0) wantline = n->line;
     PushSc(SC_STMT);
     termjump = false;
     GenStmt2(n);
@@ -47,6 +51,7 @@ void CodeGen::GenStmt(Node *n) {
     }
     PopSc();
     termjump = false;
+    wantline = outer;
 }
 
 // ------------------------------------------------------------------

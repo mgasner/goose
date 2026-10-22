@@ -352,6 +352,7 @@ void CodeGen::ResetFnState() {
     dsttop0.clear();
     cscopes.clear();
     body.clear();
+    wantline = linenow = {};
     tmpn = 0;
     stknext = 0;
     stkmax = 0;
@@ -558,6 +559,7 @@ void CodeGen::EmitSpec(FnSpec *sp, bool er) {
     FindRefAliases(sp);
     PlanTopClasses(sp);
     markers = true;
+    wantline = sp->sf->line;
     PushSc(SC_FN);
     auto params = SigParams(sp, true, er);
     // The spellings are only known once SigParams has named the parameters.
@@ -642,6 +644,10 @@ void CodeGen::EmitSpec(FnSpec *sp, bool er) {
         Append(fnbody, "    uint8_t *", p.second, " = ", gnames[p.first], ".base;\n");
     fnbody += bodyout;
     auto name = er ? ernames[sp] : curinfo->cname;
+    // The signature and the entry code ahead of the first statement are the
+    // declaration's line (--lines).
+    if (line_directives && sp->sf->line.line > 0)
+        Append(code, "#line ", sp->sf->line.line, " ", LineFile(sp->sf->line.fileidx), "\n");
     if (sp->sf->issimd) EmitSimdVersions(sp, name, params, fnbody);
     else Append(code, "static ", FnAttrs(sp), SigRet(sp), " ", name, "(", params, ") {\n", fnbody,
                 "}\n\n");

@@ -211,6 +211,7 @@ their whitespace) and parses both (the same `Ast::Dump` and `DumpDocs`).
 | `--no-bce` | skip bounds-check elimination (this also loses the loop-view hoist, §6.10, and the restated array loops that need BCE's facts, §6.12) |
 | `--bce-test` | verify `// bce:elide` / `// bce:keep` annotations in the sources |
 | `--bce-lines` | print elided/kept counts per source line |
+| `--lines` | a `#line` before the C of each statement whose Goose line differs from the last (`CodeGen::L`, set by `GenStmt`), and one returning to the C file's own numbering after each function (`ResetLineDirectives`), so a C compiler's debug information and diagnostics name Goose source; `--debug` implies it. The code is the same with or without (`docs/design/inspect.md` §3.1) |
 | `--unsafe-no-rf-check` | omit the `return from` discriminant checks after calls: a measurement aid, unsound |
 | `-o out.c`, `--jit`, `--header`, `-D`, `--include`, `--stdlib`, `--` | output file, in-process run, a C API header for the exports (which builds the C without a `main`, for a C host), a define written into the generated C, a user header, the stdlib directory, program arguments |
 | `--<name>-link msvc\|cc` | print the response file of link inputs that a program needs when it uses the blessed package imported as `name` (`gfx`, `audio`, `ui`, `physics`), if that package is compiled into this compiler (`builtin.h`, `BuiltinLinkFile`) |

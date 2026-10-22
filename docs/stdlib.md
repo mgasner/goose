@@ -782,7 +782,7 @@ if SDL_Init(0x20) < 0 { abort(str("SDL: ", ffi::cstr(SDL_GetError()))); }
 
 ## binary
 
-Checked, little-endian reads of external formats, written entirely in Goose.
+Checked reads of external formats, written entirely in Goose.
 `import binary;` puts the API in namespace `binary`. Input is a `const u8[:]`;
 returned byte slices and fixed-width names borrow that input without copying
 or allocating. Their lifetimes and read-only access are checked normally.
@@ -792,11 +792,19 @@ This API does not interpret Goose serialization images (`from_bytes`).
 
 ```goose
 fn range_ok(data: const u8[:], at: i64, size: i64) -> bool
+fn read_u8(data: const u8[:], at: i64) -> u8, bool
 fn read_u16le(data: const u8[:], at: i64) -> u16, bool
 fn read_i16le(data: const u8[:], at: i64) -> i16, bool
 fn read_u32le(data: const u8[:], at: i64) -> u32, bool
+fn read_i32le(data: const u8[:], at: i64) -> i32, bool
+fn read_u64le(data: const u8[:], at: i64) -> u64, bool
+fn read_i64le(data: const u8[:], at: i64) -> i64, bool
+fn read_u16be(data: const u8[:], at: i64) -> u16, bool
+fn read_u32be(data: const u8[:], at: i64) -> u32, bool
+fn read_u64be(data: const u8[:], at: i64) -> u64, bool
 fn read_bytes(data: const u8[:], at: i64, size: i64) -> const u8[:], bool
 fn read_name(data: const u8[:], at: i64, width: i64) -> const u8[:], bool
+fn read_cstring(data: const u8[:], at: i64) -> const u8[:], bool
 ```
 
 Offsets and sizes are bytes. Negative values, truncated fields and offsets
@@ -806,17 +814,24 @@ is valid. Reads work at unaligned offsets on either host byte order.
 `read_name` validates the entire fixed-width field and returns the bytes
 before its first NUL, or all `width` bytes if there is no NUL. It does not
 validate padding or interpret the bytes as a particular text encoding.
+`read_cstring` returns the bytes from `at` up to the next NUL, without it,
+as a string table entry is read; a string with no NUL before the end of
+the input fails, since its end cannot be known.
 
 ### Cursor and bounded subreaders
 
 ```goose
 struct Reader { data: const u8[:], pos: i64 }
 fn reader(data: const u8[:]) -> Reader
-fn read_u16le(r: Reader&) -> u16, bool
-fn read_i16le(r: Reader&) -> i16, bool
-fn read_u32le(r: Reader&) -> u32, bool
+fn read_u8(r: Reader&) -> u8, bool
+fn read_u16le(r: Reader&) -> u16, bool       // and the other widths above:
+fn read_i16le(r: Reader&) -> i16, bool       // read_i32le, read_u64le, read_i64le,
+fn read_u32le(r: Reader&) -> u32, bool       // read_u16be, read_u32be, read_u64be
+fn read_uleb128(r: Reader&) -> u64, bool
+fn read_sleb128(r: Reader&) -> i64, bool
 fn read_bytes(r: Reader&, size: i64) -> const u8[:], bool
 fn read_name(r: Reader&, width: i64) -> const u8[:], bool
+fn read_cstring(r: Reader&) -> const u8[:], bool
 fn skip(r: Reader&, size: i64) -> bool
 fn subreader(r: Reader&, size: i64) -> Reader, bool
 ```
@@ -827,6 +842,11 @@ failure returns zero/empty and leaves `pos` unchanged, so a shorter read
 can be tried next. Set `pos` to seek; a negative or out-of-range position
 makes reads fail. Callers keep any file offsets or diagnostic context they
 need. There is no sticky error state.
+
+`read_uleb128` and `read_sleb128` read LEB128, the variable-length integers
+of DWARF, WebAssembly and Mach-O's link-edit data: at most ten bytes, and
+none of the value's bits past the 64th, so a value that does not fit fails
+rather than wrapping. `read_cstring` consumes the NUL as well.
 
 `subreader` consumes a bounded range from its parent and gives it a new
 cursor starting at zero. Failure returns an empty reader and `false`,

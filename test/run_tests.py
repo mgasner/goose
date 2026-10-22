@@ -2419,6 +2419,17 @@ def main():
     if cc or jit:
         r.show_task(resource_paths)
 
+    def inspect_tool():
+        from inspect_tool import check_inspect
+        try:
+            check_inspect(exe, cc, gendir, runtime=r.runtime, extra=extra)
+            r.ok("inspector: sections, Goose names against --map, addresses, bytes, "
+                 "broken files")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("inspector", str(e))
+    if cc and tc.IS_MACOS:
+        r.show_task(inspect_tool)
+
     def git_packages():
         from packages_git import check_git_packages
         try:

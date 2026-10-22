@@ -22,7 +22,8 @@ came from, through the C the compiler generated in between. It answers
 "what is at this offset in the file", for a program whose source is at hand,
 and as much of the same as the binary allows for one whose source is not.
 Written against the tree at `bd251f7`. The first steps of the plan (§7),
-`--lines` and `--map`, are implemented; the rest is not.
+`--lines`, `--map`, the Mach-O reader and the line tables, are
+implemented; the rest is not.
 
 ## 1. Decisions
 
@@ -215,9 +216,10 @@ only when asked for. Neither changes code generation, which a test checks
 ```
 inspect sections prog              segments and sections, file offsets, addresses
 inspect syms prog                  symbols, decoded to Goose names where they are Goose
+inspect lines prog <sym>           the line table over a function, with the source
 inspect hex prog <addr|sym|+off>   bytes, with the symbol and section each row is in
 inspect disasm prog <sym>          instructions, each with its C and Goose line
-inspect source prog file:line      the instructions a source line compiled to
+inspect source prog file:line      the address ranges a source line compiled to
 inspect at prog <addr>             everything known about one address
 inspect html prog out.html         all of the above as one linked page
 ```
@@ -250,9 +252,17 @@ Addresses and instruction choices depend on the C compiler and its version,
 so the tests do not compare disassembly of freshly built programs to a
 golden file. Instead:
 
-* **Parsers** run on small binaries checked into `test/inspect/`, built once
-  from a known sample, with golden output; truncated and corrupted copies of
-  them must fail cleanly.
+* **The reader** runs on a sample the suite builds (`test/inspect_tool.py`)
+  and is checked by what must hold of any build: each symbol decoded to a
+  Goose name is the name the map gives that C function, an address resolves
+  to the function its symbol starts, the bytes `hex` shows are the file's,
+  every Goose line a function's table names is inside a function the map
+  says that file declares, a line's code is in its function, and
+  truncated, empty and foreign files, and a missing `.dSYM`, are refused
+  with a message. No binary is checked in. Fuzz runs (random bytes in the
+  load commands, and in `__debug_line`, 300 files each) found no fault,
+  and a comparison with lldb no difference; neither is part of the suite,
+  the second since lldb is slow to start and not on every machine.
 * **The decoder** runs on a generated corpus of arm64 encodings and is
   compared against Capstone where the library is present.
 * **The mapping** is checked by property on samples built in the test run:
@@ -269,7 +279,17 @@ golden file. Instead:
    --debug` executable, and the suite checks the C is otherwise unchanged.
 2. **The map** (§3.2). Done, less what §3.2 lists as not yet in it.
 3. **`binary` additions** and the Mach-O reader: `sections`, `syms`, `hex`.
-4. **DWARF line programs**, `.dSYM` lookup: `source` and `at`.
+   Done, with `at`: `u8`, `i32`, `u64`/`i64`, big-endian, C-string and
+   LEB128 reads in `binary`; `tools/inspect/macho.goose` and
+   `tools/inspect/inspect.goose`.
+4. **DWARF line programs**, `.dSYM` lookup: `source` and `at`. Done,
+   with `lines`: `tools/inspect/dwarf.goose` reads every unit's line
+   program, versions 2 to 5, 32- and 64-bit; the companion is the `.dSYM`
+   beside the executable, matched by UUID. Its answers agree with lldb's
+   `image lookup` at every one of 580 addresses sampled from `-O0` and
+   `-O2` builds, runtime functions among them. Not done: the debug map
+   (objects' DWARF without a `.dSYM`), and `.debug_info`'s inlined call
+   sites.
 5. **The arm64 decoder**: `disasm`.
 6. **The HTML export.**
 7. **ELF**, then x86-64 through Capstone.

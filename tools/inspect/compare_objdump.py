@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Compares the inspector's arm64 decoder with LLVM's objdump.
+"""Compares the inspector's disassembly with LLVM's objdump: the arm64
+decoder's, and for x86-64 Capstone's as the inspector restyles it.
 
     compare_objdump.py <inspect> <file>...       the text section of each file
     compare_objdump.py <inspect> --random N [--elf]
@@ -10,7 +11,10 @@
 
 Each instruction is one of: the same as objdump prints it (symbols and
 comments left out); not decoded (.word), which is never wrong; decoded
-differently, or decoded where objdump has <unknown> -- both are bugs. A
+differently, or decoded where objdump has <unknown> -- both are bugs (for
+x86-64, where Capstone decodes, a difference is the restyling's, or one of
+the two that are left: objdump's `lock` on a line of its own, and the %st
+fucompi leaves implicit). A
 file can be a Mach-O or ELF executable or object; an object's sections are
 at the addresses the inspector gives them, so its targets are compared
 relative to the section. Needs objdump (Apple's, or llvm-objdump) and, for
@@ -21,17 +25,18 @@ import os
 import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 
-BRANCHY = re.compile(r"^(b|bl|b\.\w+|cbn?z|tbn?z|adrp?|ldr|ldrsw)\b")
+BRANCHY = re.compile(r"^(b|bl|b\.\w+|cbn?z|tbn?z|adrp?|ldr|ldrsw|j\w+|callq?)\b")
 
 
 def norm(t):
-    t = t.replace("<unknown>", "UNKNOWN")
+    t = t.replace("<unknown>", "UNKNOWN").replace("(bad)", "UNKNOWN")
     t = re.sub(r"\s*<[^>]*>", "", t)
-    t = re.sub(r"\s*(;|//).*$", "", t)
+    t = re.sub(r"\s*(;|//|#).*$", "", t)
     return re.sub(r"\s+", " ", t).strip()
 
 
@@ -48,6 +53,7 @@ def text_section(inspect, path):
 def objdump(path):
     exe = shutil.which("llvm-objdump") or shutil.which("objdump")
     out = subprocess.run([exe, "-d", path], capture_output=True, text=True).stdout
+    x86 = "x86-64" in out[:400] or "x86_64" in out[:400]
     rows, section = [], None
     for line in out.splitlines():
         m = re.match(r"^Disassembly of section (\S+):", line)
@@ -55,6 +61,12 @@ def objdump(path):
             section = m[1].rstrip(":")
             continue
         if section not in ("__TEXT,__text", ".text"):
+            continue
+        if x86:
+            # Bytes one by one before a tab, then the text.
+            g = re.match(r"^\s*([0-9a-f]+): ((?:[0-9a-f]{2} )+)\s*\t(.*)$", line)
+            if g:
+                rows.append((int(g[1], 16), g[2].replace(" ", ""), norm(g[3])))
             continue
         g = re.match(r"^\s*([0-9a-f]+): ([0-9a-f]{8})\s+(.*)$", line)
         if g:
@@ -69,9 +81,9 @@ def compare(inspect, path, counts, examples):
         sys.exit(f"{path}: {mine.stderr.strip()}")
     ours = {}
     for line in mine.stdout.splitlines():
-        g = re.match(r"^  ([0-9a-f]{9,})  ([0-9a-f]{8})  (.*)$", line)
+        g = re.match(r"^  ([0-9a-f]{9,})  ([0-9a-f]{8}|(?:[0-9a-f]{2} ?)+?)  \s*(\S.*)$", line)
         if g:
-            ours[int(g[1], 16) - start] = (g[2], g[3])
+            ours[int(g[1], 16) - start] = (g[2].replace(" ", ""), g[3])
     theirs = objdump(path)
     if not theirs:
         return
@@ -80,7 +92,7 @@ def compare(inspect, path, counts, examples):
         if addr - base not in ours:
             continue
         w, m = ours[addr - base]
-        decoded = not m.startswith(".word")
+        decoded = not m.startswith(".word") and not m.startswith(".byte")
         m = norm(m)
         if decoded and BRANCHY.match(m) and start != base:
             # An object's targets, relative to the section as objdump has them.
@@ -155,6 +167,7 @@ def table(inspect, out, elf, files):
 
 
 def main():
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)     # quiet under head
     args = sys.argv[1:]
     if len(args) < 2:
         sys.exit(__doc__)

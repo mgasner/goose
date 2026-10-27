@@ -340,7 +340,32 @@ fn branch(w: u32, pc: u64, out: u8[>..]&) -> Decoded {
         imm(out, v);
         return done();
     }
-    if w == 0xd503201f { out.append("nop"); return done(); }
+    if w & 0xfffff01f == 0xd503201f {
+        // the hints: nop, the pointer authentication and branch target ones
+        // gcc's branch protection emits, and the rest by number
+        let names: const u8[:][40] = ["nop", "yield", "wfe", "wfi", "sev", "sevl", "dgh", "xpaclri",
+            "pacia1716", "", "pacib1716", "", "autia1716", "", "autib1716", "",
+            "esb", "psb csync", "tsb csync", "gcsb dsync", "csdb", "", "clrbhb", "",
+            "paciaz", "paciasp", "pacibz", "pacibsp", "autiaz", "autiasp", "autibz", "autibsp",
+            "bti r", "", "bti c", "", "bti j", "", "bti jc", "pacm"];
+        let n = bits(w, 5, 7);
+        if n < 40 && names[n].len > 0 { out.append(names[n]); return done(); }
+        op(out, "hint");
+        imm(out, n);
+        return done();
+    }
+    if bits(w, 22, 10) == 0x354 && bit(w, 20) {
+        // mrs, msr (register): a system register by its op0, op1, CRn, CRm, op2
+        let read = bit(w, 21);
+        let rt = bits(w, 0, 5);
+        let name = sysreg(2 + bits(w, 19, 1), bits(w, 16, 3), bits(w, 12, 4), bits(w, 8, 4), bits(w, 5, 3), !read);
+        if name.len == 0 { return unknown(w, out); }
+        op(out, if read { "mrs" } else { "msr" });
+        if read { reg(out, rt, true, false); sep(out); }
+        out.append(name);
+        if !read { sep(out); reg(out, rt, true, false); }
+        return done();
+    }
     if bits(w, 12, 20) == 0xd5033 && bits(w, 0, 5) == 31 {
         // dmb, dsb, isb
         let crm = bits(w, 8, 4);
@@ -354,6 +379,22 @@ fn branch(w: u32, pc: u64, out: u8[>..]&) -> Decoded {
         return done();
     }
     unknown(w, out)
+}
+
+// A system register as LLVM names it (in capitals), for the ones a program reads by name
+// (the thread pointer, the floating-point control and status, the
+// counter, the cache geometry); "" for the rest, which stay .word, since
+// LLVM knows hundreds of names. Written only where it is writable.
+fn sysreg(op0: i64, op1: i64, crn: i64, crm: i64, op2: i64, write: bool) -> const u8[:] {
+    let key = (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2;
+    if key == 0xde82 { return "TPIDR_EL0"; }
+    if key == 0xda10 { return "NZCV"; }
+    if key == 0xda20 { return "FPCR"; }
+    if key == 0xda21 { return "FPSR"; }
+    if write { return ""; }
+    if key == 0xde83 { "TPIDRRO_EL0" } else if key == 0xdf02 { "CNTVCT_EL0" } else if key == 0xdf00 { "CNTFRQ_EL0" }
+    else if key == 0xd807 { "DCZID_EL0" } else if key == 0xd801 { "CTR_EL0" } else if key == 0xc000 { "MIDR_EL1" }
+    else { "" }
 }
 
 // --- loads and stores ----------------------------------------------------

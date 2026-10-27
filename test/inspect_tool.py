@@ -4,14 +4,15 @@ Everywhere: the arm64 decoder against objdump's text for the encodings of
 test/inspect/arm64_words.txt (Apple's syntax) and arm64_words_elf.txt
 (LLVM's generic one), and the ELF reader on two objects checked in,
 test/inspect/sieve-{arm64,x86_64}.o, against what it was found to say when
-that agreed with dwarfdump and objdump (sieve-*.lines, sieve-arm64.disasm).
+that agreed with dwarfdump and objdump (sieve-*.lines, sieve-arm64.disasm),
+and the x86-64 one's code through Capstone where Capstone is installed.
 Those objects are samples/07_sieve.goose's C (`goose -O1 --lines`, run in
 the repository), compiled with `clang -target aarch64-linux-gnu` and
 `x86_64-linux-gnu`, `-c -g -O1 -fdebug-prefix-map=<repo>=/goose
 -fdebug-prefix-map=<build dir>=/build`; tools/inspect/compare_objdump.py
 --table writes the word lists.
 
-On macOS, a program built here, checked by what must hold rather than
+On macOS and Linux, a program built here, checked by what must hold rather than
 against a golden file, since addresses and instructions depend on the C
 compiler: every symbol it decodes to a Goose name is the name the
 program's --map gives that function, an address resolves to the function
@@ -21,6 +22,7 @@ reports, never a fault."""
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import toolchain as tc
@@ -28,7 +30,8 @@ import toolchain as tc
 
 def check_inspect(exe, cc, base, *, runtime, extra=()):
     """Raises RuntimeError on a failure; does nothing with no C compiler.
-    The program built here is checked on macOS alone, where it is Mach-O."""
+    The program built here is checked on macOS (Mach-O, a .dSYM) and Linux
+    (ELF, its DWARF in it)."""
     if not cc or cc.style == "msvc":
         return
     base = (Path(base) / "inspect").resolve()
@@ -55,7 +58,9 @@ def check_inspect(exe, cc, base, *, runtime, extra=()):
 
     inspect = build(tc.REPO_ROOT / "tools" / "inspect" / "inspect.goose", "inspect", 1)
     check_decoder_and_elf(run, inspect)
-    if not tc.IS_MACOS:
+    # A program built here: Mach-O with a .dSYM on macOS, ELF with its
+    # DWARF in it on Linux.
+    if not (tc.IS_MACOS or sys.platform.startswith("linux")):
         return
     mapfile = base / "sorting.goosemap"
     prog = build(tc.REPO_ROOT / "samples" / "09_sorting.goose", "sorting", 0,
@@ -63,7 +68,7 @@ def check_inspect(exe, cc, base, *, runtime, extra=()):
     specs = {s["c"]: s["goose"] for s in json.loads(mapfile.read_text())["specs"]}
 
     code, out, err = run([inspect, "sections", prog])
-    if code or "__TEXT,__text" not in out:
+    if code or not re.search(r"^  (?:__TEXT,__text|\.text)\s", out, re.MULTILINE):
         raise RuntimeError(f"sections:\n{out}{err}")
 
     code, out, err = run([inspect, "syms", prog])
@@ -86,17 +91,23 @@ def check_inspect(exe, cc, base, *, runtime, extra=()):
     offset = re.search(r"file \+0x([0-9a-f]+)", out)
 
     code, out, err = run([inspect, "hex", prog, "main_g", "32"])
-    first = re.search(r"^0x[0-9a-f]+  \+([0-9a-f]+)  ((?:[0-9a-f]{2} +)+)", out, re.MULTILINE)
-    if code or not first or not offset:
+    rows = re.findall(r"^0x[0-9a-f]+  \+([0-9a-f]+)  (.{49}) \|", out, re.MULTILINE)
+    if code or not rows or not offset:
         raise RuntimeError(f"hex main_g:\n{out}{err}")
     data = prog.read_bytes()
-    row = int(first[1], 16)
-    shown = bytes(int(b, 16) for b in first[2].split())
-    # The row is aligned to 16 bytes; main_g's bytes are its last ones.
-    at = int(offset[1], 16) - 4
-    if shown != data[at:at + len(shown)] or row > at:
-        raise RuntimeError(f"hex main_g shows {shown.hex()}, the file has "
-                           f"{data[at:at + len(shown)].hex()} at {at:#x}\n{out}")
+    # Each row is 16 bytes from a 16-byte boundary, a space after the 8th:
+    # the bytes shown are the file's at the row's offset and their column.
+    shown = {}
+    for row_off, cells in rows:
+        for k in range(16):
+            cell = cells[k * 3 + (k >= 8):][:2]
+            if cell.strip():
+                shown[int(row_off, 16) + k] = int(cell, 16)
+    at = int(offset[1], 16) - 4      # main_g's start: `at` was asked of start + 4
+    wrong = [f"{o:#x}: {v:02x}, the file {data[o]:02x}" for o, v in shown.items() if data[o] != v]
+    if wrong or min(shown) != at or len(shown) != 32:
+        raise RuntimeError(f"hex main_g from {at:#x}: {wrong[:4]}, {len(shown)} bytes from "
+                           f"{min(shown):#x}\n{out}")
 
     # Line information, from the .dSYM the compile and link left beside it:
     # every Goose line a function's table names is inside a function the
@@ -121,19 +132,22 @@ def check_inspect(exe, cc, base, *, runtime, extra=()):
     code, out, err = run([inspect, "at", prog, hex(start + 4)])
     if code or not re.search(r"^  09_sorting\.goose:\d+", out, re.MULTILINE):
         raise RuntimeError(f"at {hex(start + 4)} gives no line:\n{out}{err}")
-    alone = base / "sorting-alone"
-    alone.write_bytes(prog.read_bytes())
-    code, out, err = run([inspect, "lines", alone, "main_g"])
-    if code != 1 or "no line information" not in err:
-        raise RuntimeError(f"lines without a .dSYM: exit {code}\n{out}{err}")
+    if tc.IS_MACOS:
+        alone = base / "sorting-alone"
+        alone.write_bytes(prog.read_bytes())
+        code, out, err = run([inspect, "lines", alone, "main_g"])
+        if code != 1 or "no line information" not in err:
+            raise RuntimeError(f"lines without a .dSYM: exit {code}\n{out}{err}")
 
     # A function disassembled with its source, and every instruction of the
-    # program known.
+    # program known: x86-64's where Capstone is installed.
     code, out, err = run([inspect, "disasm", prog, "main_g"])
+    if code == 1 and "needs Capstone" in err:
+        return
     if code or not re.search(r"^    ; 09_sorting\.goose:\d+ ", out, re.MULTILINE):
         raise RuntimeError(f"disasm main_g:\n{out[:2000]}{err}")
     code, out, err = run([inspect, "sections", prog])
-    text = re.search(r"__TEXT,__text\s+0x([0-9a-f]+)  size 0x([0-9a-f]+)", out)
+    text = re.search(r"(?:__TEXT,__text|\.text)\s+0x([0-9a-f]+)  size 0x([0-9a-f]+)", out)
     code, out, err = run([inspect, "disasm", prog, "0x" + text[1], str(int(text[2], 16))])
     if code or "not decoded" in out:
         raise RuntimeError(f"disasm of __text: exit {code}\n" +
@@ -153,7 +167,8 @@ def check_inspect(exe, cc, base, *, runtime, extra=()):
         raise RuntimeError(f"html: functions {sorted(fns)[:20]}")
     code, out, err = run([inspect, "disasm", prog, "main_g"])
     shown = [re.sub(r" <[^>]*>$", "", t) for t in
-             re.findall(r"^  [0-9a-f]{9}  [0-9a-f]{8}  (.*)$", out, re.MULTILINE)]
+             re.findall(r"^  [0-9a-f]{9}  (?:[0-9a-f]{8}|(?:[0-9a-f]{2} )*[0-9a-f]{2})\s+(\S.*)$",
+                        out, re.MULTILINE)]
     if shown != [i[2] for i in fns["main_g"]["insns"]]:
         raise RuntimeError("html: main_g's instructions are not disasm's")
     files = page_data["files"]
@@ -214,6 +229,17 @@ def check_decoder_and_elf(run, inspect):
     code, out, err = run([inspect, "disasm", obj, "0x1000", "0x700"])
     if code or out != (data_dir / "sieve-arm64.disasm").read_text():
         raise RuntimeError(f"disasm of {obj.name} differs from sieve-arm64.disasm:\n{out[:1500]}{err}")
-    code, out, err = run([inspect, "disasm", data_dir / "sieve-x86_64.o", "main"])
-    if code != 1 or "arm64 only" not in err:
-        raise RuntimeError(f"disasm of x86-64: exit {code}\n{out}{err}")
+    # x86-64 goes through Capstone where it is installed (tools/inspect/x86.goose,
+    # an extern? block): its text varies by version, so the function's start
+    # is checked, and that nothing is left as .byte. Without it, a message.
+    obj = data_dir / "sieve-x86_64.o"
+    code, out, err = run([inspect, "disasm", obj, "0x1000", "0x800"])
+    if code == 0:
+        texts = [re.sub(r"\s+", " ", t) for t in
+                 re.findall(r"^  [0-9a-f]{9}  (?:[0-9a-f]{2} )*[0-9a-f]{2}\s+(\S.*)$", out, re.MULTILINE)]
+        want = ["pushq %rbp", "pushq %r15", "pushq %r14", "pushq %r13", "pushq %r12", "pushq %rbx",
+                "subq $0x98, %rsp", "cmpb $0x0, (%rip)"]
+        if texts[:len(want)] != want or "not decoded" in out or len(texts) < 300:
+            raise RuntimeError(f"disasm of {obj.name}: {texts[:10]}\n{out[:1500]}")
+    elif code != 1 or "needs Capstone" not in err:
+        raise RuntimeError(f"disasm of {obj.name} with no Capstone: exit {code}\n{out}{err}")

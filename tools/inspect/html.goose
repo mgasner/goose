@@ -139,7 +139,7 @@ let TAIL = """
       const rows = [];
       let last = null;
       f.insns.forEach((ins, k) => {
-        const [off, word, text, file, line, target] = ins;
+        const [off, bytes, text, file, line, target] = ins;
         if (file >= 0 && line > 0 && lineKey(file, line) !== last) {
           last = lineKey(file, line);
           const t = (D.files[file].lines[line - 1] || "").trim();
@@ -154,8 +154,8 @@ let TAIL = """
             body += `  <a href="#" data-go="${j}" data-at="${target}">&lt;${esc(lab)}&gt;</a>`;
           }
         }
-        const unk = text.startsWith(".word");
-        rows.push(`<tr class="i" data-k="${k}"><td class="a">${hex(f.start + off)}</td><td class="w">${hex(word, 8)}</td><td${unk ? ' class="u"' : ""}>${body}</td></tr>`);
+        const unk = text.startsWith(".word") || text.startsWith(".byte");
+        rows.push(`<tr class="i" data-k="${k}"><td class="a">${hex(f.start + off)}</td><td class="w">${shownBytes(bytes)}</td><td${unk ? ' class="u"' : ""}>${body}</td></tr>`);
       });
       $("distab").innerHTML = rows.join("");
       listFns();
@@ -174,18 +174,23 @@ let TAIL = """
       const el = $("srcbody").querySelector(`[data-l="${line}"]`);
       if (el) el.scrollIntoView({block: "center"});
     }
+    // An instruction's bytes as objdump shows them: arm64's little-endian
+    // word, x86-64's bytes one by one.
+    function shownBytes(b) {
+      if (D.arch === "arm64") return b.match(/../g).reverse().join("");
+      return b.match(/../g).join(" ");
+    }
+    // The function's bytes, 16 to a row, each marked with its instruction.
     function showHex() {
       const f = D.functions[cur];
+      const cells = [];
+      f.insns.forEach((ins, k) => { for (const b of ins[1].match(/../g)) cells.push([k, b]); });
       const rows = [];
-      for (let r = 0; r < f.insns.length; r += 4) {
-        const cells = [];
-        for (let k = r; k < Math.min(r + 4, f.insns.length); k++) {
-          const w = f.insns[k][1];
-          for (let b = 0; b < 4; b++) cells.push(`<span class="b" data-k="${k}">${hex((w >>> (8 * b)) & 255, 2)}</span>`);
-        }
-        rows.push(`${hex(f.start + f.insns[r][0])}  +${hex(f.fileoff + f.insns[r][0], 6)}  ${cells.join(" ")}`);
+      for (let r = 0; r < cells.length; r += 16) {
+        const row = cells.slice(r, r + 16).map(([k, b]) => `<span class="b" data-k="${k}">${b}</span>`);
+        rows.push(`${hex(f.start + r)}  +${hex(f.fileoff + r, 6)}  ${row.join(" ")}`);
       }
-      $("hexhead").textContent = `bytes of ${f.name}, as the file has them (little-endian words)`;
+      $("hexhead").textContent = `bytes of ${f.name}, as the file has them`;
       $("hexbody").innerHTML = rows.join("\n");
     }
     function mark() {

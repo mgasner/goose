@@ -22,6 +22,7 @@ import .image;
 import .elf;
 import .dwarf;
 import .arm64;
+import .x86;
 import .html;
 
 fn fail(msg: const u8[:]) {
@@ -564,14 +565,82 @@ fn padded(out: u8[>..]&, text: const u8[:]) {
     out.append(text[tab + 1..]);
 }
 
+// What decode_range made of the code: each instruction's address, size,
+// text (in dec_text), the address it names if any, and whether it was
+// decoded rather than shown as a .word or .byte.
+struct Dec { addr: u64, size: i64, text_at: i64, text_len: i64, target: u64, has_target: bool, known: bool }
+var decs: Dec[>..] = [];
+var dec_text: u8[>..] = [];
+
+fn dec_text_of(d: Dec) -> const u8[:] { dec_text[d.text_at..d.text_at + d.text_len] }
+
+// Decodes the code from start to end, which one section holds: arm64 here,
+// x86-64 through Capstone. "" on success, else why it cannot be.
+fn decode_range(start: u64, end: u64) -> u8[>..] {
+    decs.clear();
+    dec_text.clear();
+    if image::cpu == image::CPU_ARM64 {
+        var a = start;
+        while a + 4 <= end {
+            let off, mapped = image::file_offset(a);
+            let word, ok = binary::read_u32le(image::data, off);
+            if !mapped || !ok { break; }
+            let at = dec_text.len;
+            let d = arm64::decode(word, a, dec_text);
+            decs.push(Dec { addr: a, size: 4, text_at: at, text_len: dec_text.len - at,
+                            target: d.target, has_target: d.has_target, known: d.known });
+            a += 4;
+        }
+        return "";
+    }
+    if image::cpu == image::CPU_X86_64 {
+        let err = x86::open();
+        if err.len > 0 { return err; }
+        let off, mapped = image::file_offset(start);
+        if !mapped || end <= start { return ""; }
+        x86::decode(image::data[off..off + (end - start) as! i64], start);
+        for i in x86::insns {
+            let t = x86::text(i);
+            let at = dec_text.len;
+            dec_text.append(t);
+            // A jump or call to an address names it, as objdump's do.
+            var target: u64 = 0;
+            var has = false;
+            let tab = find(t, "\t");
+            if tab > 0 && (t[0] == 'j' || starts_with(t, "call")) && starts_with(t[tab + 1..], "0x") {
+                let v, ok = parse_uint_hex(t[tab + 3..]);
+                if ok { target = v; has = true; }
+            }
+            decs.push(Dec { addr: i.addr, size: i.size, text_at: at, text_len: dec_text.len - at,
+                            target: target, has_target: has, known: i.known });
+        }
+        return "";
+    }
+    str("disassembly is arm64 and x86-64 only; this is ", image::cpu_name())
+}
+
+// An instruction's bytes as objdump shows them: arm64's word, x86-64's
+// bytes one by one.
+fn dec_bytes(out: u8[>..]&, d: Dec) {
+    let off, mapped = image::file_offset(d.addr);
+    if image::cpu == image::CPU_ARM64 {
+        let word, ok = binary::read_u32le(image::data, off);
+        hex(out, word, 8);
+        return;
+    }
+    for k in d.size {
+        if k > 0 { out.push(' '); }
+        hex(out, image::data[off + k], 2);
+    }
+}
+
 fn cmd_disasm(target: const u8[:], count_arg: const u8[:]) {
-    if image::cpu != image::CPU_ARM64 { fail(str("disassembly is arm64 only; this is ", image::cpu_name())); }
     var start: u64 = 0;
     var end: u64 = 0;
     if starts_with(target, "0x") {
         let a, ok = parse_number(target);
         if !ok { fail(str("not an address: ", target)); }
-        start = a & ~(3 as u64);
+        start = if image::cpu == image::CPU_ARM64 { a & ~(3 as u64) } else { a };
         var n: u64 = 64;
         if count_arg.len > 0 {
             let c, cok = parse_number(count_arg);
@@ -589,13 +658,14 @@ fn cmd_disasm(target: const u8[:], count_arg: const u8[:]) {
     if sect < 0 || !is_code(sect) { fail("no code at that address"); }
     let s = image::sections[sect];
     end = min(end, s.addr + s.size);
+    let err = decode_range(start, end);
+    if err.len > 0 { fail(err); }
     var out: u8[>..] = [];
     var known = 0;
-    var total = 0;
     var last_file = -2;
     var last_line = -1;
-    var a = start;
-    while a + 4 <= end {
+    for d in decs {
+        let a = d.addr;
         if a == start || function_at(a) >= 0 && functions[function_at(a)].start == a {
             let f = function_at(a);
             if f >= 0 { out.append("\n"); describe(out, functions[f]); out.append(":\n"); }
@@ -613,24 +683,24 @@ fn cmd_disasm(target: const u8[:], count_arg: const u8[:]) {
                 }
             }
         }
-        let off, mapped = image::file_offset(a);
-        let word, ok = binary::read_u32le(image::data, off);
-        if !mapped || !ok { break; }
         out.append("  ");
         hex(out, a, 9);
         out.append("  ");
-        hex(out, word, 8);
+        let at = out.len;
+        dec_bytes(out, d);
+        // x86-64's bytes vary in number: the text starts at one column.
+        if image::cpu != image::CPU_ARM64 { for k in max(0, 24 - (out.len - at)) { out.push(' '); } }
         out.append("  ");
-        var text: u8[>..] = [];
-        let d = arm64::decode(word, a, text);
-        total++;
         if d.known { known++; }
-        padded(out, text);
+        padded(out, dec_text_of(d));
         if d.has_target { out.append(" <"); symbolize(out, d.target); out.append(">"); }
         out.append("\n");
-        a += 4;
     }
-    if known < total { format(out, "\n", total - known, " of ", total, " instructions not decoded (.word)\n"); }
+    let total = decs.len;
+    if known < total {
+        format(out, "\n", total - known, " of ", total, " instructions not decoded (",
+               if image::cpu == image::CPU_ARM64 { ".word" } else { ".byte" }, ")\n");
+    }
     write_stdout(out);
 }
 
@@ -647,7 +717,9 @@ fn kind(f: Function) -> const u8[:] {
 // or all with --all): each instruction with its bytes, text, target and
 // line, and the source files those lines are in (html.goose shows them).
 fn cmd_html(exe: const u8[:], path: const u8[:], all: bool) {
-    if image::cpu != image::CPU_ARM64 { fail(str("the page is arm64 only; this is ", image::cpu_name())); }
+    if image::cpu != image::CPU_ARM64 && image::cpu != image::CPU_X86_64 {
+        fail(str("the page is for arm64 and x86-64 code; this is ", image::cpu_name()));
+    }
     // The page's files, by the line table's: -1 for one not on the page yet.
     var page_of: i64[>..] = [];
     for f in dwarf::files { page_of.push(-1); }
@@ -656,7 +728,7 @@ fn cmd_html(exe: const u8[:], path: const u8[:], all: bool) {
     out.append(html::HEAD);
     out.append("{\"exe\": ");
     html::json_string(out, basename(exe));
-    format(out, ", \"arch\": \"arm64\", \"lines\": ", if have_lines { "true" } else { "false" }, ",\n\"functions\": [");
+    format(out, ", \"arch\": \"", image::cpu_name(), "\", \"lines\": ", if have_lines { "true" } else { "false" }, ",\n\"functions\": [");
     var first = true;
     for f in functions {
         let k = kind(f);
@@ -672,19 +744,13 @@ fn cmd_html(exe: const u8[:], path: const u8[:], all: bool) {
         html::json_string(out, c);
         format(out, ", \"kind\": \"", k, "\", \"start\": ", f.start, ", \"end\": ", f.end,
                ", \"fileoff\": ", fileoff, ", \"insns\": [");
-        var a = f.start;
-        while a + 4 <= f.end {
-            let off, ok1 = image::file_offset(a);
-            let word, ok2 = binary::read_u32le(image::data, off);
-            if !ok1 || !ok2 { break; }
-            var text: u8[>..] = [];
-            let d = arm64::decode(word, a, text);
-            var shown: u8[>..] = [];
-            padded(shown, text);
+        let err = decode_range(f.start, f.end);
+        if err.len > 0 { fail(err); }
+        for d, k in decs {
             var file = -1;
             var line = 0;
             if have_lines {
-                let ri = dwarf::row_at(a);
+                let ri = dwarf::row_at(d.addr);
                 if ri >= 0 && dwarf::rows[ri].file >= 0 {
                     let df = dwarf::rows[ri].file as i64;
                     if page_of[df] < 0 { page_of[df] = page_files.len; page_files.push(df); }
@@ -692,11 +758,16 @@ fn cmd_html(exe: const u8[:], path: const u8[:], all: bool) {
                     line = dwarf::rows[ri].line;
                 }
             }
-            if a != f.start { out.push(','); }
-            format(out, "[", a - f.start, ",", word, ",");
+            // The bytes as the file has them, two hex digits each.
+            let off, ok = image::file_offset(d.addr);
+            var bytes: u8[>..] = [];
+            for b in d.size { hex(bytes, image::data[off + b], 2); }
+            var shown: u8[>..] = [];
+            padded(shown, dec_text_of(d));
+            if k > 0 { out.push(','); }
+            format(out, "[", d.addr - f.start, ",\"", bytes, "\",");
             html::json_string(out, shown);
             format(out, ",", file, ",", line, ",", if d.has_target { d.target } else { 0 }, "]");
-            a += 4;
         }
         out.append("]}");
     }

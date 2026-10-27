@@ -111,6 +111,37 @@ def check_inspect(exe, cc, base, *, runtime, extra=()):
     if code != 1 or "no line information" not in err:
         raise RuntimeError(f"lines without a .dSYM: exit {code}\n{out}{err}")
 
+    # The arm64 decoder: every encoding of the table as LLVM prints it, or
+    # .word where neither knows it (test/inspect/arm64_words.txt).
+    table = tc.REPO_ROOT / "test" / "inspect" / "arm64_words.txt"
+    code, out, err = run([inspect, "decode", table])
+    want = [l.split(None, 2) for l in table.read_text().splitlines() if l and not l.startswith("#")]
+    got = [l.split(None, 2) for l in out.splitlines()]
+    if code or len(got) != len(want):
+        raise RuntimeError(f"decode: exit {code}, {len(got)} of {len(want)} lines\n{err}")
+    def norm(t):
+        return re.sub(r"\s+", " ", re.sub(r"\s*;.*$", "", t)).strip()
+    # A ? row may stay .word; no row may decode as anything but objdump's.
+    def matches(expected, ours):
+        ours = ".word" if ours.startswith(".word") else norm(ours)
+        return ours == expected.lstrip("?") or (expected.startswith("?") and ours == ".word")
+    wrong = [f"{w[1]}: {norm(g[2])!r}, objdump {w[2]!r}" for w, g in zip(want, got)
+             if not matches(w[2], g[2])]
+    if wrong:
+        raise RuntimeError(f"decode: {len(wrong)} of {len(want)} differ: " + "; ".join(wrong[:8]))
+
+    # A function disassembled with its source, and every instruction of the
+    # program known.
+    code, out, err = run([inspect, "disasm", prog, "main_g"])
+    if code or not re.search(r"^    ; 09_sorting\.goose:\d+ ", out, re.MULTILINE):
+        raise RuntimeError(f"disasm main_g:\n{out[:2000]}{err}")
+    code, out, err = run([inspect, "sections", prog])
+    text = re.search(r"__TEXT,__text\s+0x([0-9a-f]+)  size 0x([0-9a-f]+)", out)
+    code, out, err = run([inspect, "disasm", prog, "0x" + text[1], str(int(text[2], 16))])
+    if code or "not decoded" in out:
+        raise RuntimeError(f"disasm of __text: exit {code}\n" +
+                           "\n".join(l for l in out.splitlines() if ".word" in l)[:2000] + err)
+
     foreign = base / "sorting.c"
     for name, content in [("empty", b""), ("short", data[:3]), ("header", data[:100]),
                           ("half", data[:len(data) // 2]), ("c", foreign.read_bytes())]:

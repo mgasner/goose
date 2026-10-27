@@ -10,13 +10,16 @@
 //   ./inspect at prog 0x100000f40
 //   ./inspect lines prog main          (the line table over a function)
 //   ./inspect source prog sort.goose:42
+//   ./inspect disasm prog main         (arm64; with the source, where there are lines)
 //
 // The line information is the DWARF dsymutil collects into prog.dSYM, which
 // a build with debug information (goose build --debug) has beside it.
 import std;
 import os;
+import binary;
 import .macho;
 import .dwarf;
+import .arm64;
 
 fn fail(msg: const u8[:]) {
     write_stderr(str("inspect: ", msg, "\n"));
@@ -31,6 +34,8 @@ fn usage() {
                inspect at <exe> <0xaddress>
                inspect lines <exe> <symbol>
                inspect source <exe> <file:line>
+               inspect disasm <exe> <symbol | 0xaddress [bytes]>
+               inspect decode <file of "address word" lines, in hex>
 
         """);
     exit(2);
@@ -488,8 +493,136 @@ fn cmd_source(target: const u8[:]) {
     write_stdout(out);
 }
 
+// --- disassembly ---------------------------------------------------------
+
+// `name+0x10` for an address in a function, the section otherwise.
+fn symbolize(out: u8[>..]&, a: u64) {
+    let f = function_at(a);
+    if f >= 0 {
+        let name = c_name(macho::symbols[functions[f].sym]);
+        let g, isgoose = goose_name(name);
+        out.append(if isgoose { g } else { name });
+        if a != functions[f].start { out.append("+0x"); hex(out, a - functions[f].start); }
+        return;
+    }
+    let s = macho::section_at(a);
+    if s >= 0 {
+        out.append(macho::section_name(macho::sections[s]));
+        out.append("+0x");
+        hex(out, a - macho::sections[s].addr);
+    }
+}
+
+fn cmd_disasm(target: const u8[:], count_arg: const u8[:]) {
+    if macho::cpu != macho::CPU_ARM64 { fail(str("disassembly is arm64 only; this is ", macho::cpu_name())); }
+    var start: u64 = 0;
+    var end: u64 = 0;
+    if starts_with(target, "0x") {
+        let a, ok = parse_number(target);
+        if !ok { fail(str("not an address: ", target)); }
+        start = a & ~(3 as u64);
+        var n: u64 = 64;
+        if count_arg.len > 0 {
+            let c, cok = parse_number(count_arg);
+            if !cok { fail(str("not a byte count: ", count_arg)); }
+            n = c;
+        }
+        end = start + n;
+    } else {
+        let i = find_function(target);
+        if i < 0 { fail(str("no function named ", target)); }
+        start = functions[i].start;
+        end = functions[i].end;
+    }
+    let sect = macho::section_at(start);
+    if sect < 0 || !is_code(sect) { fail("no code at that address"); }
+    let s = macho::sections[sect];
+    end = min(end, s.addr + s.size);
+    var out: u8[>..] = [];
+    var known = 0;
+    var total = 0;
+    var last_file = -2;
+    var last_line = -1;
+    var a = start;
+    while a + 4 <= end {
+        if a == start || function_at(a) >= 0 && functions[function_at(a)].start == a {
+            let f = function_at(a);
+            if f >= 0 { out.append("\n"); describe(out, functions[f]); out.append(":\n"); }
+        }
+        if have_lines {
+            let ri = dwarf::row_at(a);
+            if ri >= 0 {
+                let r = dwarf::rows[ri];
+                if (r.file != last_file || r.line != last_line) && r.line != 0 {
+                    out.append("    ; ");
+                    describe_row(out, r, true);
+                    out.append("\n");
+                    last_file = r.file;
+                    last_line = r.line;
+                }
+            }
+        }
+        let off, mapped = macho::file_offset(a);
+        let word, ok = binary::read_u32le(macho::data, off);
+        if !mapped || !ok { break; }
+        out.append("  ");
+        hex(out, a, 9);
+        out.append("  ");
+        hex(out, word, 8);
+        out.append("  ");
+        var text: u8[>..] = [];
+        let d = arm64::decode(word, a, text);
+        total++;
+        if d.known { known++; }
+        // The mnemonic padded to a column, as objdump has it.
+        let tab = find(text, "\t");
+        if tab >= 0 {
+            out.append(text[..tab]);
+            for k in max(1, 8 - tab) { out.push(' '); }
+            out.append(text[tab + 1..]);
+        } else {
+            out.append(text);
+        }
+        if d.has_target { out.append(" <"); symbolize(out, d.target); out.append(">"); }
+        out.append("\n");
+        a += 4;
+    }
+    if known < total { format(out, "\n", total - known, " of ", total, " instructions not decoded (.word)\n"); }
+    write_stdout(out);
+}
+
+// Decodes the arm64 words of a file of `address word` lines (hex), one
+// per line: what the decoder makes of encodings with no executable around
+// them, as the test suite checks it. What follows the word on a line, and
+// a line starting with #, is left alone.
+fn cmd_decode(path: const u8[:]) {
+    var text: u8[>..] = [];
+    if !read_file(path, text) { fail(str("cannot read ", path)); }
+    var out: u8[>..] = [];
+    var bad = false;
+    each_split(text, '\n') { line =>
+        let parts = words(line);
+        if parts.len > 0 && parts[0].len > 0 && parts[0][0] == '#' {
+        } else if parts.len >= 2 {
+            let pc, pok = parse_uint_hex(parts[0]);
+            let word, wok = parse_uint_hex(parts[1]);
+            if !pok || !wok || word > 0xffffffff { bad = true; }
+            else {
+                format(out, parts[0], " ", parts[1], " ");
+                arm64::decode(word as! u32, pc, out);
+                out.append("\n");
+            }
+        } else if parts.len != 0 {
+            bad = true;
+        }
+    };
+    if bad { fail(str(path, ": not lines of a hex address and a hex word")); }
+    write_stdout(out);
+}
+
 fn main() {
     let a = args();
+    if a.len == 3 && a[1] == "decode" { cmd_decode(a[2]); return; }
     if a.len < 3 { usage(); }
     let cmd = a[1];
     let err = macho::load(a[2]);
@@ -502,5 +635,6 @@ fn main() {
     else if cmd == "at" && a.len >= 4 { cmd_at(a[3]); }
     else if cmd == "lines" && a.len >= 4 { cmd_lines(a[3]); }
     else if cmd == "source" && a.len >= 4 { cmd_source(a[3]); }
+    else if cmd == "disasm" && a.len >= 4 { cmd_disasm(a[3], if a.len >= 5 { a[4] } else { "" }); }
     else { usage(); }
 }

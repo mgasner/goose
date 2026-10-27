@@ -21,9 +21,10 @@ came from, through the C the compiler generated in between. It answers
 "what did this line compile to", "which function is this address in", and
 "what is at this offset in the file", for a program whose source is at hand,
 and as much of the same as the binary allows for one whose source is not.
-Written against the tree at `bd251f7`. The first steps of the plan (§7),
-`--lines`, `--map`, the Mach-O reader and the line tables, are
-implemented; the rest is not.
+Written against upstream `64d62fc`, with the fork's six translation
+units. The first steps of the plan (§7), `--lines`, `--map`, the Mach-O
+reader, the line tables and the arm64 decoder, are implemented; the rest
+is not.
 
 ## 1. Decisions
 
@@ -103,7 +104,7 @@ emits after it is the enclosing line's again. A function's signature and
 its entry code are its declaration's line.
 
 The rest happens once the file is assembled (`FinishLines`,
-`codegen_emit.h`), because the passes over a function's text
+`codegen.h`), because the passes over a function's text
 (`HoistAggregateDecls`, the top-cache markers) move and insert lines after
 codegen wrote them. `#line N` numbers only the line after it N, and the
 ones after that N+1 and on, so a statement whose C takes several lines
@@ -231,12 +232,30 @@ instruction or source line in both directions.
 
 ### 4.3 Disassembly
 
-The arm64 decoder covers the integer, load/store, branch and the scalar and
-vector floating-point classes clang emits for the generated C, prints LLVM's
-syntax, and prints anything else as `.word 0x...` with its encoding class:
-an unknown instruction is shown, never guessed. Branch targets are resolved
-to symbols, and `adrp`/`add` and `adrp`/`ldr` pairs to the address they
-form, which names the string or global they load.
+The arm64 decoder (`arm64.goose`) covers the integer, load/store (single,
+pair, literal, atomic, exclusive, and the structure loads), branch and
+system, scalar floating-point and the vector classes clang emits, and
+prints them as Apple's LLVM objdump does: its aliases (`mov`, `cmp`,
+`cset`, `lsl`, `ubfx`, ...), its vector syntax (`add.2d v0, v1, v2`), its
+numbers (hex, but decimal bitfield positions; `%#016llx` for `movi.2d`).
+Branch targets are resolved to the function and offset they land in, as
+are `adrp`'s pages. Anything else prints as `.word 0x...`: an unknown
+instruction is shown, never guessed.
+
+Measured against `objdump -d`:
+
+| Input | Instructions | Same | Not decoded | Different |
+|---|---|---|---|---|
+| clang's code for the samples and a ninth of the tests, `-O0` to `-O3` | 884,901 | 884,901 | 0 | 0 |
+| held out: another ninth of the tests at `-O1`, `-O2`, `-Os`, and the Goose compiler (C++) | 1,141,193 | 1,141,192 | 1 | 0 |
+| random 32-bit words (500,000): those objdump decodes | 202,445 | 144,832 | 57,613 | 0 |
+
+The decoder was written against the first set; the held-out set came after
+it, and its only miss is a half-precision vector `fneg`. Of the random
+words, none the decoder prints is printed differently by objdump, and none
+objdump rejects is accepted: what it leaves undecoded is SVE, the
+half-precision forms, the system registers and the like, none of which
+clang emits for Goose. x86-64 is not decoded (§7).
 
 ## 5. Without the source
 
@@ -263,8 +282,12 @@ golden file. Instead:
   load commands, and in `__debug_line`, 300 files each) found no fault,
   and a comparison with lldb no difference; neither is part of the suite,
   the second since lldb is slow to start and not on every machine.
-* **The decoder** runs on a generated corpus of arm64 encodings and is
-  compared against Capstone where the library is present.
+* **The decoder** decodes the 4,449 encodings of
+  `test/inspect/arm64_words.txt`, each of up to three per operand shape
+  clang's code had and random ones, against objdump's text; an encoding
+  only a random word gave may stay `.word`. The sample's whole `__text`
+  must decode, and its `main` disassemble with its source lines. The
+  comparison of §4.3 is not in the suite: it needs objdump and minutes.
 * **The mapping** is checked by property on samples built in the test run:
   every instruction a spec's symbol covers maps to a line inside that spec's
   source range, or to a spec the map says was inlined into it; every
@@ -290,7 +313,8 @@ golden file. Instead:
    `-O2` builds, runtime functions among them. Not done: the debug map
    (objects' DWARF without a `.dSYM`), and `.debug_info`'s inlined call
    sites.
-5. **The arm64 decoder**: `disasm`.
+5. **The arm64 decoder**: `disasm`. Done: `tools/inspect/arm64.goose`,
+   and `decode` for a list of encodings (§4.3).
 6. **The HTML export.**
 7. **ELF**, then x86-64 through Capstone.
 8. **The viewer** on the `ui` package.

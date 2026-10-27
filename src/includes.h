@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <charconv>
@@ -18,6 +19,7 @@
 #include <condition_variable>
 #include <deque>
 #include <exception>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>

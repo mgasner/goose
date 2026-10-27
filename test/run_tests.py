@@ -1783,6 +1783,68 @@ def main():
         else:
             r.ok(f"static arrays {f.name}")
     r.show_task(static_arrays)
+    # --lines adds #line directives and nothing else: without them the C is
+    # the C written without the flag. Each names an absolute .goose file that
+    # exists, and each return to the C file's own numbering gives the next
+    # line its physical number.
+    def line_directives(f):
+        tag = f"{f.parent.name}-{f.stem}"
+        plain, lined = gendir / f"{tag}-nolines.c", gendir / f"{tag}-lines.c"
+        code, out, err = r.goose("-O1", "-o", plain, f)
+        code2, out2, err2 = r.goose("-O1", "--lines", "-o", lined, f)
+        if code != 0 or code2 != 0:
+            r.fail(f"line directives {f.name}", out + err + out2 + err2)
+            return
+        lines = lined.read_text().split("\n")
+        directives = [(i, l) for i, l in enumerate(lines) if l.startswith("#line ")]
+        stripped = [l for l in lines if not l.startswith("#line ")]
+        problems = []
+        if stripped != plain.read_text().split("\n"):
+            problems.append("the C differs once the directives are removed")
+        goose_files = set()
+        for i, l in directives:
+            m = re.fullmatch(r'#line (\d+) "(.*)"', l)
+            if not m:
+                problems.append(f"malformed: {l}")
+            elif m[2].endswith(".goose"):
+                goose_files.add(m[2])
+            elif int(m[1]) != i + 2:
+                problems.append(f"line {i + 1} resets to {m[1]}, not {i + 2}")
+        for name in sorted(goose_files):
+            if not os.path.isabs(name) or not os.path.isfile(name):
+                problems.append(f"not an absolute path to a file: {name}")
+        if len(goose_files) < 2:
+            problems.append(f"directives name {len(goose_files)} Goose file(s), not the "
+                            "fixture and what it imports")
+        # --map alone writes the C unchanged, and its line table names lines
+        # of that C, in order, and lines of the files it lists.
+        mapped, mapfile = gendir / f"{tag}-map.c", gendir / f"{tag}.goosemap"
+        code, out, err = r.goose("-O1", "--map", mapfile, "-o", mapped, f)
+        if code != 0:
+            problems.append(f"--map: {out}{err}")
+        else:
+            if mapped.read_text() != plain.read_text():
+                problems.append("--map changed the C")
+            try:
+                m = json.loads(mapfile.read_text())
+                clines = len(plain.read_text().split("\n"))
+                sizes = [len(Path(p).read_text().split("\n")) for p in m["files"]]
+                firsts = [run[0] for run in m["lines"]]
+                if firsts != sorted(firsts) or not all(0 < c <= clines for c in firsts):
+                    problems.append("--map: line runs out of order or past the C")
+                if any(fi >= 0 and not 0 < gl <= sizes[fi] for _, fi, gl in m["lines"]):
+                    problems.append("--map: a run names no line of its file")
+                if not m["specs"] or any(not s["c"] or s["file"] >= len(sizes)
+                                         for s in m["specs"]):
+                    problems.append("--map: specs missing or naming no file")
+            except (ValueError, KeyError, OSError) as e:
+                problems.append(f"--map: {e}")
+        if problems:
+            r.fail(f"line directives {f.name}", "\n".join(problems[:10]))
+        else:
+            r.ok(f"line directives {f.name}")
+    for f in (HERE / "optimizer" / "loop_shapes.goose", HERE / "goose_in_goose" / "main.goose"):
+        r.show_task(line_directives, f)
 
     # Every annotated regression, including the expected-abort cases. These
     # describe the default O1 pass; O0/O2 execution checks semantics.
@@ -2356,6 +2418,17 @@ def main():
             r.fail("resource paths", str(e))
     if cc or jit:
         r.show_task(resource_paths)
+
+    def inspect_tool():
+        from inspect_tool import check_inspect
+        try:
+            check_inspect(exe, cc, gendir, runtime=r.runtime, extra=extra)
+            r.ok("inspector: sections, Goose names against --map, addresses, bytes, "
+                 "broken files")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("inspector", str(e))
+    if cc:
+        r.show_task(inspect_tool)
 
     def git_packages():
         from packages_git import check_git_packages

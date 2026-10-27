@@ -211,6 +211,8 @@ their whitespace) and parses both (the same `Ast::Dump` and `DumpDocs`).
 | `--no-bce` | skip bounds-check elimination (this also loses the loop-view hoist, §6.10, and the restated array loops that need BCE's facts, §6.12) |
 | `--bce-test` | verify `// bce:elide` / `// bce:keep` annotations in the sources |
 | `--bce-lines` | print elided/kept counts per source line |
+| `--lines` | a `#line` before the C of each statement whose Goose line differs from the last (`CodeGen::L`, set by `GenStmt`), repeated before each further C line of the statement, since `#line N` numbers only the next line N, and one returning to the C file's own numbering after each function (`FinishLines`, which runs on the assembled file), so a C compiler's debug information and diagnostics name Goose source; `--debug` implies it. The code is the same with or without (`docs/design/inspect.md` §3.1) |
+| `--map f.goosemap` | with C output, also write JSON naming every live specialization's C function, its Goose name, types and lines, the fixed-size structs' field offsets, and a run-length table from the C's lines to Goose's (`CodeGen::SourceMap`, from what `FinishLines` found); the C is unchanged unless `--lines` is given too (`docs/design/inspect.md` §3.2) |
 | `--unsafe-no-rf-check` | omit the `return from` discriminant checks after calls: a measurement aid, unsound |
 | `-o out.c`, `--jit`, `--header`, `-D`, `--include`, `--stdlib`, `--` | output file, in-process run, a C API header for the exports (which builds the C without a `main`, for a C host), a define written into the generated C, a user header, the stdlib directory, program arguments |
 | `--<name>-link msvc\|cc` | print the response file of link inputs that a program needs when it uses the blessed package imported as `name` (`gfx`, `audio`, `ui`, `physics`), if that package is compiled into this compiler (`builtin.h`, `BuiltinLinkFile`) |
@@ -5376,7 +5378,12 @@ After the prototypes come two tables:
 * `gs_dllibs[]`: the libraries that the used members bind from, in the
   order of their first declaration, each with the sidecars' three platform
   names (`DlSpelling`: per platform, the program's name takes precedence
-  over the package's, and 0 means the runtime derives one);
+  over the package's, and 0 means the runtime derives one) and whether it
+  is an `extern?` block's (`SFunction::dyloptional`), which `gs_dl_bind`
+  leaves unbound, with its reason, where it does not load or lacks a
+  symbol; such a member's call shim checks its pointer and calls
+  `gs_dl_unbound` where it is null, and `ResolveTypeNames` refuses a
+  library both kinds of block name;
 * `gs_dlbinds[]`: a row per used member.
 
 `gs_program_init` hands both tables to `gs_dl_bind` right after

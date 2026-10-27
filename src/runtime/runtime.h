@@ -902,9 +902,11 @@ GS_API void gs_release_regions(void);
 
 /* A library: the name its block gives and, where the sidecar spells it for
    a platform, that spelling; NULL where the platform derives its own
-   (name.dll, libname.dylib, libname.so). */
+   (name.dll, libname.dylib, libname.so). `optional` for an extern? block's:
+   one that does not load, or lacks a symbol, is left unbound. */
 typedef struct gs_dllib {
     const char *name, *onwindows, *onmacos, *onlinux;
+    int32_t optional;
 } gs_dllib;
 /* One function: its library's index in the table, the symbol the library
    is asked for, and the pointer the generated code calls through. */
@@ -915,9 +917,16 @@ typedef struct gs_dlbind {
 } gs_dlbind;
 /* Opens each library once and fills every slot, on the main thread before
    the globals are initialized. A library that does not load, or a symbol it
-   does not have, is a runtime error naming both. */
+   does not have, is a runtime error naming both, unless it is optional:
+   then its slots stay NULL and gs_dl_available says why. */
 GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *binds,
                        int64_t nbinds);
+/* Whether the library a block names was bound, and if not, why (appended
+   to *why, a malloc'd string the caller frees, when why is not NULL). A
+   name the program binds nothing from has not been opened. */
+GS_API uint8_t gs_dl_available(const uint8_t *name, int64_t len, char **why);
+/* A call to a member of an optional library that was not bound. */
+GS_API GS_NORETURN void gs_dl_unbound(const char *lib, const char *sym);
 
 /* ---------------------------------------------------------------------------
    Threads and typed queues (§11.2), runtime_threads.h. */

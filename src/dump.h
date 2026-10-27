@@ -733,20 +733,24 @@ inline void AliasDecl::Dump(string &s, int) const {
 inline void Ast::Dump(string &s) const {
     // The members of an extern block (§7.10) are consecutive declarations
     // with its library, printed back inside the block; two blocks of one
-    // library in a row print as one, which declares the same.
+    // library in a row print as one, which declares the same, unless one
+    // is `extern?` and the other not.
     string openlib;
+    auto openopt = false;
     for (auto d : topdecls) {
         auto fd = Is<FnDecl>(d);
         auto lib = fd && !fd->sf->dylib.empty() ? fd->sf->dylib : string();
-        if (!openlib.empty() && lib != openlib) {
+        auto opt = fd && fd->sf->dyloptional;
+        if (!openlib.empty() && (lib != openlib || opt != openopt)) {
             s += "}\n";
             openlib.clear();
         }
         if (!lib.empty() && openlib.empty()) {
-            s += "extern ";
+            s += opt ? "extern? " : "extern ";
             EscapeString(s, lib, '"');
             s += " {\n";
             openlib = lib;
+            openopt = opt;
         }
         if (!openlib.empty()) s += "    ";
         d->Dump(s, 0);

@@ -204,6 +204,44 @@ def check_extern_dylib(exe, cc, base, *, jit, runtime, extra=()):
     for how, code, out, err in both(unused):
         if code != 0 or out.strip() != "unused ok":
             raise RuntimeError(f"unused.goose ({how}) exit {code}:\n{out}{err}")
+    # An extern? block's library may be missing: the program starts, ffi
+    # says it is not there and why, and a call to one of its functions is
+    # the runtime error naming the library and the reason. A library that
+    # is there but lacks a symbol is not bound at all. A library that loads
+    # binds as an extern block's does, every call checked.
+    optional_missing = base / "optional_missing.goose"
+    tc.write_text(optional_missing, BLOCK.replace('extern "%s"', 'extern? "%s"') % "lib/nosuch" +
+                  "import os;\n"
+                  "extern? \"lib/dltest\" { fn dlt_missing(); fn sub(a: i32, b: i32) -> i32 = \"dlt_add\"; }\n"
+                  "fn main() {\n"
+                  "    print(ffi::available(\"lib/nosuch\"), \" \", ffi::available(\"lib/dltest\"), \" \",\n"
+                  "          ffi::available(\"lib/never\"));\n"
+                  "    var why: u8[>..] = [];\n"
+                  "    print(ffi::unavailable(\"lib/nosuch\", why), \" \", find(why, \"cannot load lib/nosuch (\") >= 0);\n"
+                  "    var also: u8[>..] = [];\n"
+                  "    print(ffi::unavailable(\"lib/dltest\", also), \" \", find(also, \"has no symbol dlt_missing\") >= 0);\n"
+                  "    if arg_count() > 1 { print(add(1, 2)); }\n"
+                  "    if arg_count() > 2 { print(sub(1, 2)); dlt_missing(); }\n"
+                  "}\n")
+    expect_output(optional_missing, lines=["false false false", "true true", "true true"])
+    for level in (0, 2):
+        binary, _ = build(optional_missing, level)
+        code, out, err = run([binary, "call"])
+        if code == 0 or "add is called, but lib/nosuch was not bound: cannot load lib/nosuch (" not in err:
+            raise RuntimeError(f"optional_missing.goose -O{level} call: exit {code}\n{out}{err}")
+    optional_there = base / "optional_there.goose"
+    tc.write_text(optional_there, BLOCK.replace('extern "%s"', 'extern? "%s"') % "lib/dltest" +
+                  MAIN.replace("fn main() {", "fn main() {\n    print(ffi::available(\"lib/dltest\"));"))
+    expect_output(optional_there, lines=["true"] + EXPECTED)
+    _, c = build(optional_there, 1)
+    if '"lib/dltest", 0, 0, 0, 1 }' not in c or "gs_dl_unbound(" not in c:
+        raise RuntimeError(f"optional_there.goose: the library is not optional in the C:\n{c[-3000:]}")
+    mixed = base / "mixed.goose"
+    tc.write_text(mixed, BLOCK % "lib/dltest" + 'extern? "lib/dltest" { fn dlt_missing(); }\n' + MAIN)
+    code, out, err = run([exe, "check", mixed])
+    if code == 0 or "is named by both an extern? block and an extern block" not in out + err:
+        raise RuntimeError(f"mixed.goose: exit {code}, expected the contradiction refused\n{out}{err}")
+
     # The sidecar's dylibs maps a name a block uses to the spelling to open,
     # on every platform or on one, where a dotted spelling is literal; the
     # program's sidecar maps a name for every package it uses, a package's
@@ -216,7 +254,7 @@ def check_extern_dylib(exe, cc, base, *, jit, runtime, extra=()):
     tc.write_text(base / "over.build", 'dylibs = ["mapped=lib/dltest"];\n')
     expect_output(over)
     _, c = build(over, 1)
-    if '{ "mapped", "lib/dltest", "lib/dltest", "lib/dltest" }' not in c:
+    if '{ "mapped", "lib/dltest", "lib/dltest", "lib/dltest", 0 }' not in c:
         raise RuntimeError(f"the generated C lacks the sidecar's spelling:\n{c}")
     literal = base / "literal.goose"
     tc.write_text(literal, BLOCK % "mapped" + MAIN)

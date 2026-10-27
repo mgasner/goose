@@ -101,5 +101,78 @@ fn main() {
     let view, viewok = binary::read_name(borrowed_child, 4);
     source[0] = 90;
     assert(borrowedok && viewok && view == "ZBCD");
+    // Wider and big-endian values, bytes, and C strings.
+    let wide: u8[10] = [1, 2, 3, 4, 5, 6, 7, 128, 0, 0];
+    let w64, w64ok = binary::read_u64le(wide, 0);
+    assert(w64ok && w64 == 0x8007060504030201);
+    let s64, s64ok = binary::read_i64le(wide, 0);
+    assert(s64ok && s64 == -9221395093405892095);
+    let b64, b64ok = binary::read_u64be(wide, 0);
+    assert(b64ok && b64 == 0x0102030405060780);
+    let b32, b32ok = binary::read_u32be(wide, 4);
+    assert(b32ok && b32 == 0x05060780);
+    let b16, b16ok = binary::read_u16be(wide, 6);
+    assert(b16ok && b16 == 0x0780);
+    let s32, s32ok = binary::read_i32le(data, 4);
+    assert(s32ok && s32 == -1);
+    let one, oneok = binary::read_u8(wide, 9);
+    assert(oneok && one == 0);
+    for at in [-1, 3, 9223372036854775807] {
+        let v, ok = binary::read_u64le(wide, at);
+        let w, wok = binary::read_u64be(wide, at);
+        assert(!ok && v == 0 && !wok && w == 0);
+    }
+    let none8, none8ok = binary::read_u8(wide, 10);
+    assert(!none8ok && none8 == 0);
+    let strtab: u8[9] = [0, 109, 97, 105, 110, 0, 120, 121, 122];   // "", "main", then no NUL
+    let first, firstok = binary::read_cstring(strtab, 1);
+    let blank, blankok = binary::read_cstring(strtab, 0);
+    let open, openok = binary::read_cstring(strtab, 6);
+    let past, pastcok = binary::read_cstring(strtab, 10);
+    assert(firstok && first == "main" && blankok && blank.len == 0);
+    assert(!openok && open.len == 0 && !pastcok && past.len == 0); // Unterminated: refused.
+    var sr = binary::reader(strtab);
+    binary::skip(sr, 1);
+    let sname, snameok = binary::read_cstring(sr);
+    assert(snameok && sname == "main" && sr.pos == 6);
+    let stail, stailok = binary::read_cstring(sr);
+    assert(!stailok && stail.len == 0 && sr.pos == 6);
+    var wr = binary::reader(wide);
+    let wa, waok = binary::read_u64be(wr);
+    let wb, wbok = binary::read_u16be(wr);
+    let wc, wcok = binary::read_u8(wr);
+    assert(waok && wa == 0x0102030405060780 && wbok && wb == 0 && wr.pos == 10 && !wcok && wc == 0);
+
+    // LEB128: the examples DWARF gives, the 64-bit limits, and what is refused.
+    let leb: u8[22] = [2, 127, 0x80, 1, 0xe5, 0x8e, 0x26, 0x7f, 0x80, 0x7f,
+                       0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0x80, 0x80];
+    var lr = binary::reader(leb);
+    let u1, u1ok = binary::read_uleb128(lr);
+    let u2, u2ok = binary::read_uleb128(lr);
+    let u3, u3ok = binary::read_uleb128(lr);
+    let u4, u4ok = binary::read_uleb128(lr);
+    assert(u1ok && u1 == 2 && u2ok && u2 == 127 && u3ok && u3 == 128 && u4ok && u4 == 624485);
+    let n1, n1ok = binary::read_sleb128(lr);
+    let n2, n2ok = binary::read_sleb128(lr);
+    assert(n1ok && n1 == -1 && n2ok && n2 == -128 && lr.pos == 10);
+    let umax, umaxok = binary::read_uleb128(lr);
+    assert(umaxok && umax == 0xffffffffffffffff && lr.pos == 20);
+    let unterminated, utok = binary::read_uleb128(lr);
+    assert(!utok && unterminated == 0 && lr.pos == 20);
+    lr.pos = 10;
+    let smax, smaxok = binary::read_sleb128(lr);
+    assert(!smaxok && smax == 0 && lr.pos == 10);   // Bits past the 64th.
+    let sminbytes: u8[10] = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7f];
+    var minr = binary::reader(sminbytes);
+    let smin, sminok = binary::read_sleb128(minr);
+    assert(sminok && smin == -9223372036854775807 - 1 && minr.pos == 10);
+    let toolong: u8[11] = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0];
+    var longr = binary::reader(toolong);
+    let tl, tlok = binary::read_uleb128(longr);
+    let tls, tlsok = binary::read_sleb128(longr);
+    assert(!tlok && tl == 0 && !tlsok && tls == 0 && longr.pos == 0);
+    longr.pos = -1;
+    let neg, negok = binary::read_uleb128(longr);
+    assert(!negok && neg == 0);
     print("binary: checked offsets, names, cursors and subreaders passed");
 }

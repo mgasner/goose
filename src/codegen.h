@@ -103,6 +103,12 @@ struct RelFacts {
     bool apart = false;
 };
 
+// --lines: the generated C says which Goose line each statement came from,
+// so the C compiler's debug information and diagnostics name Goose source.
+// --map needs the same marks, which the C then leaves out unless --lines.
+inline bool line_directives = false;
+inline bool line_marks = false;
+
 struct CodeGen {
     Ast &ast;
 
@@ -143,6 +149,7 @@ struct CodeGen {
     // neither does, which leaves the runtime its derived spelling.
     DylibSpelling DlSpelling(FnSpec *sp) {
         DylibSpelling r { sp->sf->dylib };
+        r.optional = sp->sf->dyloptional;
         auto pkg = ast.filepkg[sp->sf->line.fileidx];
         for (auto p : { pkg, 0 }) {
             for (auto &d : ast.packages[p].dylibs) {
@@ -170,6 +177,9 @@ struct CodeGen {
             auto d = DlSpelling(sp);
             auto it = std::find_if(firsts.begin(), firsts.end(),
                                    [&](auto &f) { return SameDylib(f.second, d); });
+            // One library is optional or not, every block naming it the
+            // same (ResolveTypeNames checks).
+            assert(it == firsts.end() || it->second.optional == d.optional);
             if (it == firsts.end()) firsts.emplace_back(l, d);
             else if (pair(l.fileidx, l.line) < pair(it->first.fileidx, it->first.line))
                 it->first = l;
@@ -552,6 +562,9 @@ struct CodeGen {
     unordered_map<FnSpec *, string> ernames;   // "" = ineligible.
     vector<FnSpec *> erqueue;
     string body;
+    // The Goose line the next C line is for (GenStmt sets it), and the one
+    // the last #line in body put in force (--lines).
+    Line wantline, linenow;
     int ind = 1;
     int tmpn = 0;
     int stknext = 0, stkmax = 0;
@@ -619,7 +632,28 @@ struct CodeGen {
     };
     vector<CScope> cscopes;
 
+    // A source file as #line names it: absolute, since the C compiler
+    // resolves a relative one against its own directory, not ours.
+    unordered_map<int, string> linefiles;
+    string SourceMap(const vector<array<int, 3>> &table);
+    const string &LineFile(int fileidx) {
+        auto it = linefiles.find(fileidx);
+        if (it != linefiles.end()) return it->second;
+        string f = "?";
+        if (fileidx >= 0 && fileidx < (int)ast.sources.size()) {
+            std::error_code ec;
+            auto abs = std::filesystem::absolute(ast.sources[fileidx].first, ec);
+            f = ec ? ast.sources[fileidx].first : abs.lexically_normal().generic_string();
+        }
+        return linefiles.emplace(fileidx, CStr(f)).first->second;
+    }
+
     template<typename... Ts> void L(const Ts &...args) {
+        if (line_marks && wantline.line > 0 &&
+            (wantline.line != linenow.line || wantline.fileidx != linenow.fileidx)) {
+            Append(body, "#line ", wantline.line, " ", LineFile(wantline.fileidx), "\n");
+            linenow = wantline;
+        }
         body.append((size_t)ind * 4, ' ');
         Append(body, args...);
         body += '\n';
@@ -1534,7 +1568,8 @@ struct CodeGen {
             externs += "static const gs_dllib gs_dllibs[] = {\n";
             for (auto &lib : dllibs)
                 Append(externs, "    { ", CStr(lib.name), ", ", spelling(lib.onwindows), ", ",
-                       spelling(lib.onmacos), ", ", spelling(lib.onlinux), " },\n");
+                       spelling(lib.onmacos), ", ", spelling(lib.onlinux), ", ",
+                       lib.optional ? 1 : 0, " },\n");
             externs += "};\nstatic const gs_dlbind gs_dlbinds[] = {\n";
             size_t n = 0;
             for (auto sp : usedexterns) {
@@ -1563,5 +1598,70 @@ struct CodeGen {
                "\n/* ---- prototypes ---- */\n", protos, "\n/* ---- code ---- */\n", code);
     }
 };
+
+// The other half of --lines and --map, once the file is assembled and its
+// own line numbers are known. Codegen marks only where the Goose line
+// changes; a `#line N` numbers just the line after it N, the ones after
+// that N+1 and on, so every C line of a statement needs one of its own.
+// After each function that put a Goose line in force the C file, named
+// `cname`, numbers its lines again, so the runtime and the declarations
+// between functions are not charged to Goose source: every function's text
+// ends in a `}` at the start of a line, and nothing else at the top level
+// is a lone `}`. `files` takes a marker's quoted file name to its index in
+// Ast::sources. With `keep` false the directives are left out (--map
+// alone). `table` gets where each run of output lines came from:
+// { first C line, file index or -1 for the C file's own, Goose line }.
+inline string FinishLines(const string &text, const string &cname, bool keep,
+                          const unordered_map<string, int> &files,
+                          vector<array<int, 3>> &table) {
+    string out;
+    out.reserve(keep ? text.size() * 2 : text.size());
+    auto own = CodeGen::CStr(cname);
+    int file = -1, gline = 0;      // The Goose line in force, file -1 for none.
+    string quoted;                 // Its file as the directive spells it.
+    int lineno = 0;                // Lines written so far.
+    auto note = [&](int f, int l) {
+        if (table.empty() || table.back()[1] != f || table.back()[2] != l)
+            table.push_back({ lineno + 1, f, l });
+    };
+    auto emit = [&](string_view line) {
+        out.append(line);
+        out += '\n';
+        lineno++;
+    };
+    size_t pos = 0;
+    while (pos < text.size()) {
+        auto nl = text.find('\n', pos);
+        if (nl == string::npos) nl = text.size();
+        string_view line(text.data() + pos, nl - pos);
+        pos = nl + 1;
+        if (line.rfind("#line ", 0) == 0) {
+            auto sp = line.find(' ', 6);
+            auto it = sp == string_view::npos ? files.end()
+                                               : files.find(string(line.substr(sp + 1)));
+            if (it != files.end()) {
+                file = it->second;
+                gline = atoi(string(line.substr(6, sp - 6)).c_str());
+                quoted = string(line.substr(sp + 1));
+                continue;
+            }
+        }
+        if (file < 0) {
+            note(-1, 0);
+            emit(line);
+            continue;
+        }
+        // A continued line takes no directive between its parts.
+        auto continued = out.size() >= 2 && out[out.size() - 2] == '\\';
+        if (keep && !continued) Append(out, "#line ", gline, " ", quoted, "\n"), lineno++;
+        note(file, gline);
+        emit(line);
+        if (line == "}") {
+            file = -1;
+            if (keep) Append(out, "#line ", lineno + 2, " ", own, "\n"), lineno++;
+        }
+    }
+    return out;
+}
 
 }  // namespace goose

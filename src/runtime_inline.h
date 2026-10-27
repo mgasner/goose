@@ -362,10 +362,10 @@ static inline int gs_simd_level(void) {
 #endif
 #define GS_MUL_ADD_MODE GS_MUL_ADD_BASE
 
-/* The generated code's memcpy and memset of zeros. Most move or clear the
-   1 to 32 bytes of a field, an element or a reference, a constant size the
 )GSRT"
-R"GSRT(   optimizing backends turn into a few moves. TinyCC calls the C library for
+R"GSRT(/* The generated code's memcpy and memset of zeros. Most move or clear the
+   1 to 32 bytes of a field, an element or a reference, a constant size the
+   optimizing backends turn into a few moves. TinyCC calls the C library for
    every memcpy and memset, so under it a constant size of up to 32 bytes
    is written out as loads and stores, overlapping where the size is not a
    power of two (which needs the runs not to overlap, as memcpy's do not).
@@ -389,8 +389,7 @@ R"GSRT(   optimizing backends turn into a few moves. TinyCC calls the C library 
                                   GS_CP(uint64_t, d, s, (n) - 16), GS_CP(uint64_t, d, s, (n) - 8)) \
      : (void)memcpy((d), (s), (n)))
 #define GS_MEMZERO(d, n) \
-)GSRT"
-R"GSRT(    (GS_KSZ(n, 8, 8) ? (void)(GS_AT(uint64_t, d, 0) = 0) \
+    (GS_KSZ(n, 8, 8) ? (void)(GS_AT(uint64_t, d, 0) = 0) \
      : GS_KSZ(n, 4, 4) ? (void)(GS_AT(uint32_t, d, 0) = 0) \
      : GS_KSZ(n, 1, 1) ? (void)(GS_AT(uint8_t, d, 0) = 0) \
      : GS_KSZ(n, 2, 2) ? (void)(GS_AT(uint16_t, d, 0) = 0) \
@@ -519,11 +518,11 @@ static int gs_memeq(const void *a, const void *b, size_t n) {
     ((T)(b) ? (T)((T)(a) % (T)(b)) : (gs_divfail((f), (l)), (T)0))
 #define GS_DIVS(T, a, b, f, l) \
     ((T)(b) ? (T)((int64_t)(T)(a) / (int64_t)(T)(b)) : (gs_divfail((f), (l)), (T)0))
-#define GS_MODS(T, t, a, b, f, l) \
+)GSRT"
+R"GSRT(#define GS_MODS(T, t, a, b, f, l) \
     ((T)(b) == 0 ? (gs_divfail((f), (l)), (T)0) \
      : (T)(((t) = (int64_t)(T)(a) % (int64_t)(T)(b)) < 0 \
-)GSRT"
-R"GSRT(               ? (t) + ((T)(b) < 0 ? -(int64_t)(T)(b) : (int64_t)(T)(b)) : (t)))
+               ? (t) + ((T)(b) < 0 ? -(int64_t)(T)(b) : (int64_t)(T)(b)) : (t)))
 
 #define gs_div_u8(a, b, f, l)  GS_DIVU(uint8_t, a, b, f, l)
 #define gs_div_u16(a, b, f, l) GS_DIVU(uint16_t, a, b, f, l)
@@ -552,8 +551,7 @@ R"GSRT(               ? (t) + ((T)(b) < 0 ? -(int64_t)(T)(b) : (int64_t)(T)(b)) 
 
 #if GS_DEBUG
 #define GS_DIVOPS_S(SFX, T, MIN, MAX) \
-)GSRT"
-R"GSRT(static T gs_div_##SFX(T a, T b, const char *file, int line) { \
+static T gs_div_##SFX(T a, T b, const char *file, int line) { \
     if (b == 0) gs_divfail(file, line); \
     int64_t r = (int64_t)a / (int64_t)b; \
     if (r < (MIN) || r > (MAX)) gs_ovf(a, "/", b, #SFX, file, line); \
@@ -685,10 +683,10 @@ static uint64_t gs_shr_u64(uint64_t a, int64_t n) { return a >> (n & 63); }
 #define gs_shr_u32(a, n) ((uint32_t)((uint64_t)(a) >> ((n) & 31)))
 
 #define gs_add_i64(a, b, f, l) ((int64_t)((uint64_t)(a) + (uint64_t)(b)))
-#define gs_sub_i64(a, b, f, l) ((int64_t)((uint64_t)(a) - (uint64_t)(b)))
-#define gs_mul_i64(a, b, f, l) ((int64_t)((uint64_t)(a) * (uint64_t)(b)))
 )GSRT"
-R"GSRT(#define gs_neg_i64(a, f, l)    ((int64_t)(0u - (uint64_t)(a)))
+R"GSRT(#define gs_sub_i64(a, b, f, l) ((int64_t)((uint64_t)(a) - (uint64_t)(b)))
+#define gs_mul_i64(a, b, f, l) ((int64_t)((uint64_t)(a) * (uint64_t)(b)))
+#define gs_neg_i64(a, f, l)    ((int64_t)(0u - (uint64_t)(a)))
 #define gs_shl_i64(a, n) ((int64_t)((uint64_t)(a) << ((n) & 63)))
 #define gs_shr_i64(a, n) ((int64_t)((a) >> ((n) & 63)))
 
@@ -726,8 +724,7 @@ static uint64_t gs_div128_u64(uint64_t hi, uint64_t d, uint64_t *rem) {
     *rem = r;
     return q;
 #else
-)GSRT"
-R"GSRT(    unsigned __int128 n = (unsigned __int128)hi << 64;
+    unsigned __int128 n = (unsigned __int128)hi << 64;
     *rem = (uint64_t)(n % d);
     return (uint64_t)(n / d);
 #endif
@@ -890,12 +887,12 @@ static uint64_t gs_f2uchk(double d, int f32, const char *file, int line) {
    runtime's (runtime_impl.h). */
 
 typedef struct {
-    uint8_t *top;
+)GSRT"
+R"GSRT(    uint8_t *top;
 } gs_stack;
 
 /* The program defines what goose.h gives C compiled on its own (gs_stack
-)GSRT"
-R"GSRT(   here, gs_rhdr, gs_rref and gs_bld_append after the generated types), so
+   here, gs_rhdr, gs_rref and gs_bld_append after the generated types), so
    an --include header including it gets nothing more. */
 #define GOOSE_H 1
 
@@ -922,10 +919,11 @@ GS_API void gs_release_regions(void);
 
 /* A library: the name its block gives and, where the sidecar spells it for
    a platform, that spelling; NULL where the platform derives its own
-   (name.dll, libname.dylib, libname.so). */
+   (name.dll, libname.dylib, libname.so). `optional` for an extern? block's:
+   one that does not load, or lacks a symbol, is left unbound. */
 typedef struct gs_dllib {
-)GSRT"
-R"GSRT(    const char *name, *onwindows, *onmacos, *onlinux;
+    const char *name, *onwindows, *onmacos, *onlinux;
+    int32_t optional;
 } gs_dllib;
 /* One function: its library's index in the table, the symbol the library
    is asked for, and the pointer the generated code calls through. */
@@ -936,9 +934,16 @@ typedef struct gs_dlbind {
 } gs_dlbind;
 /* Opens each library once and fills every slot, on the main thread before
    the globals are initialized. A library that does not load, or a symbol it
-   does not have, is a runtime error naming both. */
+   does not have, is a runtime error naming both, unless it is optional:
+   then its slots stay NULL and gs_dl_available says why. */
 GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *binds,
                        int64_t nbinds);
+/* Whether the library a block names was bound, and if not, why (appended
+   to *why, a malloc'd string the caller frees, when why is not NULL). A
+   name the program binds nothing from has not been opened. */
+GS_API uint8_t gs_dl_available(const uint8_t *name, int64_t len, char **why);
+/* A call to a member of an optional library that was not bound. */
+GS_API GS_NORETURN void gs_dl_unbound(const char *lib, const char *sym);
 
 /* ---------------------------------------------------------------------------
    Threads and typed queues (§11.2), runtime_threads.h. */
@@ -1058,7 +1063,8 @@ static int64_t gs_thread_spawn(void (*entry)(uint8_t *), const void *args, int64
    (index, count) spans, kept on a data stack of its own in nodes of
    GS_SPAN_NODE bytes (runtime_impl.h). The emitted code grows the element
    region and fills elements; these only keep the spans, and each takes the
-   freelist's base, its node count and its stack's top, which stays past the
+)GSRT"
+R"GSRT(   freelist's base, its node count and its stack's top, which stays past the
    last node. Indices and counts are in elements. */
 
 #define GS_SPAN_NODE 512
@@ -1072,8 +1078,7 @@ GS_API int64_t gs_spans_alloc(uint8_t *base, int64_t *n, uint8_t **top, int64_t 
    the elements where that moved. */
 GS_API int64_t gs_spans_regrow(uint8_t *base, int64_t *n, uint8_t **top, int64_t len,
                                int64_t idx, int64_t ol, int64_t cnt);
-)GSRT"
-R"GSRT(/* free_slice, and what realloc_slice lets go of: [idx, idx + cnt) back on
+/* free_slice, and what realloc_slice lets go of: [idx, idx + cnt) back on
    the freelist. */
 GS_API void gs_spans_free(uint8_t *base, int64_t *n, uint8_t **top, int64_t idx, int64_t cnt);
 
@@ -1115,8 +1120,7 @@ static GS_NOINLINE int64_t gs_uleb_size_slow(const uint8_t *p) {
     return gs_uleb_size(p);
 }
 
-)GSRT"
-R"GSRT(#define GS_ULEB_READ(p) ((*(p) & 0x80) ? gs_uleb_read_slow(p) : (int64_t)*(p))
+#define GS_ULEB_READ(p) ((*(p) & 0x80) ? gs_uleb_read_slow(p) : (int64_t)*(p))
 #define GS_ULEB_SIZE(p) ((*(p) & 0x80) ? gs_uleb_size_slow(p) : (int64_t)1)
 
 static int64_t gs_uleb_write(uint8_t *p, uint64_t v) {
@@ -3473,6 +3477,16 @@ static uint8_t gs_ffi_bytes(uint64_t p, int64_t n, gs_rref out) {
     gs_bld_append(out, (const void *)(uintptr_t)p, n);
     return 1;
 }
+/* ffi's available and unavailable: whether the library an extern? block
+   names was bound as the program started, and why not (runtime_os.h). */
+static uint8_t gs_ffi_available(sl_u8 lib) { return gs_dl_available(lib.data, lib.len, NULL); }
+static uint8_t gs_ffi_unavailable(sl_u8 lib, gs_rref out) {
+    char *why = NULL;
+    uint8_t bound = gs_dl_available(lib.data, lib.len, &why);
+    if (!bound && why) gs_bld_append(out, why, (int64_t)strlen(why));
+    free(why);
+    return !bound;
+}
 
 /* math's sqrt (stdlib/math.goose). Goose has no errno, and C's sqrt has to
    set it for a negative argument: clang and gcc then guard the square root
@@ -3588,7 +3602,8 @@ static int64_t gs_popcount(uint64_t x) {
 #elif defined(_MSC_VER) && defined(_M_X64) && defined(__AVX__)
     return (int64_t)__popcnt64(x);
 #else
-    int64_t n = 0;
+)GSRT"
+R"GSRT(    int64_t n = 0;
     while (x) {
         x &= x - 1;
         n++;
@@ -3609,8 +3624,7 @@ static int64_t gs_clz(uint64_t x) {
         x <<= 1;
         n++;
     }
-)GSRT"
-R"GSRT(    return n;
+    return n;
 #endif
 }
 static int64_t gs_ctz(uint64_t x) {
@@ -4227,14 +4241,37 @@ static int gs_dl_spelling(const gs_dllib *lib, char *buf) {
     return n > 0 && n < GS_OS_PATH_MAX ? n : 0;
 }
 
+/* What gs_dl_bind made of each library: NULL where it was bound, else why
+   not (an optional library's; a required one's failure ends the program). */
+static const gs_dllib *gs_dl_libs;
+static char **gs_dl_why;
+static int64_t gs_dl_nlibs;
+
+/* A library that could not be bound: an error that ends the program, or
+   for an optional one the reason, kept, with its slots left NULL. */
+static void gs_dl_fail(const gs_dllib *libs, int64_t l, const gs_dlbind *binds, int64_t nbinds,
+                       const char *msg) {
+    if (!libs[l].optional) gs_panic(msg);
+    size_t n = strlen(msg) + 1;
+    gs_dl_why[l] = (char *)malloc(n);
+    if (gs_dl_why[l]) memcpy(gs_dl_why[l], msg, n);
+    for (int64_t b = 0; b < nbinds; b++)
+        if (binds[b].lib == l) *binds[b].slot = NULL;
+}
+
 GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *binds,
                        int64_t nbinds) {
+    gs_dl_libs = libs;
+    gs_dl_nlibs = nlibs;
+    gs_dl_why = (char **)calloc((size_t)(nlibs > 0 ? nlibs : 1), sizeof(char *));
+    if (!gs_dl_why) gs_panic("out of memory binding shared libraries");
     for (int64_t l = 0; l < nlibs; l++) {
         char spelling[GS_OS_PATH_MAX], msg[GS_OS_PATH_MAX + 512];
         if (!gs_dl_spelling(&libs[l], spelling)) {
             snprintf(msg, sizeof msg, "cannot load %s: its path does not fit or is not known",
                      libs[l].name);
-            gs_panic(msg);
+            gs_dl_fail(libs, l, binds, nbinds, msg);
+            continue;
         }
 #ifdef _WIN32
         sl_u8 utf8 = { (uint8_t *)spelling, (int64_t)strlen(spelling) };
@@ -4254,7 +4291,8 @@ GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *bin
         if (!h) {
             snprintf(msg, sizeof msg, "cannot load %s (%s): Windows error %u", libs[l].name,
                      spelling, (unsigned)GetLastError());
-            gs_panic(msg);
+            gs_dl_fail(libs, l, binds, nbinds, msg);
+            continue;
         }
 #else
         void *h = dlopen(spelling, RTLD_NOW | RTLD_LOCAL);
@@ -4262,7 +4300,8 @@ GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *bin
             const char *why = dlerror();
             snprintf(msg, sizeof msg, "cannot load %s (%s): %s", libs[l].name, spelling,
                      why ? why : "unknown error");
-            gs_panic(msg);
+            gs_dl_fail(libs, l, binds, nbinds, msg);
+            continue;
         }
 #endif
         for (int64_t b = 0; b < nbinds; b++) {
@@ -4275,11 +4314,43 @@ GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *bin
             if (!f) {
                 snprintf(msg, sizeof msg, "%s (%s) has no symbol %s", libs[l].name, spelling,
                          binds[b].sym);
-                gs_panic(msg);
+                /* An optional library is all or nothing: none of it is bound. */
+                gs_dl_fail(libs, l, binds, nbinds, msg);
+                break;
             }
             *binds[b].slot = f;
         }
     }
+}
+
+GS_API uint8_t gs_dl_available(const uint8_t *name, int64_t len, char **why) {
+    for (int64_t l = 0; l < gs_dl_nlibs; l++) {
+        if ((int64_t)strlen(gs_dl_libs[l].name) != len || memcmp(gs_dl_libs[l].name, name, (size_t)len))
+            continue;
+        if (!gs_dl_why[l]) return 1;
+        if (why) {
+            size_t n = strlen(gs_dl_why[l]) + 1;
+            *why = (char *)malloc(n);
+            if (*why) memcpy(*why, gs_dl_why[l], n);
+        }
+        return 0;
+    }
+    if (why) {
+        static const char none[] = "the program binds nothing from a library of that name";
+        *why = (char *)malloc(sizeof none);
+        if (*why) memcpy(*why, none, sizeof none);
+    }
+    return 0;
+}
+
+GS_API GS_NORETURN void gs_dl_unbound(const char *lib, const char *sym) {
+    char msg[GS_OS_PATH_MAX + 768];
+    char *why = NULL;
+    gs_dl_available((const uint8_t *)lib, (int64_t)strlen(lib), &why);
+    snprintf(msg, sizeof msg, "%s is called, but %s was not bound: %s", sym, lib,
+             why ? why : "unknown");
+    free(why);
+    gs_panic(msg);
 }
 
 GS_API void gs_os_arg(int64_t i, gs_rref out) {
@@ -4288,7 +4359,8 @@ GS_API void gs_os_arg(int64_t i, gs_rref out) {
 #ifdef _WIN32
     /* main's argv is in the ANSI code page. The program gets it in UTF-8,
        the encoding of its paths, by way of UTF-16, which holds every
-       character of the code page. */
+)GSRT"
+R"GSRT(       character of the code page. */
     int n = MultiByteToWideChar(CP_ACP, 0, a, -1, NULL, 0);
     wchar_t *w = n > 0 ? (wchar_t *)malloc((size_t)n * sizeof *w) : NULL;
     int ok = w && MultiByteToWideChar(CP_ACP, 0, a, -1, w, n) == n &&
@@ -4356,8 +4428,7 @@ GS_API int64_t gs_os_clock_ns(void) {
     QueryPerformanceCounter(&c);
     return (int64_t)((double)c.QuadPart * (1000000000.0 / (double)f.QuadPart));
 #else
-)GSRT"
-R"GSRT(    struct timespec ts;
+    struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
 #endif

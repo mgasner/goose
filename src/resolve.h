@@ -235,6 +235,21 @@ inline void ResolveTypeNames(Ast &ast) {
         t->var->variant = found;  // Alias/const copies may share this detail.
     }
 
+    // A library is optional or not (§7.10): an `extern?` block and an
+    // `extern` one naming the same library contradict each other.
+    map<string, const SFunction *> libs;
+    for (auto sf : ast.functions) {
+        if (sf->dylib.empty()) continue;
+        auto [it, first] = libs.emplace(sf->dylib, sf);
+        if (first || it->second->dyloptional == sf->dyloptional || it->second == nullptr) continue;
+        Diagnostic d;
+        d.where = LocOf(sf->line);
+        d.message = cat("library ", sf->dylib, " is named by both an extern? block and an extern "
+                        "block: it may be missing in every block that names it, or in none");
+        errors.push_back(std::move(d));
+        it->second = nullptr;   // Once per library.
+    }
+
     std::stable_sort(errors.begin(), errors.end(), [](const Diagnostic &a, const Diagnostic &b) {
         return tie(a.where.fileidx, a.where.line, a.where.col) <
                tie(b.where.fileidx, b.where.line, b.where.col);

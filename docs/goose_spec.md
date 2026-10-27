@@ -3259,6 +3259,26 @@ it uses. For a platform that the program's entry says anything about, the
 program's entry takes precedence. A name that no block declares is an
 error at the sidecar (docs/packages.md).
 
+**A library that may be missing.** An `extern?` block declares a library
+the program can run without:
+
+```goose
+extern? "capstone" {
+    fn cs_version(major: i32&, minor: i32&) -> u32;
+}
+```
+
+It is bound as the program starts, as an `extern` block's library is, but a
+library that does not load, or lacks a symbol a member binds, is not a
+runtime error: none of its members is bound. `ffi::available("capstone")`
+says whether it was, and `ffi::unavailable` why not (docs/stdlib.md).
+Calling a member of a library that was not bound is a runtime error naming
+the library and the reason. A library is optional in every block that
+names it or in none: an `extern?` block and an `extern` block naming the
+same library are an error. As for an `extern` block, only a member a call
+reaches is bound, so a library whose members no call reaches is not
+opened, and `ffi::available` is false for it.
+
 The libraries are opened and the symbols resolved on the main thread when
 the program starts, after the runtime starts and before the globals'
 initializers run. The pointers are written once and only read after that.
@@ -4867,7 +4887,7 @@ fndecl      := "checkfree"? ("export" strlit? | "extern" strlit?)? "checkfree"? 
                                                  // "extern" strlit: deprecated, the same
                                                  // checkfree at most once (§7.14)
                                                  // nested: ident only
-externblock := "extern" strlit "{" externmember* "}"   // §7.10: the library, then its functions
+externblock := "extern" "?"? strlit "{" externmember* "}"   // §7.10: the library (? if it may be missing), then its functions
 externmember := "fn" declname "(" params? ")" ("->" rettypes)? ("=" strlit)? ";"
 params      := param ("," param)* ","?
 param       := "var"? ident (":" type ("=" expr)?)?

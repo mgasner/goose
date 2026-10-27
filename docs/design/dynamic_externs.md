@@ -522,11 +522,13 @@ One working commit each, tests green at every step:
 
 ## 12. Deferred and open
 
-* **Optional libraries.** A program that uses a library if present
-  (hardware acceleration, a telemetry SDK) wants `extern? "foo" { ... }`
-  or an `available("foo")` query, and binding after `main` has started.
-  That requires lazy binding with a per-call check, or an explicit `bind`
-  call made by the program. Deferred until a program needs it.
+* **Optional libraries** are implemented, as `extern? "foo" { ... }`, for
+  the binary inspector's use of Capstone (`docs/design/inspect.md`). The
+  library is bound at the start, as any other is; one that does not load
+  or lacks a symbol is left unbound, all of it, with its reason, which
+  `ffi::available` and `ffi::unavailable` report; each member's call goes
+  through a check of its pointer, a runtime error where it is null. Still
+  deferred: binding after `main` has started, by an explicit `bind`.
 * **Candidate spellings in the source**, `extern "libSDL2-2.0.so.0",
   "SDL2" { ... }` tried in order, skipping spellings that are not of this
   platform's form. This would let a package work on distros without the

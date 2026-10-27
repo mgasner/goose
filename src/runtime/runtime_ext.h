@@ -41,6 +41,16 @@ static uint8_t gs_ffi_bytes(uint64_t p, int64_t n, gs_rref out) {
     gs_bld_append(out, (const void *)(uintptr_t)p, n);
     return 1;
 }
+/* ffi's available and unavailable: whether the library an extern? block
+   names was bound as the program started, and why not (runtime_os.h). */
+static uint8_t gs_ffi_available(sl_u8 lib) { return gs_dl_available(lib.data, lib.len, NULL); }
+static uint8_t gs_ffi_unavailable(sl_u8 lib, gs_rref out) {
+    char *why = NULL;
+    uint8_t bound = gs_dl_available(lib.data, lib.len, &why);
+    if (!bound && why) gs_bld_append(out, why, (int64_t)strlen(why));
+    free(why);
+    return !bound;
+}
 
 /* math's sqrt (stdlib/math.goose). Goose has no errno, and C's sqrt has to
    set it for a negative argument: clang and gcc then guard the square root

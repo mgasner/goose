@@ -1,0 +1,4 @@
+// The library x86.goose binds Capstone from, where the platform does not find
+// it by its name: Homebrew's on Apple silicon is not on the loader's path. On
+// Linux, libcapstone.so is the development package's (libcapstone-dev).
+dylibs_macos = ["capstone=/opt/homebrew/lib/libcapstone.dylib"];

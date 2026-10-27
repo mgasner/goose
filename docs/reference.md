@@ -3850,6 +3850,25 @@ dylibs_windows = ["SDL2=bin/SDL2.dll"];       // shipped with the program
 A package's sidecar maps its own names as defaults, and the program's
 sidecar overrides them, platform by platform, for the names it mentions.
 
+A library the program can run without is declared `extern?`. One that
+does not load, or lacks a symbol, is then left unbound rather than ending
+the program at its start; `ffi::available` says whether it was bound,
+`ffi::unavailable` why not, and calling one of its functions when it was
+not is a runtime error naming both:
+
+```goose
+import ffi;
+extern? "capstone" {
+    fn cs_version(major: i32&, minor: i32&) -> u32;
+}
+
+fn main() {
+    var major: i32 = 0;
+    var minor: i32 = 0;
+    if ffi::available("capstone") { cs_version(major, minor); }
+}
+```
+
 With no adapter in between, a member declares the library's real
 prototype in terms of Goose's shapes:
 

@@ -1,4 +1,4 @@
-// error: cannot call f: it shrinks nodes while n is still used, and n may refer into nodes
+// error: cannot clear ns while n is still used
 // n was read out of the elements ns names, and the caller linked it to
 // another of them (§5.1).
 struct N { v: i64, next: N&? }

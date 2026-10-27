@@ -17,6 +17,7 @@
 #include "optimize_basecase.h"
 #include "optimize_tre.h"
 #include "optimize_loops.h"
+#include "optimize_reassoc.h"
 #include "bce.h"
 
 namespace goose {
@@ -24,24 +25,31 @@ namespace goose {
 // The middle end: optimization, then bounds-check elimination. Returns the
 // exit code to stop with, or -1 to go on to code generation.
 int OptimizeAndCheckBounds(Ast &ast, int optlevel, bool specs, bool nobce, bool bcelines,
-                           bool bcetest, FILE *msgs) {
+                           bool bcetest, bool stats, FILE *msgs) {
     Optimizer opt(ast, optlevel);
     if (specs) {
         string s;
         opt.DumpSpecs(s);
         fputs(s.c_str(), stdout);
     }
-    fprintf(msgs, "typechecked ok: %d specialization(s), %d struct/%d enum instance(s); "
+    if (stats) fprintf(msgs, "typechecked ok: %d specialization(s), %d struct/%d enum instance(s); "
             "optimized -O%d: %d inlined, %d base case(s), %d folded, %d propagated, "
-            "%d tail loop(s)\n",
+            "%d tail loop(s), %d reassociated\n",
             (int)ast.fnspecs.size(), (int)ast.structinsts.size(),
             (int)ast.enuminsts.size(), optlevel, opt.inlined, opt.basecases,
-            opt.folded, opt.propagated, opt.tailloops);
+            opt.folded, opt.propagated, opt.tailloops, opt.reassociated);
     BCE bce(ast);
     if (!nobce) {
         bce.RunAll();
-        fprintf(msgs, "bce: elided %d/%d index and %d/%d slice checks\n",
+        if (stats) fprintf(msgs, "bce: elided %d/%d index and %d/%d slice checks\n",
                 bce.idxelided, bce.idxtotal, bce.slelided, bce.sltotal);
+        if (!bce.checkfreefails.empty()) throw bce.CheckfreeError();
+    } else {
+        for (auto sf : ast.functions)
+            if (sf->checkfree && !sf->isnested) {
+                ast.Warn(DiagLoc {}, "checkfree is not verified under --no-bce");
+                break;
+            }
     }
     // Per-line outcomes, for comparing two builds of the pass.
     if (bcelines)
@@ -58,6 +66,13 @@ int OptimizeAndCheckBounds(Ast &ast, int optlevel, bool specs, bool nobce, bool 
         fprintf(msgs, "bce-test: all annotations verified\n");
     }
     return -1;
+}
+
+void OptimizeAndVerifyCheckfree(Ast &ast, int optlevel) {
+    Optimizer opt(ast, optlevel);
+    BCE bce(ast);
+    bce.RunAll();
+    if (!bce.checkfreefails.empty()) throw bce.CheckfreeError();
 }
 
 }  // namespace goose

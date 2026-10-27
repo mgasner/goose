@@ -72,24 +72,29 @@ fn run(interp: Interpreter&, expressions: (calculator_ast::Node..&)[:]) -> i64 {
 // The tree's top-level expressions are the growable last field. Its nodes lie
 // in a node pool: a struct holds one growable array, so the pool is a local
 // of the code that makes the benchmark, declared before it and handed to
-// prepare.
-struct CalculatorInterpreter { n: i64, result_val: u32, ast: (calculator_ast::Node..&)[>..] }
+// prepare, with the program text the Calculator::Ast there parses.
+struct CalculatorInterpreter {
+    n: i64,
+    result_val: u32,
+    text: u8[>..]&,
+    nodes: calculator_ast::Node..[>..]&,
+    ast: (calculator_ast::Node..&)[>..],
+}
 
-fn new_calculator_interpreter() -> CalculatorInterpreter {
+fn new_calculator_interpreter(text: u8[>..]&, nodes: calculator_ast::Node..[>..]&) -> CalculatorInterpreter {
     CalculatorInterpreter { n: config_i64("Calculator::Interpreter", "operations"), result_val: 0,
-                            ast: [] }
+                            text: text, nodes: nodes, ast: [] }
 }
 
 // The tree a Calculator::Ast with this many operations builds in its prepare
-// and first run. Its run keeps the tree in locals of the run, so the program
-// is parsed here, into `nodes`.
-fn prepare(s: CalculatorInterpreter&, nodes: calculator_ast::Node..[>..]&) {
-    var ast_bench = calculator_ast::new_calculator_ast();
+// and first run, in `text` and `nodes`.
+fn prepare(s: CalculatorInterpreter&) {
+    var ast_bench = calculator_ast::new_calculator_ast(s.text, s.nodes);
     ast_bench.n = s.n;
     calculator_ast::prepare(ast_bench);
-    var parser = calculator_ast::new_parser(ast_bench.text);
-    let expressions = calculator_ast::parse(parser, nodes);
-    s.ast = expressions;
+    s.ast = [];
+    calculator_ast::run(ast_bench, 0);
+    s.ast = copy(ast_bench.expressions);
 }
 
 fn run(s: CalculatorInterpreter&, iteration_id: i64) {

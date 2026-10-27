@@ -1,8 +1,8 @@
 // The compiler's side of graphics: compiling the shaders `embed_shader`
-// embeds into a program, for the gfx package (packages/gfx) or any other
-// graphics library that reads the blob. Shader compilation (src/shaderc.c)
-// is always built: a program using gfx typechecks and emits the same C
-// whether or not the package is compiled in.
+// embeds into a program, for the gfx package (github.com/aardappel/goose_gfx)
+// or any other graphics library that reads the blob. Shader compilation
+// (src/shaderc.c) is always built: a program using gfx typechecks and emits
+// the same C whether or not the package is compiled in.
 
 #pragma once
 
@@ -43,6 +43,12 @@ inline string EmbeddedShaderPath(const string &from, string_view lit) {
 // `source`, "path: ..." for one about the shader as a whole, and the
 // included file's name for one inside an include.
 inline string CompileShader(const string &source, const string &path, int stage) {
+    // Compiled once per process for a stage, path and source: a language
+    // server checks a program again at every change, and the shader
+    // compiler is the slow part of a check.
+    static map<tuple<int, string, string>, string> compiled;
+    auto key = make_tuple(stage, path, source);
+    if (auto it = compiled.find(key); it != compiled.end()) return it->second;
     auto r = gs_shaderc_compile(source.c_str(), path.c_str(), stage);
     if (!r.blob) {
         auto msg = string(r.error ? r.error : "shader compilation failed");
@@ -51,7 +57,7 @@ inline string CompileShader(const string &source, const string &path, int stage)
     }
     string blob((const char *)r.blob, r.size);
     gs_shaderc_free(&r);
-    return blob;
+    return compiled.emplace(std::move(key), std::move(blob)).first->second;
 }
 
 // The blob for the shader file at `path`.

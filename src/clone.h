@@ -9,12 +9,76 @@
 
 namespace goose {
 
+struct ExpansionArg {
+    int binding = 0;
+    Node *value = nullptr;
+    TypeExpr *type = nullptr;
+    TypeExpr *owner = nullptr;
+    string_view field;
+    // A variants<E> binding: the variant's name, which a match pattern takes
+    // (the type is its variant type; the value, a payload-less one's).
+    string_view variant;
+};
+
+struct ExpansionClone {
+    static constexpr size_t MAXNODES = 100000;
+    vector<ExpansionArg> args;
+    map<SFunction *, SFunction *> functions;
+    string_view trace;
+    size_t *size = nullptr;
+    function<void(Line, const string &)> error;
+    const ExpansionArg *Find(int id) const {
+        for (auto &a : args) if (a.binding == id) return &a;
+        return nullptr;
+    }
+};
+
 // The annotation fields typecheck fills are freshly defaulted by the leaf
 // constructors below, so cloning an already-checked tree yields a clean one.
 
 inline Node *Node::Clone(Ast &ast) const {
+    auto ctx = ast.expansionclone;
+    if (ctx) {
+        if (++*ctx->size > ExpansionClone::MAXNODES)
+            ctx->error(line, cat("const for expansion exceeds ", ExpansionClone::MAXNODES, " generated nodes"));
+        if (auto id = Is<Ident>(this)) {
+            if (auto arg = ctx->Find(expansionbinding)) {
+                if (!arg->value) {
+                    // An inner expansion can still be empty, or a nested
+                    // function unused. Keep the error with this bound use
+                    // until ordinary checking actually reaches it.
+                    auto c = ast.New<Ident>(line, id->name, id->ns);
+                    c->end = end;
+                    c->expansionerror = ast.Intern(
+                        arg->variant.empty()
+                            ? cat("const for binding ", id->name, " is not a value (or a callable function)")
+                            : cat("const for binding ", id->name, " is the variant ", arg->variant,
+                                  ", which has a payload: construct it with ", id->name, " { ... }"));
+                    c->expansiontrace = ctx->trace;
+                    c->origin = Origin();
+                    return c;
+                }
+                auto c = arg->value->Clone(ast);
+                c->line = line;
+                c->end = end;
+                c->origin = Origin();
+                c->expansiontrace = ctx->trace;
+                return c;
+            }
+        }
+    }
     auto c = Clone1(ast);
+    c->end = end;
     c->origin = Origin();
+    c->expansionbinding = expansionbinding;
+    c->expansiontrace = ctx ? ctx->trace : expansiontrace;
+    if (ctx) if (auto d = Is<Dot>(c)) {
+        if (auto arg = ctx->Find(expansionbinding)) {
+            d->name = arg->field;
+            d->accessorowner = arg->owner;
+            d->expansionbinding = 0;
+        }
+    }
     return c;
 }
 
@@ -27,13 +91,25 @@ inline void CloneNodes(Ast &ast, const vector<Node *> &src, vector<Node *> &dst)
     for (auto n : src) dst.push_back(n->Clone(ast));
 }
 
-inline Node *IntLit::Clone1(Ast &ast) const { return ast.New<IntLit>(line, val, text, uns); }
-inline Node *FltLit::Clone1(Ast &ast) const { return ast.New<FltLit>(line, val, text); }
+inline Node *IntLit::Clone1(Ast &ast) const {
+    auto n = ast.New<IntLit>(line, val, text, uns);
+    n->fixedtype = fixedtype;
+    return n;
+}
+inline Node *FltLit::Clone1(Ast &ast) const {
+    auto n = ast.New<FltLit>(line, val, text);
+    n->fixedtype = fixedtype;
+    return n;
+}
 inline Node *BoolLit::Clone1(Ast &ast) const { return ast.New<BoolLit>(line, val); }
 inline Node *NullLit::Clone1(Ast &ast) const { return ast.New<NullLit>(line); }
 inline Node *SelfRef::Clone1(Ast &ast) const { return ast.New<SelfRef>(line); }
 inline Node *StrLit::Clone1(Ast &ast) const { return ast.New<StrLit>(line, val, multiline); }
-inline Node *Ident::Clone1(Ast &ast) const { return ast.New<Ident>(line, name, ns); }
+inline Node *Ident::Clone1(Ast &ast) const {
+    auto n = ast.New<Ident>(line, name, ns);
+    n->expansionerror = expansionerror;
+    return n;
+}
 
 inline Node *ArrayLit::Clone1(Ast &ast) const {
     auto a = ast.New<ArrayLit>(line);
@@ -45,12 +121,12 @@ inline Node *ArrayLit::Clone1(Ast &ast) const {
 }
 
 inline Node *StructLit::Clone1(Ast &ast) const {
-    auto sl = ast.New<StructLit>(line, type);
+    auto sl = ast.New<StructLit>(line, ast.CloneExpansionType(type));
     sl->defaultall = defaultall;
     sl->implicit = implicit;
     sl->sourcefieldindices = sourcefieldindices;
     sl->inits.reserve(inits.size());
-    for (auto &fi : inits) sl->inits.push_back({ fi.name, fi.val->Clone(ast), fi.fromdefault });
+    for (auto &fi : inits) sl->inits.push_back(ast.CloneFieldInit(fi));
     return sl;
 }
 
@@ -63,12 +139,15 @@ inline Node *Binary::Clone1(Ast &ast) const {
 }
 
 inline Node *Dot::Clone1(Ast &ast) const {
-    return ast.New<Dot>(line, obj->Clone(ast), name, ns);
+    auto d = ast.New<Dot>(line, obj->Clone(ast), name, ns);
+    d->accessorowner = accessorowner;
+    d->incomplete = incomplete;
+    return d;
 }
 
 inline Node *Call::Clone1(Ast &ast) const {
     auto c = ast.New<Call>(line, callee->Clone(ast));
-    c->tyargs = tyargs;
+    for (auto t : tyargs) c->tyargs.push_back(ast.CloneExpansionType(t));
     c->implicit = implicit;
     for (size_t i = 0; i < args.size(); i++)
         if (!IsDefaultArg(i)) c->args.push_back(args[i]->Clone(ast));
@@ -91,7 +170,7 @@ inline Node *SliceExpr::Clone1(Ast &ast) const {
 }
 
 inline Node *AsCast::Clone1(Ast &ast) const {
-    auto c = ast.New<AsCast>(line, child->Clone(ast), type, unchecked);
+    auto c = ast.New<AsCast>(line, child->Clone(ast), ast.CloneExpansionType(type), unchecked);
     c->implicit = implicit;
     return c;
 }
@@ -102,6 +181,8 @@ inline Node *RangeExpr::Clone1(Ast &ast) const {
 
 inline Node *Block::Clone1(Ast &ast) const {
     auto b = ast.New<Block>(line);
+    b->expansionboundary = expansionboundary;
+    b->brokenat = brokenat;
     CloneNodes(ast, stmts, b->stmts);
     b->tail = CloneOrNull(ast, tail);
     return b;
@@ -112,17 +193,37 @@ inline Node *IfExpr::Clone1(Ast &ast) const {
                            CloneOrNull(ast, elseb));
 }
 
+// An arm as written: a variants<E> binding in its pattern becomes the
+// variant's name, which the match resolves as any other (§8.1).
+inline MatchArm CloneArm(Ast &ast, const MatchArm &arm) {
+    MatchArm a;
+    a.pat = arm.pat;
+    a.generated = arm.generated;
+    a.expansion = CloneOrNull(ast, arm.expansion);
+    for (auto &pi : a.pat.items) {
+        auto ctx = ast.expansionclone;
+        auto arg = ctx ? ctx->Find(pi.lo->expansionbinding) : nullptr;
+        if (arg && !arg->variant.empty() && Is<Ident>(pi.lo)) {
+            auto id = ast.New<Ident>(pi.lo->line, arg->variant);
+            id->end = pi.lo->end;
+            id->origin = pi.lo->Origin();
+            id->expansiontrace = ctx->trace;
+            pi.lo = id;
+            pi.variantowner = arg->type->var->adt;
+        } else {
+            pi.lo = pi.lo->Clone(ast);
+        }
+        pi.hi = CloneOrNull(ast, pi.hi);
+    }
+    a.body = CloneOrNull(ast, arm.body);
+    return a;
+}
+
 inline Node *MatchExpr::Clone1(Ast &ast) const {
     auto m = ast.New<MatchExpr>(line, scrutinee->Clone(ast));
     m->arms.reserve(arms.size());
     for (auto &arm : arms) {
-        MatchArm a;
-        a.pat = arm.pat;
-        for (auto &pi : a.pat.items) {
-            pi.lo = pi.lo->Clone(ast);
-            pi.hi = CloneOrNull(ast, pi.hi);
-        }
-        a.body = arm.body->Clone(ast);
+        auto a = CloneArm(ast, arm);
         m->arms.push_back(a);
     }
     return m;
@@ -143,8 +244,8 @@ inline Node *LoopExpr::Clone1(Ast &ast) const {
 inline Node *ForLoop::Clone1(Ast &ast) const {
     auto f = ast.New<ForLoop>(line, byref, var, idxvar, iter->Clone(ast),
                               (Block *)body->Clone(ast));
-    f->vartype = vartype;
-    f->idxtype = idxtype;
+    f->vartype = ast.CloneExpansionType(vartype);
+    f->idxtype = ast.CloneExpansionType(idxtype);
     return f;
 }
 
@@ -161,6 +262,9 @@ inline Node *Break::Clone1(Ast &ast) const {
 }
 
 inline Node *Continue::Clone1(Ast &ast) const { return ast.New<Continue>(line); }
+inline Node *Defer::Clone1(Ast &ast) const {
+    return ast.New<Defer>(line, (Block *)body->Clone(ast));
+}
 
 // InlineBlocks exist only after typecheck; the annotation-stripping Clone has
 // no meaning for them (the optimizer's copier in optimize.h preserves them).
@@ -172,8 +276,8 @@ inline Node *InlineBlock::Clone1(Ast &ast) const {
 inline Node *FunVal::Clone1(Ast &ast) const {
     auto fv = ast.New<FunVal>(line, (Block *)body->Clone(ast));
     fv->params = params;
+    for (auto &p : fv->params) p.type = ast.CloneExpansionType(p.type);
     fv->explicit_params = explicit_params;
-    fv->col = col;
     return fv;
 }
 
@@ -183,8 +287,9 @@ inline Node *VarDecl::Clone1(Ast &ast) const {
     vd->reusable = reusable;
     vd->isglobal = isglobal;
     vd->byref = byref;
+    vd->results = results;
     vd->names = names;
-    vd->type = type;
+    vd->type = ast.CloneExpansionType(type);
     CloneNodes(ast, inits, vd->inits);
     return vd;
 }
@@ -199,7 +304,110 @@ inline Node *IncDec::Clone1(Ast &ast) const {
 
 // Declarations share their symbol; a nested FnDecl's body is cloned lazily
 // per specialization when the function is called, not here.
-inline Node *FnDecl::Clone1(Ast &ast) const { return ast.New<FnDecl>(line, sf); }
+inline Node *FnDecl::Clone1(Ast &ast) const {
+    auto ctx = ast.expansionclone;
+    if (!ctx) return ast.New<FnDecl>(line, sf);
+    // Each fragment owns the nested declarations it specializes. Their
+    // captures and later specialization caches must not alias another entry.
+    auto copy = new SFunction(*sf);
+    ast.functions.push_back(copy);
+    copy->specs.clear();
+    ctx->functions[sf] = copy;
+    if (auto it = ctx->functions.find(sf->outer); it != ctx->functions.end())
+        copy->outer = it->second;
+    for (auto &g : copy->generics) g.bound = ast.CloneExpansionType(g.bound);
+    for (auto &p : copy->params) {
+        p.type = ast.CloneExpansionType(p.type);
+        p.defaultval = CloneOrNull(ast, p.defaultval);
+    }
+    for (auto &t : copy->rets) t = ast.CloneExpansionType(t);
+    copy->body = CloneOrNull(ast, sf->body);
+    return ast.New<FnDecl>(line, copy);
+}
+
+inline Node *ConstFor::Clone1(Ast &ast) const {
+    auto cf = ast.New<ConstFor>(line);
+    cf->source = source;
+    cf->names = names;
+    cf->bindings = bindings;
+    for (auto t : types) cf->types.push_back(ast.CloneExpansionType(t));
+    CloneNodes(ast, constants, cf->constants);
+    cf->body = CloneOrNull(ast, body);
+    for (auto &fi : inits) cf->inits.push_back(ast.CloneFieldInit(fi));
+    cf->armfragments = armfragments;
+    for (auto &arm : arms) cf->arms.push_back(CloneArm(ast, arm));
+    return cf;
+}
+
+inline FieldInit Ast::CloneFieldInit(const FieldInit &fi) {
+    auto out = fi;
+    out.val = fi.val->Clone(*this);
+    if (expansionclone) if (auto a = expansionclone->Find(fi.expansionbinding)) {
+        out.name = a->field;
+        out.accessorowner = a->owner;
+        out.expansionbinding = 0;
+    }
+    return out;
+}
+
+inline TypeExpr *Ast::CloneExpansionType(TypeExpr *t) {
+    auto ctx = expansionclone;
+    if (!t || !ctx) return t;
+    if (t->kind == TY_GENERIC) {
+        if (auto a = ctx->Find(t->named->expansionbinding)) {
+            auto invalid = [&](string msg) {
+                auto n = NewType(TY_GENERIC, t->line);
+                n->named = NewDetail<TypeName>();
+                *n->named = *t->named;
+                n->named->expansionbinding = 0;
+                n->named->expansionerror = Intern(std::move(msg));
+                return n;
+            };
+            if (!a->type) return invalid(cat("const for binding ", t->named->name, " is not a type"));
+            if (!t->named->args.empty()) return invalid("const for type binding takes no type arguments");
+            auto b = a->type;
+            if (t->named->varmode) {
+                if (b->kind != TY_ENUM) return invalid("variable mode requires an ADT type");
+                b = EnumOf(b->enu->en, b->enu->args, true, t->line);
+            }
+            return t->cq ? ConstOf(b) : b;
+        }
+    }
+    // Copy compound templates: sizes and nested type arguments can depend
+    // on this entry even when their outer kind does not.
+    auto n = NewType(t->kind, t->line);
+    *n = *t;
+    auto args = [&](vector<TypeExpr *> &ts) { for (auto &a : ts) a = CloneExpansionType(a); };
+    switch (t->kind) {
+        case TY_GENERIC: case TY_UNRESOLVED:
+            n->named = NewDetail<TypeName>(); *n->named = *t->named;
+            args(n->named->args); break;
+        case TY_STRUCT:
+            n->struc = NewDetail<TypeStruct>(); *n->struc = *t->struc;
+            n->struc->inst = nullptr; args(n->struc->args); break;
+        case TY_ENUM:
+            n->enu = NewDetail<TypeEnum>(); *n->enu = *t->enu;
+            n->enu->inst = nullptr; args(n->enu->args); break;
+        case TY_ARRAY:
+            n->arr = NewDetail<TypeArray>(); *n->arr = *t->arr;
+            n->arr->sub = CloneExpansionType(t->arr->sub);
+            n->arr->sizeexpr = CloneOrNull(*this, t->arr->sizeexpr);
+            if (n->arr->sizeexpr) n->arr->size = -1;
+            break;
+        case TY_SLICE: n->sub = CloneExpansionType(t->sub); break;
+        case TY_REF:
+            n->ref = NewDetail<TypeRef>(); *n->ref = *t->ref;
+            n->ref->sub = CloneExpansionType(t->ref->sub); break;
+        case TY_VARIANT:
+            n->var = NewDetail<TypeVariant>(); *n->var = *t->var;
+            n->var->adt = CloneExpansionType(t->var->adt); break;
+        case TY_FN:
+            n->fn = NewDetail<TypeFn>(); *n->fn = *t->fn;
+            args(n->fn->args); args(n->fn->rets); break;
+        default: return t;
+    }
+    return n;
+}
 inline Node *StructDecl::Clone1(Ast &ast) const { return ast.New<StructDecl>(line, st); }
 inline Node *EnumDecl::Clone1(Ast &ast) const { return ast.New<EnumDecl>(line, en); }
 inline Node *AliasDecl::Clone1(Ast &ast) const { return ast.New<AliasDecl>(line, al); }
@@ -211,6 +419,20 @@ inline Node *AliasDecl::Clone1(Ast &ast) const { return ast.New<AliasDecl>(line,
 
 #define CH(c) if (c) f(c)
 
+inline void ConstFor::Children(const function<void(Node *)> &f) const {
+    for (auto c : constants) f(c);
+    CH(body);
+    for (auto &fi : inits) f(fi.val);
+    for (auto &arm : arms) {
+        CH(arm.expansion);
+        for (auto &pi : arm.pat.items) {
+            f(pi.lo);
+            CH(pi.hi);
+        }
+        CH(arm.body);
+    }
+}
+
 inline void IntLit::Children(const function<void(Node *)> &) const {}
 inline void FltLit::Children(const function<void(Node *)> &) const {}
 inline void BoolLit::Children(const function<void(Node *)> &) const {}
@@ -219,6 +441,7 @@ inline void SelfRef::Children(const function<void(Node *)> &) const {}
 inline void StrLit::Children(const function<void(Node *)> &) const {}
 inline void Ident::Children(const function<void(Node *)> &) const {}
 inline void Continue::Children(const function<void(Node *)> &) const {}
+inline void Defer::Children(const function<void(Node *)> &f) const { f(body); }
 inline void FnDecl::Children(const function<void(Node *)> &) const {}
 inline void StructDecl::Children(const function<void(Node *)> &) const {}
 inline void EnumDecl::Children(const function<void(Node *)> &) const {}
@@ -282,11 +505,12 @@ inline void IfExpr::Children(const function<void(Node *)> &f) const {
 inline void MatchExpr::Children(const function<void(Node *)> &f) const {
     f(scrutinee);
     for (auto &arm : arms) {
+        CH(arm.expansion);
         for (auto &pi : arm.pat.items) {
             f(pi.lo);
             CH(pi.hi);
         }
-        f(arm.body);
+        CH(arm.body);
     }
 }
 

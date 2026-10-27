@@ -41,9 +41,13 @@ function settings(vscode, uri, definition = {}, taskFolder) {
     };
 }
 
-function argumentsFor(action, config) {
+// The command line of a compiler action; a check with `diagnostics: 'json'`
+// asks for its errors and warnings as JSON on stdout (docs/implementation.md
+// §1), which a compiler without the flag rejects.
+function argumentsFor(action, config, options = {}) {
     // `goose check` and `goose build` are verbs, which come first; the rest are flags.
     const args = action === 'build' || action === 'check' ? [action] : [];
+    if (options.diagnostics) args.push('--diagnostics', options.diagnostics);
     if (config.stdlib) args.push('--stdlib', config.stdlib);
     if (action === 'run') args.push('--jit');
     else if (action === 'generateC') args.push('-o', config.output);

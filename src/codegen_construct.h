@@ -33,16 +33,14 @@ void CodeGen::StoreWhole(const string &p, TypeExpr *t, const string &x) {
         return;
     }
     auto v = x;
-    auto simple = !v.empty() && !isdigit((unsigned char)v[0]);
-    for (auto c : v) simple &= isalnum((unsigned char)c) || c == '_';
-    if (!simple) {
+    if (!IsCName(v)) {
         v = T();
         FixedLocal(t, v, x);
     }
     auto w = T();
     L(sz == 8 ? "uint64_t " : sz == 4 ? "uint32_t " : "uint16_t ", w, ";");
-    L("memcpy(&", w, ", &", v, ", ", sz, ");");
-    L("memcpy(", p, ", &", w, ", ", sz, ");");
+    L("GS_MEMCPY(&", w, ", &", v, ", ", sz, ");");
+    L("GS_MEMCPY(", p, ", &", w, ", ", sz, ");");
 }
 
 void CodeGen::EmitLenCheck(IntStorage ls, const string &n) {
@@ -59,6 +57,34 @@ void CodeGen::EmitLenStore(const string &stk, IntStorage ls, const string &n) {
     } else {
         L("*(", IntCT(ls), " *)", Top(stk), " = (", IntCT(ls), ")(", n, ");");
         Bump(stk, cat(IntSize(ls)));
+    }
+}
+
+// The count of an array of type at, n elements long, built at stk's top:
+// into the receiving count lenlv where the destination has one -- a
+// resizable's always, a variable array's in the element-run form -- and in
+// front of the elements otherwise, as the array's length prefix or a limited
+// array's header. A limited array's n is range-checked against the header's
+// u32 fields where `check` says it is not a constant.
+void CodeGen::EmitArrayCount(const string &stk, TypeExpr *at, const string &lenlv,
+                                    const string &n, bool check) {
+    switch (at->arr->akind) {
+        case A_VAR:
+            if (!lenlv.empty()) L(lenlv, " = ", n, ";");
+            else EmitLenStore(stk, LenStore(at->arr), n);
+            break;
+        case A_LIMITED: {   // Runtime capacity: chosen as the initial length (v1).
+            if (check) EmitLenCheck(IS_U32, n);
+            auto x = check ? cat("(uint32_t)", n) : n;
+            L("*(uint32_t *)", Top(stk), " = ", x, ";");
+            L("*(uint32_t *)(", Top(stk), " + 4) = ", x, ";");
+            Bump(stk, "8");
+            break;
+        }
+        default:
+            assert(!lenlv.empty());
+            L(lenlv, " = ", n, ";");
+            break;
     }
 }
 
@@ -252,11 +278,7 @@ bool CodeGen::HasRelRef(TypeExpr *t) {
 // Does a value of type t hold a self-relative reference by value, at any
 // depth, variable-size parts included? Its offsets depend on where it sits.
 bool CodeGen::HasSelfRelRef(TypeExpr *t) {
-    switch (t->kind) {
-        case TY_REF: return t->ref->lenstorage >= 0 && !t->ref->pool;
-        case TY_ARRAY: return HasSelfRelRef(t->arr->sub);
-        default: return AnyField(t, [&](TypeExpr *ft) { return HasSelfRelRef(ft); });
-    }
+    return HasRelRefOf(t, false, [&](TypeExpr *x) { return FieldRuns(x); });
 }
 
 // An exit's value that is a local holding self-relative references reaches
@@ -292,7 +314,7 @@ void CodeGen::EmitCopyElems(const string &stk, TypeExpr *elem, const string &src
         ind++;
         auto sz = T();
         L("int64_t ", sz, " = ", SizeX(elem, p), ";");
-        L("memcpy(", Top(stk), ", ", p, ", (size_t)", sz, ");");
+        L("GS_MEMCPY(", Top(stk), ", ", p, ", (size_t)", sz, ");");
         Bump(stk, sz);
         L(p, " += ", sz, ";");
         ind--;
@@ -338,7 +360,7 @@ CodeGen::SrcElems CodeGen::GenSrcElems(Node *n) {
 void CodeGen::GenConstruct(Node *n, const string &stk, TypeExpr *want, const string &lenlv) {
     if (auto it = fillvalues.find(n); it != fillvalues.end()) {
         auto target = want ? want : it->second.t;
-        if (target->kind == TY_REF && target->ref->lenstorage >= 0)
+        if (IsRelRef(target))
             EmitRelStore(stk, target, GenX(n), n->line, RelValue(n));
         else if (IsVarintT(target)) EmitVarintStore(stk, GenXD(n, ast.inttypes[IS_I64]));
         else if (IsBytesT(target) || IsResz(target))
@@ -422,7 +444,7 @@ void CodeGen::GenConstruct(Node *n, const string &stk, TypeExpr *want, const str
     // from that slot, not the pointer (§3.9), and null the optional's zero.
     // Reference values always reach here as plain pointers, relative ones
     // having been decoded on the read.
-    if (want && want->kind == TY_REF && want->ref->lenstorage >= 0 && et->kind == TY_REF) {
+    if (want && IsRelRef(want) && et->kind == TY_REF) {
         EmitRelStore(stk, want, GenX(n), n->line, RelValue(n));
         return;
     }
@@ -444,35 +466,17 @@ void CodeGen::GenConstruct(Node *n, const string &stk, TypeExpr *want, const str
             L("*", Top(stk), " = 0;");
             Bump(stk, "1");
         } else {
-            L("memset(", Top(stk), ", 0, ", FixedSize(et), ");");
+            L("GS_MEMZERO(", Top(stk), ", ", FixedSize(et), ");");
             Bump(stk, cat(FixedSize(et)));
         }
         return;
     }
-    if (auto s2 = Is<StrLit>(n); s2 && (IsResz(et) || !lenlv.empty())) {
-        // A string literal building a resizable string: raw elements,
-        // count into the receiving header.
-        assert(!lenlv.empty());
-        L(lenlv, " = ", s2->val.size(), ";");
-        if (!s2->val.empty()) {
-            L("memcpy(", Top(stk), ", ", StrRaw(s2->val), ", ", s2->val.size(), ");");
-            Bump(stk, cat(s2->val.size()));
-        }
-        return;
-    }
     if (auto s = Is<StrLit>(n)) {
-        assert(et->kind == TY_ARRAY && lenlv.empty());
-        if (et->arr->akind == A_LIMITED) {
-            // Runtime capacity: chosen as the literal's length (v1).
-            L("*(uint32_t *)", Top(stk), " = ", s->val.size(), ";");
-            L("*(uint32_t *)(", Top(stk), " + 4) = ", s->val.size(), ";");
-            Bump(stk, "8");
-        } else {
-            assert(et->arr->akind == A_VAR);
-            EmitLenStore(stk, LenStore(et->arr), cat(s->val.size()));
-        }
+        // A string literal building a u8 array: its count, then its bytes.
+        assert(et->kind == TY_ARRAY);
+        EmitArrayCount(stk, et, lenlv, cat(s->val.size()), false);
         if (!s->val.empty()) {
-            L("memcpy(", Top(stk), ", ", StrRaw(s->val), ", ", s->val.size(), ");");
+            L("GS_MEMCPY(", Top(stk), ", ", StrRaw(s->val), ", ", s->val.size(), ");");
             Bump(stk, cat(s->val.size()));
         }
         return;
@@ -550,7 +554,7 @@ void CodeGen::ConstructFromLoc(Loc lv, TypeExpr *et, const string &stk,
         assert(!lv.val);
         auto sz = T();
         L("int64_t ", sz, " = ", SizeX(et, lv.s), ";");
-        L("memcpy(", Top(stk), ", ", lv.s, ", (size_t)", sz, ");");
+        L("GS_MEMCPY(", Top(stk), ", ", lv.s, ", (size_t)", sz, ");");
         Bump(stk, sz);
         return;
     }
@@ -584,6 +588,14 @@ bool CodeGen::CallBuildsAt(Call *c, TypeExpr *rt, TypeExpr *et, const string &le
 void CodeGen::ConstructCall(Call *c, TypeExpr *et, const string &stk, TypeExpr *want,
                                    const string &lenlv) {
     auto rt0 = c->rettypes.empty() ? nullptr : c->rettypes[0];
+    auto delivered = c->fvbody ? c->fvbody->exprtype : rt0;
+    if (c->builtin < 0 && delivered && NeedsResultLocation(delivered) && TEq(delivered, et)) {
+        auto p = T();
+        L(CT(et), " *", p, " = (", CT(et), " *)", Top(stk), ";");
+        Bump(stk, cat(FixedSize(et)));
+        EmitCall(c, Dst { DK_LVALUE, cat("(*", p, ")"), et });
+        return;
+    }
     // A bytes-class result feeding a fixed-class slot (an array
     // constructing a static-capacity limited one, §4.2), or a slot of an
     // array kind it cannot be built in (CallBuildsAt), is built on a
@@ -595,7 +607,7 @@ void CodeGen::ConstructCall(Call *c, TypeExpr *et, const string &stk, TypeExpr *
     // A returned reference landing in a relative-reference slot stores the
     // offset, as any other reference value does there (§3.9).
     auto slot = want ? want : et;
-    if (slot->kind == TY_REF && slot->ref->lenstorage >= 0) {
+    if (IsRelRef(slot)) {
         EmitRelStore(stk, slot, CallVal0(c, rets[0], slot), c->line);
         return;
     }
@@ -672,6 +684,20 @@ void CodeGen::GenAdtAdapted(TypeExpr *from, TypeExpr *to, const Dst &d, Line ln,
     }
     // The fixed-mode ADT, from a variant (fixed-size, as the mode requires)
     // or from the variable-mode ADT.
+    if (from->kind == TY_VARIANT && NeedsResultLocation(from)) {
+        auto base = d.s;
+        if (d.k == DK_STACK) {
+            auto p = T();
+            L(CT(to), " *", p, " = (", CT(to), " *)", Top(d.s), ";");
+            Bump(d.s, cat(FixedSize(to)));
+            base = cat("(*", p, ")");
+        }
+        auto ei = EIOf(to);
+        auto vi = ei->en->VariantIndex(from->var->variant);
+        L(base, ".tag = ", TagConst(ei, vi), ";");
+        gen(Dst { DK_LVALUE, cat(base, ".u.v_", Sanitize(from->var->variant->name)), from });
+        return;
+    }
     Loc lv;
     lv.t = from;
     if (IsBytesT(from)) {
@@ -727,22 +753,7 @@ void CodeGen::GenArrayFromLoc(Loc lv, TypeExpr *et, const string &stk, Line ln,
     auto v = ArrayView(lv);
     auto nn = T();
     L("int64_t ", nn, " = ", v.len, ";");
-    switch (et->arr->akind) {
-        case A_VAR:
-            if (!lenlv.empty()) L(lenlv, " = ", nn, ";");
-            else EmitLenStore(stk, LenStore(et->arr), nn);
-            break;
-        case A_LIMITED:   // Runtime capacity: chosen as the initial length (v1).
-            EmitLenCheck(IS_U32, nn);
-            L("*(uint32_t *)", Top(stk), " = (uint32_t)", nn, ";");
-            L("*(uint32_t *)(", Top(stk), " + 4) = (uint32_t)", nn, ";");
-            Bump(stk, "8");
-            break;
-        default:
-            assert(!lenlv.empty());
-            L(lenlv, " = ", nn, ";");
-            break;
-    }
+    EmitArrayCount(stk, et, lenlv, nn, true);
     EmitCopyElems(stk, et->arr->sub, v.elems, nn);
 }
 
@@ -771,7 +782,7 @@ void CodeGen::EmitRzCopy(Loc lv, TypeExpr *et, const string &stk, const string &
     auto len = T();
     L("int64_t ", len, " = ", lv.lenlv, ";");
     if (prefix) {
-        L("memcpy(", Top(stk), ", ", lv.s, ", ", prefix, ");");
+        L("GS_MEMCPY(", Top(stk), ", ", lv.s, ", ", prefix, ");");
         Bump(stk, cat(prefix));
     }
     EmitCopyElems(stk, elem, cat("(", lv.s, ") + ", prefix), len);
@@ -790,7 +801,7 @@ void CodeGen::FoBytes(TypeExpr *t, const string &obj, const string &p, bool toby
         auto at = off ? cat("(", p, " + ", off, ")") : p;
         if (fields[i].ispad) {
             if (fields[i].padsize <= 0) continue;
-            if (tobytes) L("memset(", at, ", 0, ", fields[i].padsize, ");");
+            if (tobytes) L("GS_MEMZERO(", at, ", ", fields[i].padsize, ");");
             off += fields[i].padsize;
             continue;
         }
@@ -882,7 +893,7 @@ void CodeGen::GenVarEnumFromLoc(Loc lv, TypeExpr *et, const string &stk) {
         if (!lv.val) {
             auto sz = T();
             L("int64_t ", sz, " = ", SizeX(lv.t, lv.s), ";");
-            L("memcpy(", Top(stk), ", ", lv.s, ", (size_t)", sz, ");");
+            L("GS_MEMCPY(", Top(stk), ", ", lv.s, ", (size_t)", sz, ");");
             Bump(stk, sz);
         } else {
             EmitValStore(stk, lv.t, lv.s);
@@ -899,7 +910,7 @@ void CodeGen::GenVarEnumFromLoc(Loc lv, TypeExpr *et, const string &stk) {
         L("case ", TagConst(ei, (int)vi), ":");
         ind++;
         if (psz) {
-            L("memcpy(", Top(stk), ", &", sv, ".u.v_",
+            L("GS_MEMCPY(", Top(stk), ", &", sv, ".u.v_",
               Sanitize(ei->en->variants[vi].name), ", ", psz, ");");
             Bump(stk, cat(psz));
         }
@@ -936,7 +947,7 @@ void CodeGen::FreezeFill(Node *n, TypeExpr *t, vector<Node *> &added) {
         }
     }
     if (IsVarintT(t)) t = ast.inttypes[IS_I64];
-    if (t->kind == TY_REF && t->ref->lenstorage >= 0)
+    if (IsRelRef(t))
         t = ast.RefTo(t->ref->sub, n->line, t->ref->optional);
     Loc lv;
     lv.t = t;
@@ -962,7 +973,7 @@ void CodeGen::FixedLitAtStk(Node *n, const string &stk) {
     auto et = n->exprtype;
     auto Gap = [&](int64_t bytes) {
         if (bytes <= 0) return;
-        L("memset(", Top(stk), ", 0, ", bytes, ");");
+        L("GS_MEMZERO(", Top(stk), ", ", bytes, ");");
         Bump(stk, cat(bytes));
     };
     // `fieldoff` is the field's byte offset within the value, which is
@@ -972,7 +983,7 @@ void CodeGen::FixedLitAtStk(Node *n, const string &stk) {
             Gap(FixedSize(ft));
             return;
         }
-        if (ft->kind == TY_REF && ft->ref->lenstorage >= 0) {
+        if (IsRelRef(ft)) {
             if (Is<SelfRef>(init)) {
                 EmitRelSelfStore(stk, ft, fieldoff, n->line);
             } else {
@@ -990,16 +1001,12 @@ void CodeGen::FixedLitAtStk(Node *n, const string &stk) {
     };
     if (auto al = Is<ArrayLit>(n)) {
         auto elem = et->arr->sub;
-        if (et->arr->akind == A_LIMITED) {
-            EmitLenStore(stk, LenStore(et->arr),
-                         cat(al->fillval ? ((IntLit *)al->fillcount)->val
-                                         : (int64_t)al->elems.size()));
-        }
+        auto count = LitCount(al);
+        if (et->arr->akind == A_LIMITED) EmitLenStore(stk, LenStore(et->arr), cat(count));
         if (al->fillval) {
             FillScope fill(*this, al->fillval, elem);
-            auto fc = Is<IntLit>(al->fillcount);
             auto iv = T();
-            L("for (int64_t ", iv, " = 0; ", iv, " < ", fc->val, "; ", iv, "++) {");
+            L("for (int64_t ", iv, " = 0; ", iv, " < ", count, "; ", iv, "++) {");
             ind++;
             PushSc(SC_PLAIN);
             EmitF(al->fillval, elem);
@@ -1009,11 +1016,7 @@ void CodeGen::FixedLitAtStk(Node *n, const string &stk) {
         } else {
             for (auto e : al->elems) EmitF(e, elem);
         }
-        if (et->arr->akind == A_LIMITED) {
-            auto filled = al->fillval ? ((IntLit *)al->fillcount)->val
-                                      : (int64_t)al->elems.size();
-            Gap((ArrSize(et->arr) - filled) * FixedSize(elem));
-        }
+        if (et->arr->akind == A_LIMITED) Gap((ArrSize(et->arr) - count) * FixedSize(elem));
         return;
     }
     auto sl = Is<StructLit>(n);
@@ -1077,26 +1080,21 @@ void CodeGen::FixedArrayLitAt(ArrayLit *al, const string &base, bool inroot) {
     auto et = al->exprtype;
     assert(et->kind == TY_ARRAY);
     auto elem = et->arr->sub;
-    auto rel = elem->kind == TY_REF && elem->ref->lenstorage >= 0;
+    auto rel = IsRelRef(elem);
     auto emitelem = [&](Node *e, const string &path) {
         if (rel) EmitRelStoreAt(cat("(uint8_t *)&", path), elem, GenX(e), al->line, inroot,
                                 RelValue(e));
         else GenAny(e, Dst { DK_LVALUE, path, elem });
     };
-    if (et->arr->akind == A_LIMITED) {
-        auto count = al->fillval ? ((IntLit *)al->fillcount)->val
-                                 : (int64_t)al->elems.size();
-        L(base, ".len = ", count, ";");
-    }
+    auto count = LitCount(al);
+    if (et->arr->akind == A_LIMITED) L(base, ".len = ", count, ";");
     if (al->fillval) {
-        auto fc = Is<IntLit>(al->fillcount);
-        assert(fc);
         FillScope fill(*this, al->fillval, elem);
         // Captured values repeat; relative offsets are encoded per slot.
         auto perelem = HasRelRef(elem);
         auto fv = perelem ? string() : GenXD(al->fillval, elem);
         auto iv = T();
-        L("for (int64_t ", iv, " = 0; ", iv, " < ", fc->val, "; ", iv, "++) {");
+        L("for (int64_t ", iv, " = 0; ", iv, " < ", count, "; ", iv, "++) {");
         ind++;
         auto path = cat(base, ".e[", iv, "]");
         PushSc(SC_PLAIN);
@@ -1126,10 +1124,10 @@ void CodeGen::StructLitAt(StructLit *sl, const string &base, bool inroot) {
             auto path = cat(b, ".", Sanitize(fields[i].name));
             if (!init) {   // Omitted optional: null.
                 assert(ft->kind == TY_REF);
-                L("memset(&", path, ", 0, sizeof(", path, "));");
+                L("GS_MEMZERO(&", path, ", sizeof(", path, "));");
                 continue;
             }
-            if (ft->kind == TY_REF && ft->ref->lenstorage >= 0) {
+            if (IsRelRef(ft)) {
                 if (Is<SelfRef>(init))
                     EmitRelSelfAt(cat("(uint8_t *)&", path), ft, baseoff + lo.offs[i],
                                   sl->line, inroot);
@@ -1147,7 +1145,7 @@ void CodeGen::StructLitAt(StructLit *sl, const string &base, bool inroot) {
         auto si = SI(et);
         // Nothing writes the C object of a struct or a variant without
         // fields, and copying one nothing wrote is undefined.
-        if (LastRealField(si->st->fields) < 0) L("memset(&", base, ", 0, sizeof(", base, "));");
+        if (LastRealField(si->st->fields) < 0) L("GS_MEMZERO(&", base, ", sizeof(", base, "));");
         fieldset(base, si->st->fields, si->ftypes, StructLayout(si), 0);
         return;
     }
@@ -1155,7 +1153,7 @@ void CodeGen::StructLitAt(StructLit *sl, const string &base, bool inroot) {
         auto ei = EIVar(et);
         auto vi = ei->en->VariantIndex(et->var->variant);
         if (LastRealField(ei->en->variants[vi].fields) < 0)
-            L("memset(&", base, ", 0, sizeof(", base, "));");
+            L("GS_MEMZERO(&", base, ", sizeof(", base, "));");
         fieldset(base, ei->en->variants[vi].fields, ei->vftypes[vi], VariantLayout(ei, vi), 0);
         return;
     }
@@ -1195,30 +1193,8 @@ void CodeGen::GenArrayLit(ArrayLit *al, const string &stk, const string &lenlv,
         Bump(stk, cat("8 + ", t, " * ", FixedSize(elem)));
         return;
     }
-    int64_t count = al->fillval ? -1 : (int64_t)al->elems.size();
-    string cn;
-    if (al->fillval) {
-        // The fill count is a constant expression (§4.2).
-        auto fc = Is<IntLit>(al->fillcount);
-        assert(fc);
-        count = fc->val;
-    }
-    cn = cat(count);
-    switch (et->arr->akind) {
-        case A_VAR:
-            if (!lenlv.empty()) L(lenlv, " = ", cn, ";");
-            else EmitLenStore(stk, LenStore(et->arr), cn);
-            break;
-        case A_LIMITED:
-            L("*(uint32_t *)", Top(stk), " = ", count, ";");
-            L("*(uint32_t *)(", Top(stk), " + 4) = ", count, ";");
-            Bump(stk, "8");
-            break;
-        default:
-            assert(!lenlv.empty());
-            L(lenlv, " = ", cn, ";");
-            break;
-    }
+    auto count = LitCount(al);
+    EmitArrayCount(stk, et, lenlv, cat(count), false);
     if (al->fillval) {
         FillScope fill(*this, al->fillval, elem);
         if (IsVarintT(elem)) {
@@ -1238,17 +1214,6 @@ void CodeGen::GenArrayLit(ArrayLit *al, const string &stk, const string &lenlv,
             PushSc(SC_PLAIN);
             GenConstruct(al->fillval, stk, elem);
             PopSc();
-            ind--;
-            L("}");
-        } else if (elem->kind == TY_REF && elem->ref->lenstorage >= 0) {
-            // Each relative slot stores its own offset to the one plain
-            // reference, or the optional's zero for null (§3.9).
-            auto p = T();
-            L("uint8_t *", p, " = (uint8_t *)(", GenX(al->fillval), ");");
-            auto iv = T();
-            L("for (int64_t ", iv, " = 0; ", iv, " < ", count, "; ", iv, "++) {");
-            ind++;
-            EmitRelStore(stk, elem, p, al->line);
             ind--;
             L("}");
         } else {
@@ -1336,12 +1301,12 @@ void CodeGen::GenFrameObjLit(StructLit *sl, StructInst *si, const string &stk,
         }
         if (!init || Is<NullLit>(init)) {
             assert(ft->kind == TY_REF && ft->ref->optional);
-            L("memset(&", flv, ", 0, sizeof(", flv, "));");
+            L("GS_MEMZERO(&", flv, ", sizeof(", flv, "));");
             continue;
         }
         // Only the `in pool` form can be a frame object's field (C.2), so
         // the offset does not depend on where the object is built.
-        if (ft->kind == TY_REF && ft->ref->lenstorage >= 0) {
+        if (IsRelRef(ft)) {
             EmitRelStoreAt(cat("(uint8_t *)&", flv), ft, GenX(init), sl->line, true,
                            RelValue(init));
             continue;
@@ -1356,16 +1321,16 @@ void CodeGen::GenFieldInits(StructLit *sl, const vector<Field> &fields,
     for (size_t i = 0; i < fields.size(); i++) {
         if (fields[i].ispad) {
             auto n = fields[i].padsize > 0 ? fields[i].padsize : 0;
-            if (n) { L("memset(", Top(stk), ", 0, ", n, ");"); Bump(stk, cat(n)); }
+            if (n) { L("GS_MEMZERO(", Top(stk), ", ", n, ");"); Bump(stk, cat(n)); }
             continue;
         }
         auto init = sl->InitFor((int)i);
         auto ft = ftypes[i];
-        if (ft->kind == TY_REF && ft->ref->lenstorage >= 0) {
+        if (IsRelRef(ft)) {
             // Relative-reference slot: store from the plain reference.
             if (!init) {
                 if (ft->ref->lenstorage == IS_VARINT) { L("*", Top(stk), " = 0;"); Bump(stk, "1"); }
-                else { L("memset(", Top(stk), ", 0, ", IntSize((IntStorage)ft->ref->lenstorage), ");");
+                else { L("GS_MEMZERO(", Top(stk), ", ", IntSize((IntStorage)ft->ref->lenstorage), ");");
                        Bump(stk, cat(IntSize((IntStorage)ft->ref->lenstorage))); }
                 continue;
             }
@@ -1378,7 +1343,7 @@ void CodeGen::GenFieldInits(StructLit *sl, const vector<Field> &fields,
         if (!init) {
             // Omitted optional: null (checked by TC that a default exists otherwise).
             assert(ft->kind == TY_REF && ft->ref->optional);
-            L("memset(", Top(stk), ", 0, ", FixedSize(ft), ");");
+            L("GS_MEMZERO(", Top(stk), ", ", FixedSize(ft), ");");
             Bump(stk, cat(FixedSize(ft)));
             continue;
         }

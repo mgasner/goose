@@ -61,7 +61,9 @@ inline void TypeExpr::Dump(string &s, size_t limit) const {
     };
     if (cq) s += "const ";
     auto SubDump = [&](const TypeExpr *inner) {
-        auto parens = inner->kind == TY_FN || inner->cq || (cq && chainhasrs(inner));
+        // An index type takes no postfix of its own: `(u32 in a)[>..]`.
+        auto parens = inner->kind == TY_FN || inner->cq || inner->ix ||
+                      (cq && chainhasrs(inner));
         if (parens) s += "(";
         inner->Dump(s, limit);
         if (parens) s += ")";
@@ -76,7 +78,10 @@ inline void TypeExpr::Dump(string &s, size_t limit) const {
         s += ">";
     };
     switch (kind) {
-        case TY_INT:  s += IntStorageName(intstorage); break;
+        case TY_INT:
+            s += IntStorageName(intstorage);
+            if (ix) Append(s, ix->upto ? " upto " : " in ", ix->name);
+            break;
         case TY_FLT:  s += FltStorageName(fltstorage); break;
         case TY_BOOL: s += "bool"; break;
         case TY_STRUCT: s += struc->st->qname; ArgsDump(struc->args); break;
@@ -158,11 +163,30 @@ inline void TypeExpr::Dump(string &s, size_t limit) const {
 }
 
 // True for nodes that end in a block and therefore need no ';' as a statement.
+// The block `a, b = f();` parses to (Parser::ParseMultiAssign), while it
+// still has that shape: the results' declaration, then one assignment of
+// each.
+inline const VarDecl *MultiAssignOf(const Block *b) {
+    auto vd = b->stmts.empty() ? nullptr : Is<VarDecl>(b->stmts[0]);
+    if (!vd || !vd->results || b->tail || vd->inits.size() != 1 ||
+        b->stmts.size() != vd->names.size() + 1)
+        return nullptr;
+    for (size_t i = 1; i < b->stmts.size(); i++) {
+        auto a = Is<Assign>(b->stmts[i]);
+        if (!a || a->op != T_ASSIGN) return nullptr;
+    }
+    return vd;
+}
+
 inline bool EndsInBlock(const Node *n) {
+    if (auto b = Is<Block>(n); b && MultiAssignOf(b)) return false;
     if (Is<IfExpr>(n) || Is<MatchExpr>(n) || Is<EarlyBlock>(n) || Is<While>(n) ||
         Is<LoopExpr>(n) || Is<ForLoop>(n) || Is<FnDecl>(n) || Is<Block>(n) ||
-        Is<InlineBlock>(n)) return true;
+        Is<InlineBlock>(n) || Is<ConstFor>(n)) return true;
     if (auto c = Is<Call>(n)) return c->trailing != nullptr;
+    // As Defer::Dump writes it: the block form, or its one statement.
+    if (auto d = Is<Defer>(n))
+        return d->body->stmts.size() != 1 || d->body->tail || EndsInBlock(d->body->stmts[0]);
     return false;
 }
 
@@ -214,6 +238,15 @@ inline void DumpBlockBody(string &s, const Block *b, int ind) {
 }
 
 inline void Block::Dump(string &s, int ind) const {
+    if (auto vd = MultiAssignOf(this)) {
+        for (size_t i = 1; i < stmts.size(); i++) {
+            if (i > 1) s += ", ";
+            Is<Assign>(stmts[i])->lval->Dump(s, ind);
+        }
+        s += " = ";
+        vd->inits[0]->Dump(s, ind);
+        return;
+    }
     s += "{";
     DumpBlockBody(s, this, ind);
 }
@@ -264,6 +297,49 @@ inline void StructLit::Dump(string &s, int ind) const {
     }
     if (defaultall) s += inits.empty() ? ".." : ", ..";
     s += inits.empty() && !defaultall ? "}" : " }";
+}
+
+inline void DumpArms(string &s, const vector<MatchArm> &arms, int ind);
+
+inline void ConstFor::Dump(string &s, int ind) const {
+    s += "const for <";
+    for (size_t i = 0; i < names.size(); i++) {
+        if (i) s += ", ";
+        s += names[i];
+    }
+    s += "> in ";
+    if (source == ES_CONSTANTS) {
+        s += "[";
+        for (size_t i = 0; i < constants.size(); i++) {
+            if (i) s += ", ";
+            constants[i]->Dump(s, ind);
+        }
+        s += "]";
+    } else {
+        s += source == ES_FIELDS ? "fields<" : source == ES_VARIANTS ? "variants<" : "types<";
+        for (size_t i = 0; i < types.size(); i++) {
+            if (i) s += ", ";
+            types[i]->Dump(s);
+        }
+        s += ">";
+    }
+    s += " ";
+    if (body) body->Dump(s, ind);
+    else if (armfragments) {
+        s += "{";
+        DumpArms(s, arms, ind);
+        s += "}";
+    } else {
+        s += "{";
+        for (auto &fi : inits) {
+            NL(s, ind + 1);
+            if (!fi.name.empty()) Append(s, fi.name, ": ");
+            fi.val->Dump(s, ind + 1);
+            s += ",";
+        }
+        NL(s, ind);
+        s += "}";
+    }
 }
 
 inline void Unary::Dump(string &s, int ind) const {
@@ -370,12 +446,16 @@ inline void IfExpr::Dump(string &s, int ind) const {
     }
 }
 
-inline void MatchExpr::Dump(string &s, int ind) const {
-    s += "match ";
-    DumpOperand(s, scrutinee, ind);
-    s += " {";
+// A match's arms, each on a line of its own at ind + 1, then the closing
+// brace's line at ind: `pattern => expr,`, or a `const for` of arms.
+inline void DumpArms(string &s, const vector<MatchArm> &arms, int ind) {
     for (auto &arm : arms) {
         NL(s, ind + 1);
+        if (arm.expansion) {
+            arm.expansion->Dump(s, ind + 1);
+            s += ",";
+            continue;
+        }
         if (arm.pat.kind == P_WILDCARD) s += "_";
         for (auto &pi : arm.pat.items) {
             if (&pi != &arm.pat.items[0]) s += ", ";
@@ -409,6 +489,13 @@ inline void MatchExpr::Dump(string &s, int ind) const {
         s += ",";
     }
     NL(s, ind);
+}
+
+inline void MatchExpr::Dump(string &s, int ind) const {
+    s += "match ";
+    DumpOperand(s, scrutinee, ind);
+    s += " {";
+    DumpArms(s, arms, ind);
     s += "}";
 }
 
@@ -433,15 +520,17 @@ inline void ForLoop::Dump(string &s, int ind) const {
     s += "for ";
     if (byref) s += "&";
     s += var;
-    if (vartype) {
+    // The loop's own `in` follows a binder's type, so an index type there
+    // takes parentheses.
+    auto binder = [&](TypeExpr *t) {
         s += ": ";
-        vartype->Dump(s);
-    }
+        if (t->ix) s += "(";
+        t->Dump(s);
+        if (t->ix) s += ")";
+    };
+    if (vartype) binder(vartype);
     if (!idxvar.empty()) Append(s, ", ", idxvar);
-    if (idxtype) {
-        s += ": ";
-        idxtype->Dump(s);
-    }
+    if (idxtype) binder(idxtype);
     s += " in ";
     DumpOperand(s, iter, ind);
     s += " ";
@@ -473,6 +562,18 @@ inline void Break::Dump(string &s, int ind) const {
 
 inline void Continue::Dump(string &s, int) const { s += "continue"; }
 
+// The statement form where the body is one statement (a block of its own
+// stays the block form), the block form otherwise; both parse back to the
+// same body.
+inline void Defer::Dump(string &s, int ind) const {
+    s += "defer ";
+    if (body->stmts.size() == 1 && !body->tail && !Is<Block>(body->stmts[0])) {
+        body->stmts[0]->Dump(s, ind);
+        return;
+    }
+    body->Dump(s, ind);
+}
+
 // Optimizer output only (--specs); this form does not reparse.
 inline void InlineBlock::Dump(string &s, int ind) const {
     Append(s, "inline ", sf->qname, "#", spec->id, " ");
@@ -484,6 +585,7 @@ inline void FunVal::Dump(string &s, int ind) const {
     if (explicit_params) {
         for (size_t i = 0; i < params.size(); i++) {
             s += i ? ", " : " ";
+            if (params[i].isvar) s += "var ";
             s += params[i].name;
             if (params[i].type) { s += ": "; params[i].type->Dump(s); }
         }
@@ -550,12 +652,16 @@ inline void DumpFields(string &s, const vector<Field> &fields, int ind) {
 inline void FnDecl::Dump(string &s, int ind) const {
     if (sf->isexport) {
         s += "export ";
-        if (sf->cname != sf->name) { s += "\""; s += sf->cname; s += "\" "; }
+        if (sf->cname != sf->name) { EscapeString(s, sf->cname, '"'); s += " "; }
     }
     if (sf->isextern) {
-        s += "extern ";
-        if (sf->cname != sf->name) { s += "\""; s += sf->cname; s += "\" "; }
+        // A block's member is written without `extern`, inside the block
+        // Ast::Dump prints around the run of them.
+        if (sf->dylib.empty()) s += "extern ";
     }
+    // A nested function takes its enclosing function's checkfree.
+    if (sf->checkfree && !(sf->isnested && sf->outer && sf->outer->checkfree))
+        s += "checkfree ";
     if (sf->issimd) s += "simd ";
     if (sf->isinline) s += "inline ";
     if (sf->isrec) s += "recursive ";
@@ -582,6 +688,7 @@ inline void FnDecl::Dump(string &s, int ind) const {
         }
     }
     if (sf->isextern) {
+        if (sf->cname != sf->name) { s += " = "; EscapeString(s, sf->cname, '"'); }
         s += ";";
         return;
     }
@@ -624,10 +731,74 @@ inline void AliasDecl::Dump(string &s, int) const {
 }
 
 inline void Ast::Dump(string &s) const {
+    // The members of an extern block (§7.10) are consecutive declarations
+    // with its library, printed back inside the block; two blocks of one
+    // library in a row print as one, which declares the same.
+    string openlib;
     for (auto d : topdecls) {
+        auto fd = Is<FnDecl>(d);
+        auto lib = fd && !fd->sf->dylib.empty() ? fd->sf->dylib : string();
+        if (!openlib.empty() && lib != openlib) {
+            s += "}\n";
+            openlib.clear();
+        }
+        if (!lib.empty() && openlib.empty()) {
+            s += "extern ";
+            EscapeString(s, lib, '"');
+            s += " {\n";
+            openlib = lib;
+        }
+        if (!openlib.empty()) s += "    ";
         d->Dump(s, 0);
         if (Is<VarDecl>(d)) s += ";";  // Globals; other decl kinds self-terminate.
         s += "\n";
+    }
+    if (!openlib.empty()) s += "}\n";
+}
+
+// What --dump-docs prints: the documentation comments (Lexer::doc) of the
+// top-level declarations, in source order, and of their fields and
+// variants: a line naming each one that has one (`fn add`, `field
+// Point.x`, `variant Shape.Circle`), then the comment's lines, each less
+// its indentation and indented by four spaces.
+inline void DumpDocs(Ast &ast, string &s) {
+    auto doc = [&](const string &head, string_view text) {
+        if (text.empty()) return;
+        Append(s, head, "\n");
+        for (size_t pos = 0; pos <= text.size();) {
+            auto end = text.find('\n', pos);
+            if (end == string_view::npos) end = text.size();
+            auto line = text.substr(pos, end - pos);
+            if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+            auto first = line.find_first_not_of(" \t");
+            Append(s, "    ", first == string_view::npos ? string_view() : line.substr(first),
+                   "\n");
+            pos = end + 1;
+        }
+    };
+    auto fields = [&](const string &owner, const vector<Field> &fs) {
+        for (auto &f : fs)
+            if (!f.ispad) doc(cat("field ", owner, ".", f.name), f.doc);
+    };
+    for (auto d : ast.topdecls) {
+        if (auto fd = Is<FnDecl>(d)) {
+            doc(cat("fn ", fd->sf->qname), fd->sf->doc);
+        } else if (auto sd = Is<StructDecl>(d)) {
+            doc(cat("struct ", sd->st->qname), sd->st->doc);
+            fields(string(sd->st->qname), sd->st->fields);
+        } else if (auto ed = Is<EnumDecl>(d)) {
+            doc(cat("enum ", ed->en->qname), ed->en->doc);
+            for (auto &v : ed->en->variants) {
+                auto name = cat(ed->en->qname, ".", v.name);
+                doc(cat("variant ", name), v.doc);
+                fields(name, v.fields);
+            }
+        } else if (auto ad = Is<AliasDecl>(d)) {
+            doc(cat("type ", ad->al->qname), ad->al->doc);
+        } else if (auto vd = Is<VarDecl>(d)) {
+            doc(cat(vd->isconst ? "const " : vd->isvar ? "var " : "let ",
+                    ast.QualifiedName(vd->ns, vd->names[0])), vd->doc);
+        }
     }
 }
 

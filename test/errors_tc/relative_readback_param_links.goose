@@ -1,10 +1,6 @@
-// error: a relative reference must point within the same root as its location
-// error: it was read out of keep and may point into the caller's storage behind pool
-// A reference kept in a local array after it was read out of a parameter's
-// pointee may point wherever the caller's links lead, here into other: the
-// parameter's class only bounds it, so it is no identity for the relative
-// store, although pool's class is the one candidate that can hold a Node
-// (§9.5, §3.9).
+// error: a relative reference must point within the same root as its location (§3.9); this reference is rooted at pool
+// The holder's links name the caller's other pool, so they cannot be stored
+// as self-relative links in this pool.
 struct Node { key: i32, plain: Node&?, next: Node&<u32>? }
 fn relink(pool: Node[>..]&) {
     var keep: (Node&?)[>..] = [];

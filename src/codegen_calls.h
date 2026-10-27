@@ -88,19 +88,24 @@ void CodeGen::EmitCallInto(Call *c, vector<Dst> &dsts) {
     }
 }
 
-// A call to an extern fn (§7.10): the C function directly, each argument
-// in its C type, no calling-convention extras; a fixed result lands in
-// a temporary like any other C value.
+// A call to an extern fn (§7.10): the C function directly, or through the
+// pointer the runtime bound from its shared library, each argument in its
+// C type, no calling-convention extras; a fixed result lands in a
+// temporary like any other C value.
 vector<string> CodeGen::EmitExternCall(Call *c, FnSpec *sp) {
     if (std::find(usedexterns.begin(), usedexterns.end(), sp) == usedexterns.end())
         usedexterns.push_back(sp);
+    auto callee = sp->sf->dylib.empty() ? sp->sf->cname : DlCall(sp);
     auto an = CallArgNodes(c, sp->argtypes.size());
     string argstr;
     // A builder argument (`u8[>..]&`, or a value holding one) is appended
     // to by the C side through its stack's top, so a cached top is written
     // back before the call and read again after it, as for a call into
     // Goose code.
-    auto grows = false;
+    // An extern that reads every top (SFunction::readsalltops) sees none of
+    // them through its arguments, so all cached ones are written back too;
+    // CollectSpecs makes every caller up the chain do the same.
+    auto grows = sp->sf->readsalltops;
     for (size_t i = 0; i < an.size(); i++) {
         auto pt = sp->argtypes[i];
         if (i) argstr += ", ";
@@ -111,26 +116,44 @@ vector<string> CodeGen::EmitExternCall(Call *c, FnSpec *sp) {
     if (grows) MarkFlush();
     vector<string> rets;
     if (sp->rets.empty()) {
-        L(sp->sf->cname, "(", argstr, ");");
+        L(callee, "(", argstr, ");");
     } else {
         auto r0 = T();
-        L(CT(sp->rets[0]), " ", r0, " = ", sp->sf->cname, "(", argstr, ");");
+        L(CT(sp->rets[0]), " ", r0, " = ", callee, "(", argstr, ");");
         rets.push_back(r0);
     }
     if (grows) MarkReload();
     return rets;
 }
 
-// The C prototype of an extern fn, from its Goose declaration (§7.10).
+// The C prototype of an extern fn, from its Goose declaration (§7.10); for
+// one bound from a shared library, the declaration of the pointer it is
+// called through, which gs_dl_bind fills, and the function calls go through
+// to reach it, which leaves the call out of clang's function-type check
+// (GS_DL_CALL).
 string CodeGen::ExternProto(FnSpec *sp) {
-    string s = sp->rets.empty() ? string("void") : CT(sp->rets[0]);
-    Append(s, " ", sp->sf->cname, "(");
+    auto dynamic = !sp->sf->dylib.empty();
+    auto ret = sp->rets.empty() ? string("void") : CT(sp->rets[0]);
+    string s = dynamic ? "static " : "";
+    s += ret;
+    if (dynamic) Append(s, " (*", DlSlot(sp), ")(");
+    else Append(s, " ", sp->sf->cname, "(");
+    string params, args;
     for (size_t i = 0; i < sp->argtypes.size(); i++) {
-        if (i) s += ", ";
+        if (i) {
+            s += ", ";
+            params += ", ";
+            args += ", ";
+        }
         s += CT(sp->argtypes[i]);
+        Append(params, CT(sp->argtypes[i]), " a", i);
+        Append(args, "a", i);
     }
-    if (sp->argtypes.empty()) s += "void";
+    if (sp->argtypes.empty()) s += "void", params = "void";
     s += ");\n";
+    if (dynamic)
+        Append(s, "static GS_DL_CALL ", ret, " ", DlCall(sp), "(", params, ") { ",
+               sp->rets.empty() ? "" : "return ", DlSlot(sp), "(", args, "); }\n");
     return s;
 }
 
@@ -143,7 +166,8 @@ vector<Node *> CodeGen::CallArgNodes(Call *c, size_t nparams) {
 }
 
 // One argument by the parameter's calling convention; appends to args.
-void CodeGen::EmitArg(FnSpec *sp, size_t i, Node *node, vector<string> &args) {
+void CodeGen::EmitArg(FnSpec *sp, size_t i, Node *node, vector<string> &args,
+                             bool later) {
     auto pt = sp->argtypes[i];
     if (IsPoolParam(sp, i)) {
         PushArg(args, pt, true, GenPrefVal(node));
@@ -171,14 +195,19 @@ void CodeGen::EmitArg(FnSpec *sp, size_t i, Node *node, vector<string> &args) {
     // A relative reference parameter takes the argument's offset (§3.9). The
     // `in pool` form's is the same in the callee's copy; a self-relative one
     // can only be null, which is zero wherever it is.
-    if (pt->kind == TY_REF && pt->ref->lenstorage >= 0) {
+    if (IsRelRef(pt)) {
         auto t = T();
         L(CT(pt), " ", t, ";");
         EmitRelStoreAt(cat("(uint8_t *)&", t), pt, GenX(node), node->line, true, RelValue(node));
         args.push_back(t);
         return;
     }
-    auto value = Snapshot(pt, GenXD(node, pt));
+    // A value read before later arguments that run statements lands in a
+    // temp, as one passed by its address always does; otherwise C copies
+    // the expression's value into the parameter at the call (GenOperandVal).
+    auto x = GenXD(node, pt);
+    auto value = later || IsLargeFixed(pt) || (HasStmts(node) && !IsCName(x)) ? Snapshot(pt, x)
+                                                                              : x;
     if (IsLargeFixed(pt)) args.push_back(cat("&", value));
     else PushArg(args, pt, false, value);
 }
@@ -237,7 +266,10 @@ vector<string> CodeGen::EmitSpecCall(Call *c, FnSpec *sp, Dst d0, vector<Dst> *a
     string reprefixbase, reprefixcnt;
     Dst reprefix;
     vector<string> args;
-    for (size_t i = 0; i < an.size(); i++) EmitArg(sp, i, an[i], args);
+    // Whether the arguments after each one run statements (EmitArg).
+    vector<bool> later(an.size() + 1, false);
+    for (size_t i = an.size(); i-- > 0;) later[i] = later[i + 1] || HasStmts(an[i]);
+    for (size_t i = 0; i < an.size(); i++) EmitArg(sp, i, an[i], args, later[i + 1]);
     for (auto fv : ki.freevars) EmitFvArg(c->FreeVarArg(fv), args);
     vector<string> retex(sp->rets.size());
     for (size_t i = 0; i < sp->rets.size(); i++) {
@@ -307,7 +339,8 @@ vector<string> CodeGen::EmitSpecCall(Call *c, FnSpec *sp, Dst d0, vector<Dst> *a
         } else if ((int)i != ki.cret) {
             // A reference the destination loads through lands in a
             // temporary first (EmitCallInto).
-            if (dd.k == DK_LVALUE && !NeedsDeref(rt, dd.t)) {
+            if (dd.k == DK_LVALUE && !NeedsDeref(rt, dd.t) &&
+                (!NeedsResultLocation(rt) || (dd.t && TEq(rt, dd.t)))) {
                 retex[i] = dd.s;
                 args.push_back(cat("&", dd.s));
             } else {
@@ -347,8 +380,6 @@ vector<string> CodeGen::EmitSpecCall(Call *c, FnSpec *sp, Dst d0, vector<Dst> *a
         // report the count (the one caller-side copy of this fallback).
         EmitSlidePrefix(slidebase, LenStore(sp->rets[0]->arr), slide.s, slide.lenlv);
     }
-    // A fixed first return requested onto a stack: store it (mixed cases
-    // are handled above via cret; nothing more to do here).
     return retex;
 }
 
@@ -392,7 +423,7 @@ void CodeGen::EmitReprefix(FnSpec *sp, const Dst &dd, const string &base,
         auto tmp = T();
         L("uint8_t ", tmp, "[10];");
         L("int64_t ", ms, " = gs_uleb_write(", tmp, ", (uint64_t)", count, ");");
-        writepref = cat("memcpy(", base, ", ", tmp, ", (size_t)", ms, ");");
+        writepref = cat("GS_MEMCPY(", base, ", ", tmp, ", (size_t)", ms, ");");
     } else {
         L("int64_t ", ms, " = ", IntSize(ls), ";");
         writepref = cat("*(", IntCT(ls), " *)", base, " = (", IntCT(ls), ")", count, ";");
@@ -419,6 +450,7 @@ void CodeGen::EmitRfCheck(FnSpec *callee) {
         string retv;
         for (size_t i = 0; i < curspec->rets.size(); i++) {
             auto rt = curspec->rets[i];
+            if (NeedsResultLocation(rt)) continue;   // The channel names the receiver itself.
             auto lret = cat("gs_lret_", tid, "_", i);
             // The value is on our destination, behind anything the calls it
             // unwound had built there: down to where our caller expects it.
@@ -551,6 +583,7 @@ vector<string> CodeGen::EmitDispatch(Call *c, Dst d0, vector<Dst> *alldst) {
     auto ei = EIOf(enumtype);
     auto ts = TagSize(ei->en);
     string p, copied, sv, tag;
+    vector<string> snap(ei->en->variants.size());
     auto scrutinee = [&]() {
         if (varmode) {
             if (isref) {
@@ -560,20 +593,36 @@ vector<string> CodeGen::EmitDispatch(Call *c, Dst d0, vector<Dst> *alldst) {
             } else {
                 p = GenPtr(sn);
             }
+            tag = cat("*(", IntCT(TagStore(ei->en)), " *)", p);
             // A reference input can also decay to a by-value case parameter.
             // Copy its value now; reference cases retain the original pointer.
-            auto wantsvalue = false;
-            for (auto sp : c->dispatch)
-                wantsvalue |= sp->argtypes[pos]->kind != TY_REF;
-            if (wantsvalue) {
+            // Only a variable-size variant needs the whole value on a data
+            // stack. A fixed-size one is copied on its own and an empty one
+            // not at all, so a call into a recursive cycle, whose by-value
+            // parameters are fixed-size (§7.8), holds no stack across it.
+            auto wholecopy = false;
+            for (size_t vi = 0; vi < snap.size(); vi++)
+                wholecopy |= c->dispatch[vi]->argtypes[pos]->kind != TY_REF &&
+                             IsBytesT(VariantType(enumtype, (int)vi));
+            if (wholecopy) {
                 string stk;
                 copied = BytesTemp(stk);
                 auto sz = T();
                 L("int64_t ", sz, " = ", SizeX(enumtype, p), ";");
-                L("memcpy(", Top(stk), ", ", p, ", (size_t)", sz, ");");
+                L("GS_MEMCPY(", Top(stk), ", ", p, ", (size_t)", sz, ");");
                 Bump(stk, sz);
+            } else {
+                for (size_t vi = 0; vi < snap.size(); vi++) {
+                    if (c->dispatch[vi]->argtypes[pos]->kind == TY_REF ||
+                        EmptyLayout(ei->en->variants[vi].fields))
+                        continue;
+                    auto vt = VariantType(enumtype, (int)vi);
+                    snap[vi] = T();
+                    FixedLocal(vt, snap[vi], "{0}");
+                    L("if (", tag, " == ", TagConst(ei, (int)vi), ") ", snap[vi], " = *(", CT(vt),
+                      " *)(", p, " + ", ts, ");");
+                }
             }
-            tag = cat("*(", IntCT(TagStore(ei->en)), " *)", p);
         } else {
             auto value = GenXD(sn, enumtype);
             sv = T();
@@ -582,31 +631,13 @@ vector<string> CodeGen::EmitDispatch(Call *c, Dst d0, vector<Dst> *alldst) {
         }
     };
     // Evaluate every argument in source order, including the dispatched
-    // argument; its position is not necessarily the first one.
-    vector<string> shared(an.size());
-    vector<string> sharedstk(an.size());
+    // argument; its position is not necessarily the first one. The others
+    // become the C arguments every arm passes, read before the switch (the
+    // cases agree on those parameters' types).
+    vector<vector<string>> shared(an.size());
     for (size_t i = 0; i < an.size(); i++) {
-        if ((int)i == pos) { scrutinee(); continue; }
-        auto pt = sp0->argtypes[i];
-        if (IsPoolParam(sp0, i)) {
-            shared[i] = GenPrefVal(an[i]);
-        } else if (IsResz(pt)) {
-            string stk;
-            auto h = RzTemp(pt, stk);
-            GenConstruct(an[i], stk, pt, RzLenLv(pt, h));
-            shared[i] = h;
-            sharedstk[i] = stk;
-        } else if (IsBytesT(pt)) {
-            string stk;
-            auto base = BytesTemp(stk);
-            GenConstruct(an[i], stk, pt);
-            shared[i] = base;
-            sharedstk[i] = stk;
-        } else {
-            auto value = GenXD(an[i], pt);
-            shared[i] = T();
-            FixedLocal(pt, shared[i], value);
-        }
+        if ((int)i == pos) scrutinee();
+        else EmitArg(sp0, i, an[i], shared[i], true);
     }
     // Shared return channels.
     vector<string> retex(sp0->rets.size());
@@ -635,6 +666,8 @@ vector<string> CodeGen::EmitDispatch(Call *c, Dst d0, vector<Dst> *alldst) {
             retex[i] = BytesResultBase(dd, stk);
             dststk[i] = stk;
             if (i == 0 && NeedsReprefix(dd, rt)) reprefix = dd;
+        } else if (NeedsResultLocation(rt) && dd.k == DK_LVALUE && TEq(rt, dd.t)) {
+            retex[i] = dd.s;
         } else {
             auto tv = T();
             FixedLocal(rt, tv);
@@ -667,6 +700,8 @@ vector<string> CodeGen::EmitDispatch(Call *c, Dst d0, vector<Dst> *alldst) {
             auto tv = T();
             FixedLocal(vt, tv, "{0}");
             varg = tv;
+        } else if (!snap[vi].empty()) {
+            varg = snap[vi];
         } else if (!payload.empty()) {
             auto tv = T();
             FixedLocal(vt, tv, cat("*(", CT(vt), " *)(", payload, ")"));
@@ -679,17 +714,14 @@ vector<string> CodeGen::EmitDispatch(Call *c, Dst d0, vector<Dst> *alldst) {
         // Assemble the arm's call.
         vector<string> args;
         for (size_t i = 0; i < an.size(); i++) {
-            auto pt = sp->argtypes[i];
-            auto &v = (int)i == pos ? varg : shared[i];
-            if (IsLargeFixed(pt)) args.push_back(cat("&", v));
-            else if (IsResz(pt)) args.push_back(v);
-            else PushArg(args, pt, IsPoolParam(sp, i), v);
-            if ((int)i == pos) {
-                if (IsBytesT(pt) && IsResz(pt))
-                    Fail(c->line, "resizable by-value dispatch payloads are unsupported");
-            } else if (IsBytesT(pt) && IsResz(pt)) {
-                args.push_back(sharedstk[i]);
+            if ((int)i != pos) {
+                args.insert(args.end(), shared[i].begin(), shared[i].end());
+                continue;
             }
+            auto pt = sp->argtypes[i];
+            if (IsResz(pt)) Fail(c->line, "resizable by-value dispatch payloads are unsupported");
+            if (IsLargeFixed(pt)) args.push_back(cat("&", varg));
+            else PushArg(args, pt, IsPoolParam(sp, i), varg);
         }
         for (auto fv : ki.freevars) EmitFvArg(c->FreeVarArg(fv), args);
         for (size_t i = 0; i < sp->rets.size(); i++) {

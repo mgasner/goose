@@ -1,0 +1,18 @@
+2 5 7 9
+x:3
+y:4
+x:4
+y:5
+count=300
+data=abc
+tail=[4, 5]
+tag=1
+tail=[2, 3]
+Point { 0, 0 }
+[0, 0]
+
+4
+4
+1
+1
+true

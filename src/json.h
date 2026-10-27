@@ -1,9 +1,38 @@
 // Goose compiler — a JSON reader, for what CMake's file API replies about
 // a package's link line (native.h). Enough of JSON for that: objects,
-// arrays, strings with their escapes, numbers, true, false and null.
+// arrays, strings with their escapes, numbers, true, false and null. And a
+// string with its escapes, for what the compiler writes as JSON: the
+// diagnostics `--diagnostics json` prints (main.cpp), `goose toolchain
+// --json` (toolchain.h) and the language server's messages (lsp_rpc.h).
 #pragma once
 
 namespace goose {
+
+// Appends v as a JSON string literal. The text is UTF-8 and goes through as
+// it is; the characters JSON cannot hold in a string are escaped.
+inline void JsonQuote(string &s, string_view v) {
+    s += '"';
+    for (auto c : v) {
+        switch (c) {
+            case '"':  s += "\\\""; break;
+            case '\\': s += "\\\\"; break;
+            case '\b': s += "\\b"; break;
+            case '\f': s += "\\f"; break;
+            case '\n': s += "\\n"; break;
+            case '\r': s += "\\r"; break;
+            case '\t': s += "\\t"; break;
+            default:
+                if ((uint8_t)c < 0x20) {
+                    char buf[8];
+                    snprintf(buf, sizeof buf, "\\u%04x", (unsigned)(uint8_t)c);
+                    s += buf;
+                } else {
+                    s += c;
+                }
+        }
+    }
+    s += '"';
+}
 
 struct Json {
     enum Kind { NUL, BOOL, NUMBER, STRING, ARRAY, OBJECT } kind = NUL;

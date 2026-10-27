@@ -4,9 +4,11 @@
 // included; integers that do and do not fit an i64; numbers that take the
 // exact rounding (halfway cases, the subnormals, the edges of the range),
 // through the tree and the reader alike; random doubles written and read
-// back to the bit; deep nesting; every kind of malformed text, with the
-// error it gives; and the reader mapping objects onto a struct, passing over
-// what it does not know, with its errors.
+// back to the bit; the fast paths of reading and writing numbers, at their
+// edges and against the exact paths on random input; deep nesting; every
+// kind of malformed text, with the error it gives; and the reader mapping
+// objects onto a struct, passing over what it does not know, with its
+// errors.
 import std;
 import json;
 
@@ -246,6 +248,76 @@ fn main() {
         if !(back == v && 1.0 / back == 1.0 / v) { mismatches++; print("no round trip: ", text); }
     }
     print(mismatches, " random doubles that did not read back");
+
+    // The fast paths: 17 significant digits as canada.json has them, some
+    // of which the whole part and the fraction cannot round alone; halfway
+    // cases of up to 19 digits and their neighbours, below a power of two
+    // too; powers of ten either side of the 10^27 the 128-bit path stops at;
+    // and the shortest forms of sums, products and the edges of the range
+    // the writer finds them exactly in.
+    let near = ["-65.613616999999977", "43.420273000000009", "-65.625", "630.42296422490341",
+                "301.87580473918311", "463.49361245919809", "692.949740521430783",
+                "4503599627370497.5", "4503599627370498.5", "4503599627370497.49", "4503599627370497.51",
+                "9007199254740993", "18014398509481986", "18014398509481990", "0.30000000000000004",
+                "0.12345678901234567", "0.99999999999999994", "0.99999999999999995",
+                "1.2345678901234567e-5", "9.999999999999999e22", "1234567890123456789e-27",
+                "2.2250738585072009e-308", "1e-310"];
+    for t in near { print(t, " => ", number(parsed(t))); }
+    out.clear();
+    for e in -30..31 {
+        text.clear();
+        format(text, "1e", e);
+        if e > -30 { out.push(' '); }
+        json::format_number(out, parsed(text));
+    }
+    print(out);
+    let sums = [0.1 + 0.2, 0.1 + 0.7, 1.1 * 1.1, 4.35 * 100.0, 100.0 / 3.0, 2.675, 5e-5, 123456.789,
+                -1e-10, 9.999999999999999e-11, 1.0000000000000001e-10, 2251799813685248.0,
+                2251799813685247.75, -4503599627370495.5, 0.125, 7.0, 8.5e-10];
+    out.clear();
+    for v, i in sums {
+        if i > 0 { out.push(' '); }
+        json::format_number(out, v);
+    }
+    print(out);
+
+    // Random doubles across the writer's fast range and past both its ends
+    // written as the general path writes them, and random decimals of 16 to
+    // 19 digits read as the big-integer rounding reads them.
+    var differ = 0;
+    var other: u8[>..] = [];
+    for k in 20000 {
+        let m = (r.rand_u64() >> 11) | 0x10000000000000;
+        let v = ldexp(m, (r.rand_int(91) - 90) as! i32);
+        text.clear();
+        other.clear();
+        json::format_number(text, v);
+        json::format_other(other, v);
+        if text != other { differ++; print("written as ", text, ", not ", other); }
+    }
+    for k in 20000 {
+        text.clear();
+        let shape = r.rand_int(3);
+        var frac = 0;
+        if shape == 0 {
+            text.push(('1' + r.rand_int(9)) as! u8);
+            for i in r.rand_int(3) { text.push(('0' + r.rand_int(10)) as! u8); }
+            frac = r.rand_int(5) + 13;
+        } else if shape == 1 {
+            text.push('0');
+            frac = r.rand_int(4) + 16;
+        } else {
+            text.push(('1' + r.rand_int(9)) as! u8);
+            for i in r.rand_int(4) + 15 { text.push(('0' + r.rand_int(10)) as! u8); }
+        }
+        if frac > 0 {
+            text.push('.');
+            for i in frac { text.push(('0' + r.rand_int(10)) as! u8); }
+        }
+        let v = parsed(text);
+        if v != float_text::round_exact(text, 0, text.len, -frac, v) { differ++; print("misread ", text); }
+    }
+    print(differ, " random numbers written or read otherwise");
 
     // The reader.
     let items_text = """

@@ -1,10 +1,23 @@
-"""The binary inspector (tools/inspect, docs/design/inspect.md) on a program
-built here, checked by what must hold rather than against a golden file,
-since addresses and instructions depend on the C compiler: every symbol it
-decodes to a Goose name is the name the program's --map gives that
-function, an address resolves to the function its symbol starts, the bytes
-it shows are the file's, and a truncated or foreign file is an error it
-reports, never a fault. Mach-O only, for now."""
+"""The binary inspector (tools/inspect, docs/design/inspect.md).
+
+Everywhere: the arm64 decoder against objdump's text for the encodings of
+test/inspect/arm64_words.txt (Apple's syntax) and arm64_words_elf.txt
+(LLVM's generic one), and the ELF reader on two objects checked in,
+test/inspect/sieve-{arm64,x86_64}.o, against what it was found to say when
+that agreed with dwarfdump and objdump (sieve-*.lines, sieve-arm64.disasm).
+Those objects are samples/07_sieve.goose's C (`goose -O1 --lines`, run in
+the repository), compiled with `clang -target aarch64-linux-gnu` and
+`x86_64-linux-gnu`, `-c -g -O1 -fdebug-prefix-map=<repo>=/goose
+-fdebug-prefix-map=<build dir>=/build`; tools/inspect/compare_objdump.py
+--table writes the word lists.
+
+On macOS, a program built here, checked by what must hold rather than
+against a golden file, since addresses and instructions depend on the C
+compiler: every symbol it decodes to a Goose name is the name the
+program's --map gives that function, an address resolves to the function
+its symbol starts, the bytes it shows are the file's, its lines are inside
+the map's functions, and a truncated or foreign file is an error it
+reports, never a fault."""
 import json
 import re
 import subprocess
@@ -14,9 +27,9 @@ import toolchain as tc
 
 
 def check_inspect(exe, cc, base, *, runtime, extra=()):
-    """Raises RuntimeError on a failure; does nothing off macOS or with
-    no C compiler."""
-    if not cc or not tc.IS_MACOS or cc.style == "msvc":
+    """Raises RuntimeError on a failure; does nothing with no C compiler.
+    The program built here is checked on macOS alone, where it is Mach-O."""
+    if not cc or cc.style == "msvc":
         return
     base = (Path(base) / "inspect").resolve()
     base.mkdir(parents=True, exist_ok=True)
@@ -41,6 +54,9 @@ def check_inspect(exe, cc, base, *, runtime, extra=()):
         return binary
 
     inspect = build(tc.REPO_ROOT / "tools" / "inspect" / "inspect.goose", "inspect", 1)
+    check_decoder_and_elf(run, inspect)
+    if not tc.IS_MACOS:
+        return
     mapfile = base / "sorting.goosemap"
     prog = build(tc.REPO_ROOT / "samples" / "09_sorting.goose", "sorting", 0,
                  ("--lines", "--map", mapfile), ("-g",))
@@ -111,25 +127,6 @@ def check_inspect(exe, cc, base, *, runtime, extra=()):
     if code != 1 or "no line information" not in err:
         raise RuntimeError(f"lines without a .dSYM: exit {code}\n{out}{err}")
 
-    # The arm64 decoder: every encoding of the table as LLVM prints it, or
-    # .word where neither knows it (test/inspect/arm64_words.txt).
-    table = tc.REPO_ROOT / "test" / "inspect" / "arm64_words.txt"
-    code, out, err = run([inspect, "decode", table])
-    want = [l.split(None, 2) for l in table.read_text().splitlines() if l and not l.startswith("#")]
-    got = [l.split(None, 2) for l in out.splitlines()]
-    if code or len(got) != len(want):
-        raise RuntimeError(f"decode: exit {code}, {len(got)} of {len(want)} lines\n{err}")
-    def norm(t):
-        return re.sub(r"\s+", " ", re.sub(r"\s*;.*$", "", t)).strip()
-    # A ? row may stay .word; no row may decode as anything but objdump's.
-    def matches(expected, ours):
-        ours = ".word" if ours.startswith(".word") else norm(ours)
-        return ours == expected.lstrip("?") or (expected.startswith("?") and ours == ".word")
-    wrong = [f"{w[1]}: {norm(g[2])!r}, objdump {w[2]!r}" for w, g in zip(want, got)
-             if not matches(w[2], g[2])]
-    if wrong:
-        raise RuntimeError(f"decode: {len(wrong)} of {len(want)} differ: " + "; ".join(wrong[:8]))
-
     # A function disassembled with its source, and every instruction of the
     # program known.
     code, out, err = run([inspect, "disasm", prog, "main_g"])
@@ -175,3 +172,48 @@ def check_inspect(exe, cc, base, *, runtime, extra=()):
             code, out, err = run([inspect, cmd, path])
             if code != 1 or not err.startswith("inspect: ") or "runtime error" in err:
                 raise RuntimeError(f"{cmd} on {name}: exit {code}\n{err}")
+
+
+def norm(t):
+    return re.sub(r"\s+", " ", re.sub(r"\s*(;|//).*$", "", t)).strip()
+
+
+def check_decoder_and_elf(run, inspect):
+    data_dir = tc.REPO_ROOT / "test" / "inspect"
+    # The arm64 decoder: every encoding of a table as LLVM prints it, or
+    # .word where neither knows it; a ? row may stay .word, and no row may
+    # decode as anything but objdump's.
+    for name, flags in (("arm64_words.txt", []), ("arm64_words_elf.txt", ["--elf"])):
+        table = data_dir / name
+        code, out, err = run([inspect, "decode", table, *flags])
+        want = [l.split(None, 2) for l in table.read_text().splitlines() if l and not l.startswith("#")]
+        got = [l.split(None, 2) for l in out.splitlines()]
+        if code or len(got) != len(want):
+            raise RuntimeError(f"decode {name}: exit {code}, {len(got)} of {len(want)} lines\n{err}")
+
+        def matches(expected, ours):
+            ours = ".word" if ours.startswith(".word") else norm(ours)
+            return ours == expected.lstrip("?") or (expected.startswith("?") and ours == ".word")
+        wrong = [f"{w[1]}: {norm(g[2])!r}, objdump {w[2]!r}" for w, g in zip(want, got)
+                 if not matches(w[2], g[2])]
+        if wrong:
+            raise RuntimeError(f"decode {name}: {len(wrong)} of {len(want)} differ: " +
+                               "; ".join(wrong[:8]))
+    # The ELF reader, on objects whose sections are laid out and whose debug
+    # relocations are applied as the inspector does it.
+    for arch in ("arm64", "x86_64"):
+        obj = data_dir / f"sieve-{arch}.o"
+        code, out, err = run([inspect, "sections", obj])
+        if code or f"ELF {arch}" not in out or not re.search(r"^  \.text .* code$", out, re.MULTILINE):
+            raise RuntimeError(f"sections of {obj.name}: exit {code}\n{out}{err}")
+        code, out, err = run([inspect, "lines", obj, "main"])
+        expected = (data_dir / f"sieve-{arch}.lines").read_text()
+        if code or out != expected:
+            raise RuntimeError(f"lines of {obj.name} differ from {obj.stem}.lines:\n{out[:1500]}{err}")
+    obj = data_dir / "sieve-arm64.o"
+    code, out, err = run([inspect, "disasm", obj, "0x1000", "0x700"])
+    if code or out != (data_dir / "sieve-arm64.disasm").read_text():
+        raise RuntimeError(f"disasm of {obj.name} differs from sieve-arm64.disasm:\n{out[:1500]}{err}")
+    code, out, err = run([inspect, "disasm", data_dir / "sieve-x86_64.o", "main"])
+    if code != 1 or "arm64 only" not in err:
+        raise RuntimeError(f"disasm of x86-64: exit {code}\n{out}{err}")

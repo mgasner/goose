@@ -1,0 +1,180 @@
+main
+  0x000001000  sieve.c:2350
+  0x000001024  sieve.c:2343:9
+  0x00000103c  sieve.c:1007:5
+  0x000001054  sieve.c:996:27
+  0x000001064  sieve.c:997:9
+  0x000001068  sieve.c: no line
+  0x00000106c  sieve.c:998:52
+  0x000001070  sieve.c:990:14
+  0x00000107c  sieve.c:998:27
+  0x000001088  sieve.c:2333:37
+  0x000001098  sieve.c:990:14
+  0x00000109c  sieve.c:2333:37
+  0x0000010a0  sieve.c:990:14
+  0x0000010a4  sieve.c: no line
+  0x0000010a8  sieve.c:2338:28
+  0x0000010ac  sieve.c:990:12
+  0x0000010b0  sieve.c:2347:28
+  0x0000010b4  07_sieve.goose:15
+  0x0000010b8  07_sieve.goose:19
+  0x0000010c4  07_sieve.goose:15
+  0x0000010cc  07_sieve.goose:19
+  0x0000010d4  07_sieve.goose:20
+  0x0000010d8  07_sieve.goose: no line
+  0x0000010e0  07_sieve.goose:22
+  0x0000010e8  07_sieve.goose: no line
+  0x0000010ec  07_sieve.goose:31
+  0x0000010f0  07_sieve.goose:24
+  0x0000010fc  07_sieve.goose: no line
+  0x000001100  07_sieve.goose:25
+  0x000001114  07_sieve.goose:29
+  0x00000111c  07_sieve.goose:25
+  0x00000112c  07_sieve.goose:33
+  0x000001130  07_sieve.goose:37
+  0x000001134  07_sieve.goose:38
+  0x00000113c  07_sieve.goose: no line
+  0x000001148  07_sieve.goose:37
+  0x00000114c  07_sieve.goose:39
+  0x000001158  07_sieve.goose:38
+  0x000001168  07_sieve.goose:39
+  0x000001174  07_sieve.goose:40
+  0x00000117c  07_sieve.goose:42
+  0x000001180  07_sieve.goose:41
+  0x000001188  07_sieve.goose:42
+  0x000001190  07_sieve.goose:39
+  0x0000011a4  07_sieve.goose: no line
+  0x0000011b0  07_sieve.goose:22
+  0x0000011b4  07_sieve.goose:33
+  0x0000011b8  07_sieve.goose: no line
+  0x0000011bc  07_sieve.goose:39
+  0x0000011c8  07_sieve.goose: no line
+  0x0000011dc  07_sieve.goose:39
+  0x0000011f0  07_sieve.goose:40
+  0x0000011f8  07_sieve.goose: no line
+  0x0000011fc  07_sieve.goose:41
+  0x000001204  07_sieve.goose: no line
+  0x00000120c  07_sieve.goose:42
+  0x00000121c  07_sieve.goose: no line
+  0x000001220  07_sieve.goose:47
+  0x000001228  07_sieve.goose:39
+  0x00000122c  07_sieve.goose: no line
+  0x000001230  07_sieve.goose:47
+  0x00000123c  07_sieve.goose:48
+  0x000001240  07_sieve.goose:47
+  0x000001244  07_sieve.goose:48
+  0x000001250  07_sieve.goose:47
+  0x000001258  07_sieve.goose:50
+  0x000001264  07_sieve.goose: no line
+  0x00000126c  07_sieve.goose:50
+  0x000001270  07_sieve.goose: no line
+  0x000001278  sieve.c:433:13
+  0x000001284  07_sieve.goose:50
+  0x00000128c  07_sieve.goose: no line
+  0x000001294  07_sieve.goose:50
+  0x00000129c  sieve.c:432:13
+  0x0000012a0  sieve.c:433:13
+  0x0000012a4  07_sieve.goose:50
+  0x0000012a8  07_sieve.goose: no line
+  0x0000012ac  07_sieve.goose:50
+  0x0000012c0  07_sieve.goose: no line
+  0x0000012c4  07_sieve.goose:54
+  0x0000012c8  sieve.c:433:13
+  0x0000012cc  sieve.c: no line
+  0x0000012e4  07_sieve.goose:54
+  0x0000012e8  07_sieve.goose: no line
+  0x0000012ec  sieve.c:432:13
+  0x0000012fc  std.goose:1074
+  0x000001304  sieve.c:433:13
+  0x000001308  std.goose:1074
+  0x00000130c  std.goose: no line
+  0x000001310  std.goose:1074
+  0x000001318  std.goose:1079
+  0x000001320  std.goose:1081
+  0x000001324  std.goose: no line
+  0x000001328  std.goose:1080
+  0x000001338  std.goose:1075
+  0x000001348  std.goose: no line
+  0x00000135c  std.goose:1087
+  0x000001360  std.goose: no line
+  0x000001364  std.goose:1087
+  0x00000136c  std.goose: no line
+  0x000001370  sieve.c:822:37
+  0x000001380  sieve.c:823:12
+  0x00000138c  sieve.c:822:74
+  0x000001390  sieve.c: no line
+  0x000001394  std.goose:1089
+  0x000001398  std.goose:1007
+  0x0000013a0  std.goose:1089
+  0x0000013b0  std.goose:1007
+  0x0000013b8  std.goose: no line
+  0x0000013bc  std.goose:1007
+  0x0000013c0  std.goose:1089
+  0x0000013c4  std.goose:1092
+  0x0000013c8  std.goose:1008
+  0x0000013cc  std.goose: no line
+  0x0000013d0  std.goose:1089
+  0x0000013d4  std.goose: no line
+  0x0000013d8  std.goose:1091
+  0x0000013dc  std.goose:1007
+  0x0000013e0  std.goose:1092
+  0x0000013f0  std.goose:1007
+  0x0000013f8  std.goose:1092
+  0x000001400  std.goose:1008
+  0x000001408  std.goose:1092
+  0x00000140c  std.goose:1091
+  0x000001410  std.goose:1092
+  0x000001414  std.goose:1007
+  0x000001418  std.goose: no line
+  0x00000141c  07_sieve.goose:55
+  0x000001420  07_sieve.goose:56
+  0x000001424  07_sieve.goose: no line
+  0x000001428  sieve.c:437:13
+  0x00000142c  07_sieve.goose:56
+  0x000001430  07_sieve.goose: no line
+  0x000001438  07_sieve.goose:57
+  0x00000143c  07_sieve.goose: no line
+  0x000001454  sieve.c:432:13
+  0x000001458  sieve.c:433:13
+  0x00000145c  07_sieve.goose:57
+  0x000001464  07_sieve.goose: no line
+  0x000001468  07_sieve.goose:57
+  0x00000146c  07_sieve.goose: no line
+  0x000001478  07_sieve.goose:57
+  0x0000014ac  07_sieve.goose: no line
+  0x0000014b4  07_sieve.goose:57
+  0x0000014c4  07_sieve.goose: no line
+  0x0000014cc  sieve.c:433:13
+  0x0000014d8  07_sieve.goose:58
+  0x0000014ec  07_sieve.goose: no line
+  0x0000014f0  sieve.c:432:13
+  0x0000014f4  sieve.c:433:13
+  0x0000014f8  07_sieve.goose:58
+  0x0000014fc  07_sieve.goose: no line
+  0x000001500  07_sieve.goose:58
+  0x000001510  07_sieve.goose: no line
+  0x000001524  07_sieve.goose:59
+  0x000001528  07_sieve.goose: no line
+  0x000001540  sieve.c:432:13
+  0x000001548  sieve.c: no line
+  0x00000154c  sieve.c:433:13
+  0x000001550  07_sieve.goose:59
+  0x000001584  07_sieve.goose: no line
+  0x00000158c  07_sieve.goose:59
+  0x00000159c  07_sieve.goose: no line
+  0x0000015a4  07_sieve.goose:63
+  0x0000015bc  07_sieve.goose: no line
+  0x0000015c4  sieve.c:437:13
+  0x0000015c8  sieve.c: no line
+  0x0000015d0  07_sieve.goose:64
+  0x0000015d4  sieve.c:436:13
+  0x0000015d8  sieve.c:437:13
+  0x0000015dc  07_sieve.goose:64
+  0x0000015e0  07_sieve.goose: no line
+  0x0000015e4  07_sieve.goose:64
+  0x0000015f4  07_sieve.goose:15
+  0x0000015fc  sieve.c:2354:5
+  0x000001600  07_sieve.goose:15
+  0x00000160c  sieve.c:2354:5
+  0x000001630  07_sieve.goose:57
+  0x000001644  sieve.c:997:19

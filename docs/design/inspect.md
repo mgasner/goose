@@ -23,7 +23,7 @@ came from, through the C the compiler generated in between. It answers
 and as much of the same as the binary allows for one whose source is not.
 Written against upstream `64d62fc`, with the fork's six translation
 units. The first steps of the plan (§7), `--lines`, `--map`, the Mach-O
-reader, the line tables, the arm64 decoder and the HTML export, are
+reader, the line tables, the arm64 decoder, the HTML export and ELF, are
 implemented; the rest is not.
 
 ## 1. Decisions
@@ -235,23 +235,29 @@ instruction or source line in both directions.
 The arm64 decoder (`arm64.goose`) covers the integer, load/store (single,
 pair, literal, atomic, exclusive, and the structure loads), branch and
 system, scalar floating-point and the vector classes clang emits, and
-prints them as Apple's LLVM objdump does: its aliases (`mov`, `cmp`,
-`cset`, `lsl`, `ubfx`, ...), its vector syntax (`add.2d v0, v1, v2`), its
-numbers (hex, but decimal bitfield positions; `%#016llx` for `movi.2d`).
+prints them as LLVM's objdump does: its aliases (`mov`, `cmp`, `cset`,
+`lsl`, `ubfx`, ...), its numbers (hex, but decimal bitfield positions;
+`%#016llx` for `movi.2d`), and in the syntax objdump uses for the file:
+Apple's for Mach-O (`add.2d v0, v1, v2`, `mov.s v0[1], w8`), the generic
+one for ELF (`add v0.2d, v1.2d, v2.2d`, `mov v0.s[1], w8`), where each
+operand carries its own arrangement (`uaddw v1.8h, v1.8h, v2.8b`).
 Branch targets are resolved to the function and offset they land in, as
 are `adrp`'s pages. Anything else prints as `.word 0x...`: an unknown
 instruction is shown, never guessed.
 
-Measured against `objdump -d`:
+Measured against `objdump -d` (`tools/inspect/compare_objdump.py`, which
+any change to the decoder should be run through):
 
 | Input | Instructions | Same | Not decoded | Different |
 |---|---|---|---|---|
-| clang's code for the samples and a ninth of the tests, `-O0` to `-O3` | 884,901 | 884,901 | 0 | 0 |
+| clang's code for the samples and a ninth of the tests, `-O0` to `-O3`, Mach-O | 884,901 | 884,901 | 0 | 0 |
 | held out: another ninth of the tests at `-O1`, `-O2`, `-Os`, and the Goose compiler (C++) | 1,141,193 | 1,141,192 | 1 | 0 |
-| random 32-bit words (500,000): those objdump decodes | 202,445 | 144,832 | 57,613 | 0 |
+| the same C for `aarch64-linux-gnu`, ELF objects, generic syntax | 1,279,968 | 1,279,968 | 0 | 0 |
+| the Mach-O set rebuilt after the generic syntax went in, and the compiler | 1,950,180 | 1,950,180 | 0 | 0 |
+| random 32-bit words, 1,800,000 in both syntaxes: those objdump decodes | 728,356 | 521,656 | 206,700 | 0 |
 
 The decoder was written against the first set; the held-out set came after
-it, and its only miss is a half-precision vector `fneg`. Of the random
+it, and its only miss was a half-precision vector `fneg`. Of the random
 words, none the decoder prints is printed differently by objdump, and none
 objdump rejects is accepted: what it leaves undecoded is SVE, the
 half-precision forms, the system registers and the like, none of which
@@ -330,7 +336,14 @@ golden file. Instead:
    compiled to; a branch target opens its function. The runtime's
    functions are on the page with `--all`. A page for a 13,000-instruction
    program with the runtime is 1.2 MB.
-7. **ELF**, then x86-64 through Capstone.
+7. **ELF**, then x86-64 through Capstone. ELF done (`elf.goose`):
+   executables, shared objects and relocatable objects, for arm64 and
+   x86-64, with the build ID, the DWARF the file carries, and for an
+   object its sections laid out and its debug relocations applied as a
+   linker would; arm64 disassembly in the generic syntax. Its line tables
+   agree with dwarfdump at every row of three objects (4,560 rows). Not
+   done: compressed debug sections, and x86-64 decoding, which waits on
+   Capstone.
 8. **The viewer** on the `ui` package.
 
 ## 8. Deferred and open

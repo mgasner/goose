@@ -1,10 +1,11 @@
-// Mach-O 64-bit executables (docs/design/inspect.md §4.1): the header, the
-// segments and sections, the symbol table, the function starts, the UUID
-// and the entry point; and of a .dSYM's DWARF companion, its __DWARF
-// sections. Every read is checked, so a truncated or corrupt file is an
-// error, never a fault. The files share one buffer, `data`: the executable
-// from offset 0, its companion after it.
-namespace macho;
+// What the inspector knows of an executable (docs/design/inspect.md §4.1),
+// whatever its format: its sections, its symbols, its entry point, its
+// debug sections; and the Mach-O 64-bit loader that fills it, from an
+// executable and from a .dSYM's DWARF companion (elf.goose is the ELF one).
+// Every read is checked, so a truncated or corrupt file is an error, never
+// a fault. The files share one buffer, `data`: the executable from offset
+// 0, its companion after it.
+namespace image;
 import std;
 import binary;
 
@@ -26,15 +27,19 @@ let N_EXT: u8 = 0x01;
 
 struct Segment { name: u8[..16], vmaddr: u64, vmsize: u64, fileoff: u64, filesize: u64 }
 struct Section {
-    segment: u8[..16], name: u8[..16],
+    segment: u8[..16], name: u8[..32],  // no segment in an ELF file
     addr: u64, size: u64, offset: u64,  // offset 0: no bytes in the file (__bss)
     flags: u32,
+    code: bool,                         // instructions: S_ATTR_PURE_INSTRUCTIONS, SHF_EXECINSTR
 }
 // A name is where it is in the file, so a symbol table costs no copies.
-struct Symbol { name_at: i64, name_len: i64, value: u64, kind: u8, sect: u8, desc: u16 }
+// `defined`: a symbol of the file's own code or data, not a debugging
+// entry or an import.
+struct Symbol { name_at: i64, name_len: i64, value: u64, kind: u8, sect: u8, desc: u16, defined: bool }
 
-// A section of the companion's __DWARF segment, where it is in `data`.
-struct DebugSection { name: u8[..16], at: i64, size: i64 }
+// A DWARF section, where it is in `data`, by its name without the format's
+// prefix: debug_line for __debug_line and .debug_line.
+struct DebugSection { name: u8[..32], at: i64, size: i64 }
 
 var data: u8[>..] = [];
 var segments: Segment[>..] = [];
@@ -45,6 +50,8 @@ var cpu: u32 = 0;
 var filetype: u32 = 0;
 var entry: u64 = 0;            // The address main is at, 0 for none.
 var uuid: u8[16] = [0; 16];
+var format_name = "Mach-O";
+var underscore = true;          // C names have a _ in front (Mach-O)
 var debug_sections: DebugSection[>..] = [];
 var debug_uuid: u8[16] = [0; 16];
 
@@ -53,14 +60,14 @@ var debug_uuid: u8[16] = [0; 16];
 var base = 0;
 var debugging = false;
 
-// A DWARF section's bytes by name (__debug_line), empty where there is none.
+// A DWARF section's bytes by name (debug_line), empty where there is none.
 fn debug_section(name: const u8[:]) -> const u8[:] {
     for d in debug_sections { if d.name == name { return data[d.at..d.at + d.size]; } }
     data[..0]
 }
 
 fn symbol_name(s: Symbol) -> const u8[:] { data[s.name_at..s.name_at + s.name_len] }
-fn section_name(s: Section) -> u8[>..] { str(s.segment, ",", s.name) }
+fn section_name(s: Section) -> u8[>..] { if s.segment.len == 0 { str(s.name) } else { str(s.segment, ",", s.name) } }
 fn cpu_name() -> const u8[:] {
     if cpu == CPU_ARM64 { "arm64" } else if cpu == CPU_X86_64 { "x86_64" } else { "unknown" }
 }
@@ -71,32 +78,45 @@ fn text_base() -> u64 {
     0
 }
 
-// Reads the executable at path. "" on success, otherwise what was wrong.
-fn load(path: const u8[:]) -> u8[>..] {
+// Reads the file at path into data, from `base` on. "" on success.
+fn read(path: const u8[:]) -> u8[>..] {
+    base = data.len;
+    if !read_file(path, data) { return str("cannot read ", path); }
+    ""
+}
+
+// Whether the file just read is an ELF one, which elf::parse reads.
+fn is_elf() -> bool {
+    let file = data[base..];
+    file.len >= 4 && file[0] == 0x7f && file[1] == 'E' && file[2] == 'L' && file[3] == 'F'
+}
+
+// Reads the Mach-O executable read last. "" on success, otherwise what
+// was wrong.
+fn parse_macho() -> u8[>..] {
     debugging = false;
-    parse(path)
+    parse_file()
 }
 
 // Reads the DWARF companion dsymutil wrote for the executable, which must
 // carry its UUID. "" on success.
 fn load_debug(path: const u8[:]) -> u8[>..] {
     debugging = true;
-    let err = parse(path);
+    if read(path).len > 0 { return str("cannot read ", path); }
+    let err = parse_file();
     if err.len > 0 { return err; }
     if debug_uuid != uuid { return str(path, " is the debug information of another build"); }
     ""
 }
 
-fn parse(path: const u8[:]) -> u8[>..] {
-    base = data.len;
-    if !read_file(path, data) { return str("cannot read ", path); }
+fn parse_file() -> u8[>..] {
     let file = data[base..];
     let magic, ok = binary::read_u32le(file, 0);
     if !ok || magic != MH_MAGIC_64 {
         if ok && (magic == 0xcafebabe || magic == 0xbebafeca) {
             return "a universal (fat) binary: thin it first with lipo -thin";
         }
-        return "not a 64-bit Mach-O file";
+        return "not a 64-bit Mach-O or ELF file";
     }
     var h = binary::reader(file);
     binary::skip(h, 4);
@@ -171,13 +191,18 @@ fn segment(lc: binary::Reader&) -> u8[>..] {
         }
         if debugging {
             if segname == "__DWARF" && !zerofill && offset != 0 {
-                debug_sections.push(DebugSection { name: sectname, at: base + offset,
+                var dname: u8[..32] = [];
+                dname.append(if starts_with(sectname, "__") { sectname[2..] } else { sectname[..] });
+                debug_sections.push(DebugSection { name: dname, at: base + offset,
                                                    size: size as! i64 });
             }
             continue;
         }
-        sections.push(Section { segment: segname, name: sectname, addr: addr, size: size,
-                                offset: if zerofill { 0 } else { offset }, flags: flags });
+        var longname: u8[..32] = [];
+        longname.append(sectname);
+        sections.push(Section { segment: segname, name: longname, addr: addr, size: size,
+                                offset: if zerofill { 0 } else { offset }, flags: flags,
+                                code: (flags & 0x80000000) != 0 });
     }
     ""
 }
@@ -202,8 +227,9 @@ fn symtab(lc: binary::Reader&) -> u8[>..] {
         let name, k = binary::read_cstring(strings, strx);
         if !(e && f && g && h && j) { return str("truncated symbol ", i); }
         if !k { return str("symbol ", i, "'s name is not in the string table"); }
+        let defined = (kind & N_STAB) == 0 && (kind & N_TYPE) == N_SECT;
         symbols.push(Symbol { name_at: stroff + strx, name_len: name.len, value: value,
-                              kind: kind, sect: sect, desc: desc });
+                              kind: kind, sect: sect, desc: desc, defined: defined });
     }
     ""
 }
@@ -263,5 +289,4 @@ fn address_of(off: i64) -> u64, bool {
     return 0, false;
 }
 
-fn is_stab(s: Symbol) -> bool { (s.kind & N_STAB) != 0 }
-fn is_defined(s: Symbol) -> bool { !is_stab(s) && (s.kind & N_TYPE) == N_SECT }
+fn is_defined(s: Symbol) -> bool { s.defined }

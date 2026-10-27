@@ -18,7 +18,8 @@
 import std;
 import os;
 import binary;
-import .macho;
+import .image;
+import .elf;
 import .dwarf;
 import .arm64;
 import .html;
@@ -38,7 +39,7 @@ fn usage() {
                inspect source <exe> <file:line>
                inspect disasm <exe> <symbol | 0xaddress [bytes]>
                inspect html <exe> <out.html> [--all]
-               inspect decode <file of "address word" lines, in hex>
+               inspect decode <file of "address word" lines, in hex> [--elf]
 
         """);
     exit(2);
@@ -90,9 +91,9 @@ fn goose_name(c: const u8[:]) -> u8[>..], bool {
 }
 
 // A Mach-O symbol is the C name with an underscore in front.
-fn c_name(s: macho::Symbol) -> const u8[:] {
-    let n = macho::symbol_name(s);
-    if n.len > 0 && n[0] == '_' { n[1..] } else { n }
+fn c_name(s: image::Symbol) -> const u8[:] {
+    let n = image::symbol_name(s);
+    if image::underscore && n.len > 0 && n[0] == '_' { n[1..] } else { n }
 }
 
 // --- functions -----------------------------------------------------------
@@ -103,13 +104,16 @@ struct Function { sym: i64, start: u64, end: u64 }
 var functions: Function[>..] = [];
 
 fn is_code(sect: i64) -> bool {
-    sect >= 0 && (macho::sections[sect].flags & 0x80000000) != 0   // S_ATTR_PURE_INSTRUCTIONS
+    sect >= 0 && image::sections[sect].code
 }
 
 fn collect_functions() {
-    for s, i in macho::symbols {
-        guard macho::is_defined(s);
-        let sect = macho::section_at(s.value);
+    for s, i in image::symbols {
+        guard image::is_defined(s);
+        // An ELF mapping symbol ($x, $d) marks where code or data starts.
+        let name = image::symbol_name(s);
+        guard name.len == 0 || name[0] != '$';
+        let sect = image::section_at(s.value);
         guard is_code(sect);
         functions.push(Function { sym: i, start: s.value, end: 0 });
     }
@@ -119,7 +123,7 @@ fn collect_functions() {
     for f in functions { if kept.len == 0 || kept[kept.len - 1].start != f.start { kept.push(f); } }
     functions.clear();
     for f, i in kept {
-        let sect = macho::sections[macho::section_at(f.start)];
+        let sect = image::sections[image::section_at(f.start)];
         var end = sect.addr + sect.size;
         if i + 1 < kept.len && kept[i + 1].start < end { end = kept[i + 1].start; }
         functions.push(Function { sym: f.sym, start: f.start, end: end });
@@ -139,7 +143,7 @@ fn function_at(addr: u64) -> i64 {
 }
 
 fn describe(out: u8[>..]&, f: Function) {
-    let name = c_name(macho::symbols[f.sym]);
+    let name = c_name(image::symbols[f.sym]);
     let g, isgoose = goose_name(name);
     if isgoose { format(out, g, "  (", name, ")"); }
     else if starts_with(name, "gs_") { format(out, name, "  [runtime]"); }
@@ -175,7 +179,7 @@ fn parse_uint_hex(s: const u8[:]) -> u64, bool {
 // A symbol by its C name or its Goose name; -1 for none.
 fn find_function(name: const u8[:]) -> i64 {
     for f, i in functions {
-        let c = c_name(macho::symbols[f.sym]);
+        let c = c_name(image::symbols[f.sym]);
         if c == name { return i; }
         let g, isgoose = goose_name(c);
         if isgoose && g == name { return i; }
@@ -187,13 +191,35 @@ fn find_function(name: const u8[:]) -> i64 {
 
 fn cmd_sections() {
     var out: u8[>..] = [];
-    format(out, "Mach-O ", macho::cpu_name(), ", ", macho::segments.len, " segments, ",
-           macho::sections.len, " sections\n");
-    out.append("uuid ");
-    for b in macho::uuid { hex(out, b, 2); }
-    if macho::entry != 0 { out.append("  entry 0x"); hex(out, macho::entry); }
+    format(out, image::format_name, " ", image::cpu_name(), ", ");
+    if image::segments.len > 0 { format(out, image::segments.len, " segments, "); }
+    format(out, image::sections.len, " sections", if image::debug_sections.len > 0 { ", with DWARF" } else { "" }, "\n");
+    let no_id = all(image::uuid) { it == 0 };
+    if no_id { out.append(if image::format_name == "ELF" { "no build ID" } else { "no UUID" }); }
+    else {
+        out.append(if image::format_name == "ELF" { "build ID " } else { "uuid " });
+        for b in image::uuid { hex(out, b, 2); }
+    }
+    if image::entry != 0 { out.append("  entry 0x"); hex(out, image::entry); }
     out.append("\n\n");
-    for s in macho::segments {
+    // ELF's sections have no segments around them, and a Mach-O object's
+    // one segment has no name: list those sections on their own.
+    for t in image::sections {
+        let grouped = any(image::segments) { it.name == t.segment && it.name.len > 0 };
+        guard !grouped;
+        let name = image::section_name(t);
+        format(out, "  ", name);
+        for k in max(0, 24 - name.len) { out.push(' '); }
+        out.append("0x");
+        hex(out, t.addr, 9);
+        format(out, "  size 0x");
+        hex(out, t.size, 6);
+        if t.offset != 0 { out.append("  file +0x"); hex(out, t.offset); }
+        else { out.append("  (zero-fill)"); }
+        if t.code { out.append("  code"); }
+        out.append("\n");
+    }
+    for s in image::segments {
         format(out, "segment ", s.name, "  vm 0x");
         hex(out, s.vmaddr, 9);
         out.append("..0x");
@@ -203,7 +229,7 @@ fn cmd_sections() {
         format(out, " size 0x");
         hex(out, s.filesize);
         out.append("\n");
-        for t in macho::sections {
+        for t in image::sections {
             guard t.segment == s.name;
             format(out, "  ", t.segment, ",", t.name);
             for k in max(0, 24 - t.segment.len - t.name.len) { out.push(' '); }
@@ -224,14 +250,14 @@ fn cmd_syms() {
     var goose = 0;
     var runtime = 0;
     for f in functions {
-        let c = c_name(macho::symbols[f.sym]);
+        let c = c_name(image::symbols[f.sym]);
         let g, isgoose = goose_name(c);
         if isgoose { goose++; } else if starts_with(c, "gs_") { runtime++; }
     }
     format(out, functions.len, " functions: ", goose, " Goose, ", runtime, " runtime, ",
            functions.len - goose - runtime, " other");
-    if macho::function_starts.len > 0 {
-        format(out, "; the function starts table has ", macho::function_starts.len);
+    if image::function_starts.len > 0 {
+        format(out, "; the function starts table has ", image::function_starts.len);
     }
     out.append("\n");
     for f in functions {
@@ -251,8 +277,8 @@ fn cmd_hex(target: const u8[:], count_arg: const u8[:]) {
     var count: u64 = 256;
     if starts_with(target, "+") {
         let off, ok = parse_number(target[1..]);
-        if !ok || off >= macho::data.len as u64 { fail(str("no file offset ", target)); }
-        let addr, mapped = macho::address_of(off as! i64);
+        if !ok || off >= image::data.len as u64 { fail(str("no file offset ", target)); }
+        let addr, mapped = image::address_of(off as! i64);
         if !mapped { fail(str("no section holds file offset ", target)); }
         start = addr;
     } else if starts_with(target, "0x") {
@@ -270,13 +296,13 @@ fn cmd_hex(target: const u8[:], count_arg: const u8[:]) {
         if !ok { fail(str("not a byte count: ", count_arg)); }
         count = n;
     }
-    let sect = macho::section_at(start);
+    let sect = image::section_at(start);
     if sect < 0 { fail("no section holds that address"); }
-    let s = macho::sections[sect];
-    if s.offset == 0 { fail(str(macho::section_name(s), " has no bytes in the file")); }
+    let s = image::sections[sect];
+    if s.offset == 0 { fail(str(image::section_name(s), " has no bytes in the file")); }
     let end = min(start + count, s.addr + s.size);
     var out: u8[>..] = [];
-    format(out, macho::section_name(s), "\n");
+    format(out, image::section_name(s), "\n");
     var fn_shown = -1;
     var row = start & ~(15 as u64);
     while row < end {
@@ -292,7 +318,7 @@ fn cmd_hex(target: const u8[:], count_arg: const u8[:]) {
             if functions[f].start != a { out.append(" +0x"); hex(out, a - functions[f].start); }
             out.append(":\n");
         }
-        let off, ok = macho::file_offset(max(row, start));
+        let off, ok = image::file_offset(max(row, start));
         let rowoff = off - (max(row, start) - row) as! i64;
         out.append("0x");
         hex(out, row, 9);
@@ -301,7 +327,7 @@ fn cmd_hex(target: const u8[:], count_arg: const u8[:]) {
         out.append("  ");
         for k in 16 {
             let a = row + k as u64;
-            if a >= start && a < end { hex(out, macho::data[rowoff + k], 2); out.push(' '); }
+            if a >= start && a < end { hex(out, image::data[rowoff + k], 2); out.push(' '); }
             else { out.append("   "); }
             if k == 7 { out.push(' '); }
         }
@@ -309,7 +335,7 @@ fn cmd_hex(target: const u8[:], count_arg: const u8[:]) {
         for k in 16 {
             let a = row + k as u64;
             if a >= start && a < end {
-                let c = macho::data[rowoff + k];
+                let c = image::data[rowoff + k];
                 out.push(if c >= 32 && c < 127 { c } else { '.' });
             } else {
                 out.push(' ');
@@ -327,14 +353,14 @@ fn cmd_at(target: const u8[:]) {
     var out: u8[>..] = [];
     out.append("0x");
     hex(out, addr);
-    let sect = macho::section_at(addr);
+    let sect = image::section_at(addr);
     if sect < 0 {
         out.append(": in no section\n");
         write_stdout(out);
         return;
     }
-    format(out, "  in ", macho::section_name(macho::sections[sect]));
-    let off, mapped = macho::file_offset(addr);
+    format(out, "  in ", image::section_name(image::sections[sect]));
+    let off, mapped = image::file_offset(addr);
     if mapped { out.append("  file +0x"); hex(out, off as! u64); }
     out.append("\n");
     let f = function_at(addr);
@@ -366,12 +392,24 @@ fn basename(path: const u8[:]) -> const u8[:] {
 
 // The executable's DWARF companion, where dsymutil puts it.
 fn load_lines(exe: const u8[:]) {
+    // An ELF file carries its DWARF itself.
+    if image::debug_sections.len > 0 {
+        let err = dwarf::load();
+        if err.len > 0 { lines_note = str("no line information: ", err); return; }
+        dwarf::index();
+        have_lines = true;
+        return;
+    }
+    if image::format_name != "Mach-O" {
+        lines_note = "no line information: the file has no DWARF (build with -g)";
+        return;
+    }
     let companion = str(exe, ".dSYM/Contents/Resources/DWARF/", basename(exe));
     if !file_exists(companion) {
         lines_note = str("no line information: ", companion, " is not there (build with --debug)");
         return;
     }
-    let err = macho::load_debug(companion);
+    let err = image::load_debug(companion);
     if err.len > 0 { lines_note = str("no line information: ", err); return; }
     let derr = dwarf::load();
     if derr.len > 0 { lines_note = str("no line information: ", companion, ": ", derr); return; }
@@ -502,17 +540,17 @@ fn cmd_source(target: const u8[:]) {
 fn symbolize(out: u8[>..]&, a: u64) {
     let f = function_at(a);
     if f >= 0 {
-        let name = c_name(macho::symbols[functions[f].sym]);
+        let name = c_name(image::symbols[functions[f].sym]);
         let g, isgoose = goose_name(name);
         out.append(if isgoose { g } else { name });
         if a != functions[f].start { out.append("+0x"); hex(out, a - functions[f].start); }
         return;
     }
-    let s = macho::section_at(a);
+    let s = image::section_at(a);
     if s >= 0 {
-        out.append(macho::section_name(macho::sections[s]));
+        out.append(image::section_name(image::sections[s]));
         out.append("+0x");
-        hex(out, a - macho::sections[s].addr);
+        hex(out, a - image::sections[s].addr);
     }
 }
 
@@ -527,7 +565,7 @@ fn padded(out: u8[>..]&, text: const u8[:]) {
 }
 
 fn cmd_disasm(target: const u8[:], count_arg: const u8[:]) {
-    if macho::cpu != macho::CPU_ARM64 { fail(str("disassembly is arm64 only; this is ", macho::cpu_name())); }
+    if image::cpu != image::CPU_ARM64 { fail(str("disassembly is arm64 only; this is ", image::cpu_name())); }
     var start: u64 = 0;
     var end: u64 = 0;
     if starts_with(target, "0x") {
@@ -547,9 +585,9 @@ fn cmd_disasm(target: const u8[:], count_arg: const u8[:]) {
         start = functions[i].start;
         end = functions[i].end;
     }
-    let sect = macho::section_at(start);
+    let sect = image::section_at(start);
     if sect < 0 || !is_code(sect) { fail("no code at that address"); }
-    let s = macho::sections[sect];
+    let s = image::sections[sect];
     end = min(end, s.addr + s.size);
     var out: u8[>..] = [];
     var known = 0;
@@ -575,8 +613,8 @@ fn cmd_disasm(target: const u8[:], count_arg: const u8[:]) {
                 }
             }
         }
-        let off, mapped = macho::file_offset(a);
-        let word, ok = binary::read_u32le(macho::data, off);
+        let off, mapped = image::file_offset(a);
+        let word, ok = binary::read_u32le(image::data, off);
         if !mapped || !ok { break; }
         out.append("  ");
         hex(out, a, 9);
@@ -600,7 +638,7 @@ fn cmd_disasm(target: const u8[:], count_arg: const u8[:]) {
 
 // What a function is, for the page: a Goose one, the runtime's, or another.
 fn kind(f: Function) -> const u8[:] {
-    let c = c_name(macho::symbols[f.sym]);
+    let c = c_name(image::symbols[f.sym]);
     let g, isgoose = goose_name(c);
     if isgoose { "goose" } else if starts_with(c, "gs_") { "runtime" } else { "other" }
 }
@@ -609,7 +647,7 @@ fn kind(f: Function) -> const u8[:] {
 // or all with --all): each instruction with its bytes, text, target and
 // line, and the source files those lines are in (html.goose shows them).
 fn cmd_html(exe: const u8[:], path: const u8[:], all: bool) {
-    if macho::cpu != macho::CPU_ARM64 { fail(str("the page is arm64 only; this is ", macho::cpu_name())); }
+    if image::cpu != image::CPU_ARM64 { fail(str("the page is arm64 only; this is ", image::cpu_name())); }
     // The page's files, by the line table's: -1 for one not on the page yet.
     var page_of: i64[>..] = [];
     for f in dwarf::files { page_of.push(-1); }
@@ -623,9 +661,9 @@ fn cmd_html(exe: const u8[:], path: const u8[:], all: bool) {
     for f in functions {
         let k = kind(f);
         guard all || k != "runtime";
-        let c = c_name(macho::symbols[f.sym]);
+        let c = c_name(image::symbols[f.sym]);
         let g, isgoose = goose_name(c);
-        let fileoff, mapped = macho::file_offset(f.start);
+        let fileoff, mapped = image::file_offset(f.start);
         guard mapped;
         out.append(if first { "\n{\"name\": " } else { ",\n{\"name\": " });
         first = false;
@@ -636,8 +674,8 @@ fn cmd_html(exe: const u8[:], path: const u8[:], all: bool) {
                ", \"fileoff\": ", fileoff, ", \"insns\": [");
         var a = f.start;
         while a + 4 <= f.end {
-            let off, ok1 = macho::file_offset(a);
-            let word, ok2 = binary::read_u32le(macho::data, off);
+            let off, ok1 = image::file_offset(a);
+            let word, ok2 = binary::read_u32le(image::data, off);
             if !ok1 || !ok2 { break; }
             var text: u8[>..] = [];
             let d = arm64::decode(word, a, text);
@@ -717,11 +755,19 @@ fn cmd_decode(path: const u8[:]) {
 
 fn main() {
     let a = args();
-    if a.len == 3 && a[1] == "decode" { cmd_decode(a[2]); return; }
+    if a.len >= 3 && a[1] == "decode" {
+        arm64::generic = a.len >= 4 && a[3] == "--elf";
+        cmd_decode(a[2]);
+        return;
+    }
     if a.len < 3 { usage(); }
     let cmd = a[1];
-    let err = macho::load(a[2]);
+    let rerr = image::read(a[2]);
+    if rerr.len > 0 { fail(str(a[2], ": ", rerr)); }
+    let err = if image::is_elf() { elf::parse() } else { image::parse_macho() };
     if err.len > 0 { fail(str(a[2], ": ", err)); }
+    // objdump's syntax for the format: Apple's for Mach-O, LLVM's generic one for ELF.
+    arm64::generic = image::format_name == "ELF";
     collect_functions();
     load_lines(a[2]);
     if cmd == "sections" { cmd_sections(); }

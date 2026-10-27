@@ -2427,7 +2427,7 @@ def main():
                  "broken files")
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
             r.fail("inspector", str(e))
-    if cc and tc.IS_MACOS:
+    if cc:
         r.show_task(inspect_tool)
 
     def git_packages():

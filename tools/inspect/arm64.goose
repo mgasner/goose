@@ -144,7 +144,7 @@ fn data_imm(w: u32, pc: u64, out: u8[>..]&) -> Decoded {
         reg(out, rn, wide, true);
         sep(out);
         imm(out, v);
-        if shift { out.append(", lsl #12"); out.append("\t; =0x"); format_uint(out, (v << 12) as! u64, 16, 0, '0'); }
+        if shift { out.append(", lsl #12"); format(out, cmt(), "0x"); format_uint(out, (v << 12) as! u64, 16, 0, '0'); }
         return done();
     }
     if kind == 4 {
@@ -204,12 +204,12 @@ fn data_imm(w: u32, pc: u64, out: u8[>..]&) -> Decoded {
             // Signed at the width, as LLVM prints it.
             let v: i64 = if wide { shifted as! i64 } else { (shifted as! u32) as! i32 };
             imm(out, v);
-            format(out, "\t; =", v);
+            format(out, cmt(), v);
         } else {
             // movn: the complement, as a negative number at the width.
             let v: i64 = if wide { ~shifted as! i64 } else { (~(shifted as! u32)) as! i32 };
             imm(out, v);
-            format(out, "\t; =", v);
+            format(out, cmt(), v);
         }
         return done();
     }
@@ -600,10 +600,12 @@ fn structures(w: u32, out: u8[>..]&) -> Decoded {
                 else if opc == 8 { 2 } else if opc == 4 { 3 } else if opc == 0 { 4 } else { 0 };
     let elems = if opc == 8 { 2 } else if opc == 4 { 3 } else if opc == 0 { 4 } else { 1 };
     if nregs == 0 || (size == 3 && !q && elems > 1) { return unknown(w, out); }
-    format(out, if load { "ld" } else { "st" }, elems, ".", arrangement(size, q), "\t{ ");
+    let arr = arrangement(size, q);
+    vmn(out, str(if load { "ld" } else { "st" }, elems), arr);
+    out.append("{ ");
     for k in nregs {
         if k > 0 { sep(out); }
-        vreg(out, (rt + k) % 32);
+        vop(out, (rt + k) % 32, arr);
     }
     out.append(" }, [");
     reg(out, rn, true, true);
@@ -636,8 +638,10 @@ fn single_structure(w: u32, out: u8[>..]&) -> Decoded {
     else if opc == 4 && size == 0 { ename = "s"; index = (q << 1) | s; bytes = 4; }
     else if opc == 4 && size == 1 && s == 0 { ename = "d"; index = q; bytes = 8; }
     else if opc == 6 && load && s == 0 {
-        format(out, "ld1r.", arrangement(size, q == 1), "\t{ ");
-        vreg(out, rt);
+        let arr = arrangement(size, q == 1);
+        vmn(out, "ld1r", arr);
+        out.append("{ ");
+        vop(out, rt, arr);
         out.append(" }, [");
         reg(out, rn, true, true);
         out.append("]");
@@ -645,8 +649,9 @@ fn single_structure(w: u32, out: u8[>..]&) -> Decoded {
         return done();
     }
     else { return unknown(w, out); }
-    format(out, if load { "ld1." } else { "st1." }, ename, "\t{ ");
-    vreg(out, rt);
+    vmn(out, if load { "ld1" } else { "st1" }, ename);
+    out.append("{ ");
+    vop(out, rt, ename);
     format(out, " }[", index, "], [");
     reg(out, rn, true, true);
     out.append("]");
@@ -865,6 +870,26 @@ fn data_reg(w: u32, out: u8[>..]&) -> Decoded {
 fn freg(out: u8[>..]&, n: i64, ftype: i64) { format(out, ["s", "d", "?", "h"][ftype], n); }
 fn vreg(out: u8[>..]&, n: i64) { format(out, "v", n); }
 
+// Apple's syntax (Mach-O) or LLVM's generic one (ELF): `add.2d v0, v1, v2`
+// or `add v0.2d, v1.2d, v2.2d`, `mov.s v0[1], w8` or `mov v0.s[1], w8`.
+var generic = false;
+
+// Where a comment starts: ; on Apple platforms, // elsewhere.
+fn cmt() -> const u8[:] { if generic { "\t// =" } else { "\t; =" } }
+
+// A vector mnemonic, with its arrangement where Apple puts it, and the tab.
+fn vmn(out: u8[>..]&, name: const u8[:], arr: const u8[:]) {
+    if generic { format(out, name, "\t"); } else { format(out, name, ".", arr, "\t"); }
+}
+// A vector register operand, with its arrangement where LLVM puts it.
+fn vop(out: u8[>..]&, n: i64, arr: const u8[:]) {
+    if generic { format(out, "v", n, ".", arr); } else { format(out, "v", n); }
+}
+// An element of a vector register: v1[3], or v1.s[3].
+fn vel(out: u8[>..]&, n: i64, e: const u8[:], index: i64) {
+    if generic { format(out, "v", n, ".", e, "[", index, "]"); } else { format(out, "v", n, "[", index, "]"); }
+}
+
 // The arrangement of a vector by its size field and Q.
 fn arrangement(size: i64, q: bool) -> const u8[:] {
     [["8b", "16b"], ["4h", "8h"], ["2s", "4s"], ["1d", "2d"]][size][if q { 1 } else { 0 }]
@@ -1004,9 +1029,18 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
         format(out, "d", rd, ", d", rn, ", d", rm);
         return done();
     }
+    if w & 0xffa0fc00 == 0x7ea0d400 {
+        // fabd of two scalars
+        let ft = bits(w, 22, 1);
+        op(out, "fabd");
+        freg(out, rd, ft); sep(out); freg(out, rn, ft); sep(out); freg(out, rm, ft);
+        return done();
+    }
     if w & 0xfffffc00 == 0x5ef1b800 {
         // addp of a vector's two doublewords into a scalar
-        format(out, "addp.2d\td", rd, ", v", rn);
+        vmn(out, "addp", "2d");
+        format(out, "d", rd, ", ");
+        vop(out, rn, "2d");
         return done();
     }
     if bits(w, 24, 8) == 0x1f {
@@ -1022,8 +1056,9 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
     }
     if bits(w, 22, 10) == 0x338 && !bit(w, 15) || bits(w, 21, 11) == 0x671 && !bit(w, 15) {
         // eor3, bcax (SHA3): four registers
-        format(out, if bit(w, 21) { "bcax.16b\t" } else { "eor3.16b\t" });
-        vreg(out, rd); sep(out); vreg(out, rn); sep(out); vreg(out, rm); sep(out); vreg(out, bits(w, 10, 5));
+        vmn(out, if bit(w, 21) { "bcax" } else { "eor3" }, "16b");
+        vop(out, rd, "16b"); sep(out); vop(out, rn, "16b"); sep(out); vop(out, rm, "16b"); sep(out);
+        vop(out, bits(w, 10, 5), "16b");
         return done();
     }
     if bits(w, 21, 11) == 0x2f0 && bits(w, 10, 6) == 1 {
@@ -1032,7 +1067,9 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
         if imm5 & 15 == 0 { return unknown(w, out); }
         var esize = 0;
         while (imm5 >> esize) & 1 == 0 { esize++; }
-        format(out, "mov\t", ["b", "h", "s", "d"][esize], rd, ", v", rn, "[", imm5 >> (esize + 1), "]");
+        let e = ["b", "h", "s", "d"][esize];
+        format(out, "mov\t", e, rd, ", ");
+        vel(out, rn, e, imm5 >> (esize + 1));
         return done();
     }
     if !bit(w, 31) && bit(w, 30) && bits(w, 24, 5) == 0x1e && bits(w, 17, 5) == 0x10 && bits(w, 10, 2) == 2 &&
@@ -1060,7 +1097,10 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
         let name = if !u { "" } else if opc == 13 && !a { "faddp" } else if opc == 15 { if a { "fminp" } else { "fmaxp" } }
                    else if opc == 12 { if a { "fminnmp" } else { "fmaxnmp" } } else { "" };
         if name.len == 0 { return unknown(w, out); }
-        format(out, name, ".", if sz == 1 { "2d" } else { "2s" }, "\t", if sz == 1 { "d" } else { "s" }, rd, ", v", rn);
+        let arr = if sz == 1 { "2d" } else { "2s" };
+        vmn(out, name, arr);
+        format(out, if sz == 1 { "d" } else { "s" }, rd, ", ");
+        vop(out, rn, arr);
         return done();
     }
     if !bit(w, 31) && !bit(w, 10) && (bits(w, 24, 5) == 0x0f || (bit(w, 30) && bits(w, 24, 5) == 0x1f)) {
@@ -1076,19 +1116,21 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
         let opc = bits(w, 12, 3);
         let names: const u8[:][8] = ["", "uzp1", "trn1", "zip1", "", "uzp2", "trn2", "zip2"];
         if names[opc].len == 0 || u || (size == 3 && !q) { return unknown(w, out); }
-        format(out, names[opc], ".", arrangement(size, q), "\t");
-        vreg(out, rd); sep(out); vreg(out, rn); sep(out); vreg(out, rm);
+        let arr = arrangement(size, q);
+        vmn(out, names[opc], arr);
+        vop(out, rd, arr); sep(out); vop(out, rn, arr); sep(out); vop(out, rm, arr);
         return done();
     }
     if bits(w, 24, 6) == 0xe && bits(w, 21, 3) == 0 && bits(w, 10, 2) == 0 && !bit(w, 15) {
         // tbl, tbx
         let len = bits(w, 13, 2);
-        format(out, if bit(w, 12) { "tbx." } else { "tbl." }, arrangement(0, q), "\t");
-        vreg(out, rd);
+        let arr = arrangement(0, q);
+        vmn(out, if bit(w, 12) { "tbx" } else { "tbl" }, arr);
+        vop(out, rd, arr);
         out.append(", { ");
-        for k in len + 1 { if k > 0 { sep(out); } vreg(out, (rn + k) % 32); }
+        for k in len + 1 { if k > 0 { sep(out); } vop(out, (rn + k) % 32, "16b"); }
         out.append(" }, ");
-        vreg(out, rm);
+        vop(out, rm, arr);
         return done();
     }
     if bits(w, 24, 5) == 0xe && bit(w, 21) && bits(w, 10, 2) == 0 {
@@ -1101,9 +1143,14 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
         let name = if u { names_u[opc] } else { names_s[opc] };
         if name.len == 0 || size == 3 || (name == "pmull" && size != 0) { return unknown(w, out); }
         let narrow = opc == 4 || opc == 6;
-        format(out, name, if q { "2" } else { "" }, ".",
-               if narrow { arrangement(size, q) } else { arrangement(size + 1, true) }, "\t");
-        vreg(out, rd); sep(out); vreg(out, rn); sep(out); vreg(out, rm);
+        // The wide and the narrow arrangements; a w form's first source is wide.
+        let wide = arrangement(size + 1, true);
+        let thin = arrangement(size, q);
+        let wform = opc == 1 || opc == 3;
+        vmn(out, str(name, if q { "2" } else { "" }), if narrow { thin } else { wide });
+        vop(out, rd, if narrow { thin } else { wide }); sep(out);
+        vop(out, rn, if narrow || wform { wide } else { thin }); sep(out);
+        vop(out, rm, if narrow { wide } else { thin });
         return done();
     }
     if bits(w, 24, 5) == 0xe && bits(w, 17, 5) == 0x18 && bits(w, 10, 2) == 2 {
@@ -1114,22 +1161,28 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
                    else { "" };
         if name.len == 0 || size == 3 || (size == 2 && !q) { return unknown(w, out); }
         let dsize = if opc == 3 { size + 1 } else { size };
-        format(out, name, ".", arrangement(size, q), "\t", ["b", "h", "s", "d"][dsize], rd, ", v", rn);
+        let arr = arrangement(size, q);
+        vmn(out, name, arr);
+        format(out, ["b", "h", "s", "d"][dsize], rd, ", ");
+        vop(out, rn, arr);
         return done();
     }
     if bits(w, 24, 5) == 0xe && bit(w, 21) && bit(w, 10) {
         // three registers of the same arrangement
         let opc = bits(w, 11, 5);
+        var arr3 = "";
         if opc == 3 {
             // the bitwise ones, by size; orr of one register twice is mov
             let names: const u8[:][8] = ["and", "bic", "orr", "orn", "eor", "bsl", "bit", "bif"];
             let name = names[(if u { 4 } else { 0 }) + size];
             if name == "orr" && rn == rm {
-                format(out, "mov.", arrangement(0, q), "\t");
-                vreg(out, rd); sep(out); vreg(out, rn);
+                let arr = arrangement(0, q);
+                vmn(out, "mov", arr);
+                vop(out, rd, arr); sep(out); vop(out, rn, arr);
                 return done();
             }
-            format(out, name, ".", arrangement(0, q), "\t");
+            arr3 = arrangement(0, q);
+            vmn(out, name, arr3);
         } else if opc >= 24 {
             // floating point: size's high bit picks within the opcode, the low one the width
             let a = bit(w, 23);
@@ -1141,7 +1194,8 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
             let name = if u { if a { names_u1a1[k] } else { names_u1a0[k] } } else { if a { names_u0a1[k] } else { names_u0a0[k] } };
             let sz = size & 1;
             if name.len == 0 || (sz == 1 && !q) { return unknown(w, out); }
-            format(out, name, ".", arrangement(2 + sz, q), "\t");
+            arr3 = arrangement(2 + sz, q);
+            vmn(out, name, arr3);
         } else {
             let names_u0: const u8[:][32] = ["shadd", "sqadd", "", "", "", "sqsub", "cmgt", "cmge",
                                              "sshl", "", "", "", "smax", "smin", "", "",
@@ -1157,14 +1211,16 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
             let has64 = opc == 1 || opc == 5 || opc == 6 || opc == 7 || opc == 8 || opc == 16 || opc == 17 || opc == 23;
             if size == 3 && !has64 { return unknown(w, out); }
             if (name == "pmul" && size != 0) || (opc == 23 && u) { return unknown(w, out); }
-            format(out, name, ".", arrangement(size, q), "\t");
+            arr3 = arrangement(size, q);
+            vmn(out, name, arr3);
         }
-        vreg(out, rd); sep(out); vreg(out, rn); sep(out); vreg(out, rm);
+        vop(out, rd, arr3); sep(out); vop(out, rn, arr3); sep(out); vop(out, rm, arr3);
         return done();
     }
     if bits(w, 24, 6) == 0x2e && !bit(w, 21) && !bit(w, 15) && !bit(w, 10) && size == 0 && (q || !bit(w, 14)) {
-        format(out, "ext.", arrangement(0, q), "\t");
-        vreg(out, rd); sep(out); vreg(out, rn); sep(out); vreg(out, rm); sep(out);
+        let arr = arrangement(0, q);
+        vmn(out, "ext", arr);
+        vop(out, rd, arr); sep(out); vop(out, rn, arr); sep(out); vop(out, rm, arr); sep(out);
         imm(out, bits(w, 11, 4));
         return done();
     }
@@ -1172,6 +1228,9 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
         // two registers, miscellaneous
         let opc = bits(w, 12, 5);
         if size == 3 && !q { return unknown(w, out); }
+        // The byte-order ones and cnt take only the narrower elements.
+        if (!u && opc == 0 && size == 3) || (u && opc == 0 && size >= 2) || (!u && opc == 1 && size != 0) ||
+           (opc == 5 && size != 0) { return unknown(w, out); }
         var name = "";
         if !u {
             name = if opc == 0 { "rev64" } else if opc == 1 { "rev16" } else if opc == 5 { "cnt" }
@@ -1182,8 +1241,8 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
                    else if opc == 8 { "cmge" } else if opc == 9 { "cmle" } else if opc == 11 { "neg" } else { "" };
         }
         if name.len == 0 && opc == 18 && !u && size < 3 {
-            format(out, if q { "xtn2." } else { "xtn." }, arrangement(size, q), "\t");
-            vreg(out, rd); sep(out); vreg(out, rn);
+            vmn(out, if q { "xtn2" } else { "xtn" }, arrangement(size, q));
+            vop(out, rd, arrangement(size, q)); sep(out); vop(out, rn, arrangement(size + 1, true));
             return done();
         }
         if name.len == 0 && (opc == 29 || opc == 27) {
@@ -1193,21 +1252,35 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
                         else if opc == 27 && a { if u { "fcvtzu" } else { "fcvtzs" } } else { "" };
             let sz = size & 1;
             if fname.len == 0 || (sz == 1 && !q) { return unknown(w, out); }
-            format(out, fname, ".", arrangement(2 + sz, q), "\t");
-            vreg(out, rd); sep(out); vreg(out, rn);
+            let arr = arrangement(2 + sz, q);
+            vmn(out, fname, arr);
+            vop(out, rd, arr); sep(out); vop(out, rn, arr);
+            return done();
+        }
+        if name.len == 0 && size >= 2 && opc >= 12 && opc <= 14 && !(opc == 14 && u) {
+            // compares with zero: fcmgt/fcmge, fcmeq/fcmle, fcmlt
+            let fname = if opc == 12 { if u { "fcmge" } else { "fcmgt" } }
+                        else if opc == 13 { if u { "fcmle" } else { "fcmeq" } } else { "fcmlt" };
+            let arr = arrangement(size, q);
+            if size == 3 && !q { return unknown(w, out); }
+            vmn(out, fname, arr);
+            vop(out, rd, arr); sep(out); vop(out, rn, arr);
+            out.append(", #0.0");
             return done();
         }
         if name.len == 0 {
             // fneg/fabs of a vector: size's high bit and the low one for the width
             if opc == 15 && size >= 2 {
-                format(out, if u { "fneg." } else { "fabs." }, arrangement(size, q), "\t");
-                vreg(out, rd); sep(out); vreg(out, rn);
+                let arr = arrangement(size, q);
+                vmn(out, if u { "fneg" } else { "fabs" }, arr);
+                vop(out, rd, arr); sep(out); vop(out, rn, arr);
                 return done();
             }
             return unknown(w, out);
         }
-        format(out, name, ".", arrangement(if name == "mvn" { 0 } else { size }, q), "\t");
-        vreg(out, rd); sep(out); vreg(out, rn);
+        let arr = arrangement(if name == "mvn" { 0 } else { size }, q);
+        vmn(out, name, arr);
+        vop(out, rd, arr); sep(out); vop(out, rn, arr);
         if opc >= 8 && opc <= 10 { out.append(", #0"); }
         return done();
     }
@@ -1219,7 +1292,7 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
         let imm8 = (abc << 5) | defgh;
         if u && cmode == 14 {
             // each bit a byte of 0x00 or 0xff
-            if q { out.append("movi.2d\t"); vreg(out, rd); }
+            if q { vmn(out, "movi", "2d"); vop(out, rd, "2d"); }
             else { format(out, "movi\td", rd); }
             out.append(", #");
             var v: u64 = 0;
@@ -1230,15 +1303,16 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
             return done();
         }
         if !u && cmode == 14 {
-            format(out, "movi.", arrangement(0, q), "\t");
-            vreg(out, rd); sep(out); imm(out, imm8);
+            vmn(out, "movi", arrangement(0, q));
+            vop(out, rd, arrangement(0, q)); sep(out); imm(out, imm8);
             return done();
         }
         if cmode == 15 && !bit(w, 11) {
             // fmov of an immediate to every element
             if u && !q { return unknown(w, out); }
-            format(out, "fmov.", if u { "2d" } else { arrangement(2, q) }, "\t");
-            vreg(out, rd);
+            let arr = if u { "2d" } else { arrangement(2, q) };
+            vmn(out, "fmov", arr);
+            vop(out, rd, arr);
             out.append(", #");
             format_flt(out, fp_imm(imm8), 8);
             return done();
@@ -1246,24 +1320,27 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
         if cmode & 0x9 == 0x1 || cmode & 0xd == 0x9 {
             // orr/bic of a shifted immediate
             let half = cmode & 0x8 == 0x8;
-            format(out, if u { "bic." } else { "orr." }, if half { arrangement(1, q) } else { arrangement(2, q) }, "\t");
-            vreg(out, rd); sep(out); imm(out, imm8);
+            let arr = if half { arrangement(1, q) } else { arrangement(2, q) };
+            vmn(out, if u { "bic" } else { "orr" }, arr);
+            vop(out, rd, arr); sep(out); imm(out, imm8);
             let shift = if half { ((cmode >> 1) & 1) * 8 } else { ((cmode >> 1) & 3) * 8 };
             if shift != 0 { format(out, ", lsl #", shift); }
             return done();
         }
         if u && ((cmode & 0x9) == 0 || (cmode & 0xd) == 0x8) {
             let half = cmode & 0x8 == 0x8;
-            format(out, "mvni.", if half { arrangement(1, q) } else { arrangement(2, q) }, "\t");
-            vreg(out, rd); sep(out); imm(out, imm8);
+            let arr = if half { arrangement(1, q) } else { arrangement(2, q) };
+            vmn(out, "mvni", arr);
+            vop(out, rd, arr); sep(out); imm(out, imm8);
             let shift = if half { ((cmode >> 1) & 1) * 8 } else { ((cmode >> 1) & 3) * 8 };
             if shift != 0 { format(out, ", lsl #", shift); }
             return done();
         }
         if !u && (cmode & 0x9) == 0 || !u && (cmode & 0xd) == 0x8 {
             let half = cmode & 0x8 == 0x8;
-            format(out, "movi.", if half { arrangement(1, q) } else { arrangement(2, q) }, "\t");
-            vreg(out, rd); sep(out); imm(out, imm8);
+            let arr = if half { arrangement(1, q) } else { arrangement(2, q) };
+            vmn(out, "movi", arr);
+            vop(out, rd, arr); sep(out); imm(out, imm8);
             let shift = if half { ((cmode >> 1) & 1) * 8 } else { ((cmode >> 1) & 3) * 8 };
             if shift != 0 { format(out, ", lsl #", shift); }
             return done();
@@ -1278,20 +1355,22 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
         var esize = 0;
         while (imm5 >> esize) & 1 == 0 { esize++; }
         let index = imm5 >> (esize + 1);
+        // A dup of 64-bit elements fills two of them.
+        if (imm4 == 0 || imm4 == 1) && !u && esize == 3 && !q { return unknown(w, out); }
         let ename = ["b", "h", "s", "d"][esize];
         if !u && imm4 == 1 {
-            format(out, "dup.", arrangement(esize, q), "\t");
-            vreg(out, rd); sep(out); reg(out, rn, esize == 3, false);
+            vmn(out, "dup", arrangement(esize, q));
+            vop(out, rd, arrangement(esize, q)); sep(out); reg(out, rn, esize == 3, false);
             return done();
         }
         if !u && imm4 == 0 {
-            format(out, "dup.", arrangement(esize, q), "\t");
-            vreg(out, rd); sep(out); vreg(out, rn); format(out, "[", index, "]");
+            vmn(out, "dup", arrangement(esize, q));
+            vop(out, rd, arrangement(esize, q)); sep(out); vel(out, rn, ename, index);
             return done();
         }
         if !u && imm4 == 3 && q {
-            format(out, "mov.", ename, "\t");
-            vreg(out, rd); format(out, "[", index, "]"); sep(out); reg(out, rn, esize == 3, false);
+            vmn(out, "mov", ename);
+            vel(out, rd, ename, index); sep(out); reg(out, rn, esize == 3, false);
             return done();
         }
         if !u && (imm4 == 7 || imm4 == 5) {
@@ -1300,15 +1379,14 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
             // umov: w for b/h/s, x for d; smov: w for b/h, x for b/h/s.
             if unsigned && (q != (esize == 3)) { return unknown(w, out); }
             if !unsigned && (esize == 3 || (!q && esize == 2)) { return unknown(w, out); }
-            if unsigned && (esize >= 2) { format(out, "mov.", ename, "\t"); }
-            else { format(out, if unsigned { "umov." } else { "smov." }, ename, "\t"); }
-            reg(out, rd, wide, false); sep(out); vreg(out, rn); format(out, "[", index, "]");
+            vmn(out, if unsigned && esize >= 2 { "mov" } else if unsigned { "umov" } else { "smov" }, ename);
+            reg(out, rd, wide, false); sep(out); vel(out, rn, ename, index);
             return done();
         }
         if u && q {
             let src = imm4 >> esize;
-            format(out, "mov.", ename, "\t");
-            vreg(out, rd); format(out, "[", index, "]"); sep(out); vreg(out, rn); format(out, "[", src, "]");
+            vmn(out, "mov", ename);
+            vel(out, rd, ename, index); sep(out); vel(out, rn, ename, src);
             return done();
         }
         return unknown(w, out);
@@ -1326,38 +1404,41 @@ fn simd_fp(w: u32, out: u8[>..]&) -> Decoded {
         if opc == 0x14 {
             // sshll/ushll: the wider arrangement, and 2 for the upper half
             if esize == 3 { return unknown(w, out); }
-            format(out, if u { "ushll" } else { "sshll" }, if q { "2" } else { "" }, ".",
-                   arrangement(esize + 1, true), "\t");
-            vreg(out, rd); sep(out); vreg(out, rn); sep(out); imm(out, shift);
+            vmn(out, str(if u { "ushll" } else { "sshll" }, if q { "2" } else { "" }), arrangement(esize + 1, true));
+            vop(out, rd, arrangement(esize + 1, true)); sep(out); vop(out, rn, arrangement(esize, q)); sep(out);
+            imm(out, shift);
             return done();
         }
         if opc == 0xa && !u {
-            format(out, "shl.", arrangement(esize, q), "\t");
-            vreg(out, rd); sep(out); vreg(out, rn); sep(out); imm(out, shift);
+            vmn(out, "shl", arrangement(esize, q));
+            vop(out, rd, arrangement(esize, q)); sep(out); vop(out, rn, arrangement(esize, q)); sep(out); imm(out, shift);
             return done();
         }
         if opc == 2 || (u && opc == 8) {
             // usra/ssra accumulate; sri inserts
-            let name = if opc == 8 { "sri." } else if u { "usra." } else { "ssra." };
-            format(out, name, arrangement(esize, q), "\t");
-            vreg(out, rd); sep(out); vreg(out, rn); sep(out); imm(out, 2 * ebits - ((immh << 3) | immb));
+            let name = if opc == 8 { "sri" } else if u { "usra" } else { "ssra" };
+            vmn(out, name, arrangement(esize, q));
+            vop(out, rd, arrangement(esize, q)); sep(out); vop(out, rn, arrangement(esize, q)); sep(out);
+            imm(out, 2 * ebits - ((immh << 3) | immb));
             return done();
         }
         if u && opc == 0xa {
-            format(out, "sli.", arrangement(esize, q), "\t");
-            vreg(out, rd); sep(out); vreg(out, rn); sep(out); imm(out, shift);
+            vmn(out, "sli", arrangement(esize, q));
+            vop(out, rd, arrangement(esize, q)); sep(out); vop(out, rn, arrangement(esize, q)); sep(out); imm(out, shift);
             return done();
         }
         if !u && opc == 0x10 {
             // shrn: to the narrower arrangement, 2 for the upper half
             if esize == 3 { return unknown(w, out); }
-            format(out, if q { "shrn2." } else { "shrn." }, arrangement(esize, q), "\t");
-            vreg(out, rd); sep(out); vreg(out, rn); sep(out); imm(out, 2 * ebits - ((immh << 3) | immb));
+            vmn(out, if q { "shrn2" } else { "shrn" }, arrangement(esize, q));
+            vop(out, rd, arrangement(esize, q)); sep(out); vop(out, rn, arrangement(esize + 1, true)); sep(out);
+            imm(out, 2 * ebits - ((immh << 3) | immb));
             return done();
         }
         if opc == 0 {
-            format(out, if u { "ushr." } else { "sshr." }, arrangement(esize, q), "\t");
-            vreg(out, rd); sep(out); vreg(out, rn); sep(out); imm(out, 2 * ebits - ((immh << 3) | immb));
+            vmn(out, if u { "ushr" } else { "sshr" }, arrangement(esize, q));
+            vop(out, rd, arrangement(esize, q)); sep(out); vop(out, rn, arrangement(esize, q)); sep(out);
+            imm(out, 2 * ebits - ((immh << 3) | immb));
             return done();
         }
         return unknown(w, out);
@@ -1387,11 +1468,14 @@ fn by_element(w: u32, out: u8[>..]&, scalar: bool) -> Decoded {
         let name = if opc == 9 { "fmul" } else if opc == 1 { "fmla" } else { "fmls" };
         let e = if sz == 1 { "d" } else { "s" };
         if scalar {
-            format(out, name, ".", e, "\t", e, rd, ", ", e, rn, ", v", rm, "[", index, "]");
+            vmn(out, name, e);
+            format(out, e, rd, ", ", e, rn, ", ");
+            vel(out, rm, e, index);
         } else {
             if sz == 1 && !q { return unknown(w, out); }
-            format(out, name, ".", arrangement(2 + sz, q), "\t");
-            vreg(out, rd); sep(out); vreg(out, rn); format(out, ", v", rm, "[", index, "]");
+            let arr = arrangement(2 + sz, q);
+            vmn(out, name, arr);
+            vop(out, rd, arr); sep(out); vop(out, rn, arr); sep(out); vel(out, rm, e, index);
         }
         return done();
     }
@@ -1400,7 +1484,8 @@ fn by_element(w: u32, out: u8[>..]&, scalar: bool) -> Decoded {
     let rm = if size == 1 { bits(w, 16, 4) } else { (m << 4) | bits(w, 16, 4) };
     let name = if opc == 8 { "mul" } else if opc == 0 { "mla" } else { "mls" };
     if (opc == 0 || opc == 4) && !u { return unknown(w, out); }
-    format(out, name, ".", arrangement(size, q), "\t");
-    vreg(out, rd); sep(out); vreg(out, rn); format(out, ", v", rm, "[", index, "]");
+    let arr = arrangement(size, q);
+    vmn(out, name, arr);
+    vop(out, rd, arr); sep(out); vop(out, rn, arr); sep(out); vel(out, rm, if size == 1 { "h" } else { "s" }, index);
     done()
 }

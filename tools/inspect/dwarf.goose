@@ -1,12 +1,12 @@
 // DWARF line tables (docs/design/inspect.md §4.1): every unit's line
 // program in __debug_line, versions 2 to 5, 32- and 64-bit, run to the
 // rows of address, file, line and column it describes. The sections come
-// from the Mach-O companion (macho::debug_section); offsets into them are
+// from the image (image::debug_section); offsets into them are
 // checked like every other read, so a corrupt table is an error.
 namespace dwarf;
 import std;
 import binary;
-import .macho;
+import .image;
 
 // A file of a unit's table; its name is a slice of data, as its directory's
 // and the unit's compilation directory, which a relative directory is under.
@@ -33,15 +33,15 @@ let DW_FORM_strx: u64 = 0x1a;
 let DW_LNCT_path: u64 = 1;
 let DW_LNCT_directory_index: u64 = 2;
 
-fn file_dir(f: File) -> const u8[:] { macho::data[f.dir_at..f.dir_at + f.dir_len] }
-fn file_name(f: File) -> const u8[:] { macho::data[f.name_at..f.name_at + f.name_len] }
+fn file_dir(f: File) -> const u8[:] { image::data[f.dir_at..f.dir_at + f.dir_len] }
+fn file_name(f: File) -> const u8[:] { image::data[f.name_at..f.name_at + f.name_len] }
 
 // The file's path as the table spells it: its name, under its directory
 // where the name is relative.
 fn file_path(f: File) -> u8[>..] {
     let name = file_name(f);
     let dir = file_dir(f);
-    let comp = macho::data[f.comp_at..f.comp_at + f.comp_len];
+    let comp = image::data[f.comp_at..f.comp_at + f.comp_len];
     if name.len > 0 && name[0] == '/' { return str(name); }
     if dir.len == 0 { return if comp.len == 0 { str(name) } else { str(comp, "/", name) }; }
     if dir[0] == '/' || comp.len == 0 || dir == comp { return str(dir, "/", name); }
@@ -60,8 +60,8 @@ fn read_string(r: binary::Reader&, form: u64, offset64: bool, r_at: i64) -> i64,
     if form == DW_FORM_strp || form == DW_FORM_line_strp {
         let off, ok = read_offset(r, offset64);
         if !ok { return 0, 0, false; }
-        let name = if form == DW_FORM_strp { "__debug_str" } else { "__debug_line_str" };
-        let strings = macho::debug_section(name);
+        let name = if form == DW_FORM_strp { "debug_str" } else { "debug_line_str" };
+        let strings = image::debug_section(name);
         let s, sok = binary::read_cstring(strings, off as! i64);
         if !sok { return 0, 0, false; }
         return section_start(name) + off as! i64, s.len, true;
@@ -70,7 +70,7 @@ fn read_string(r: binary::Reader&, form: u64, offset64: bool, r_at: i64) -> i64,
 }
 
 fn section_start(name: const u8[:]) -> i64 {
-    for d in macho::debug_sections { if d.name == name { return d.at; } }
+    for d in image::debug_sections { if d.name == name { return d.at; } }
     0
 }
 
@@ -121,8 +121,8 @@ fn read_udata(r: binary::Reader&, form: u64) -> u64, bool {
 
 // Reads every unit of __debug_line. "" on success, else what was wrong.
 fn load() -> u8[>..] {
-    let line = macho::debug_section("__debug_line");
-    let line_at = section_start("__debug_line");
+    let line = image::debug_section("debug_line");
+    let line_at = section_start("debug_line");
     var r = binary::reader(line);
     var unit = 0;
     while r.pos < line.len {

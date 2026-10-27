@@ -19,50 +19,60 @@ let V = 1000000;                         // BENCH_N
 let DEG = 8;
 let SOURCES = 4;
 
-struct Edge { to: i32, next: Edge&<u32>? }
+// Validate destinations on insertion; edges and the queue retain that proof.
+var dist: i32[>..] = [];
+type Vertex = u32 in dist;
+struct Edge { to: Vertex, next: Edge&<u32>? }
+
+checkfree fn bfs(src: Vertex, pool: Edge[>..]&, q: Vertex[>..<]&) -> i64 {
+    assert(pool.len >= dist.len);
+    q.clear();
+    dist[src] = 0;
+    q.push(src);
+    var total = 0;
+    var qh = 0;
+    while qh < q.len {
+        let u = q[qh];
+        qh++;
+        let d = dist[u];
+        total += d;
+        var cur: Edge? = pool[u].next;
+        loop {
+            guard cur else { break; }
+            let w = cur.to;
+            if dist[w] < 0 {
+                dist[w] = d + 1;
+                q.push(w);
+            }
+            cur .= cur.next;
+        }
+    }
+    return total;
+}
 
 fn main() {
+    for v in V { dist.push(-1); }
+    let zero = 0 as Vertex;
     // pool[0..V) are the list heads, pool[V..) the edges themselves.
     var pool: Edge[>..] = [];
-    for v in V { pool.push(Edge { to: -1 }); }
+    for v in V { pool.push(Edge { to: zero }); }
     var r: u64 = 12345;
     for e in V * DEG {
         r = xs_next(r);
         let u = xs_mod(r, V);
         let w = xs_mod(r >> 24, V);
-        let ne: Edge& = pool.push(Edge { to: w as i32, next: pool[u].next });
+        let ne: Edge& = pool.push(Edge { to: w as Vertex, next: pool[u].next });
         pool[u].next .= ne;
     }
     // BFS from a few sources, walking each vertex's edge chain.
-    var dist: i32[>..] = [];
-    for v in V { dist.push(-1); }
-    var q: i32[>..<] = [];
+    var q: Vertex[>..<] = [];
     var total = 0;
     var seed: u64 = 999;
     for s in SOURCES {
         seed = xs_next(seed);
         let src = xs_mod(seed, V);
         fill(dist, -1);
-        q.clear();
-        dist[src] = 0;
-        q.push(src as i32);
-        var qh = 0;
-        while qh < q.len {
-            let u = q[qh];
-            qh++;
-            let d = dist[u];
-            total += d;
-            var cur: Edge? = pool[u].next;
-            loop {
-                guard cur else { break; }
-                let w = cur.to;
-                if dist[w] < 0 {
-                    dist[w] = d + 1;
-                    q.push(w);
-                }
-                cur .= cur.next;
-            }
-        }
+        total += bfs(src as Vertex, pool, q);
     }
     print(pool.len);
     print(total);

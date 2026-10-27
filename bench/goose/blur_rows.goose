@@ -3,15 +3,15 @@
 // be W, and the inner loop indexes those. Every index is then a loop
 // counter plus a constant against a length the analysis knows, so the
 // bounds checks disappear from the hot loop and the backend sees the same
-// loop C++ does. The gap between this row and blur.goose is what the checks
-// were costing.
+// loop C++ does. Both forms are checkfree; any timing gap between them is
+// backend code generation, not remaining bounds checks.
 
 import rng;
 
 let W = 2048;                            // BENCH_N
 let PASSES = 16;
 
-fn blur(src: u8[>..]&, dst: u8[>..]&) {
+checkfree fn blur(src: u8[>..]&, dst: u8[>..]&) {
     for y in 1..W - 1 {
         let lo = (y - 1) * W;
         let a = src[lo..lo + W];

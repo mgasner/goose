@@ -1,0 +1,13 @@
+x
+y
+Point { 20, 30 }
+Empty {  }
+Point { 5, 6 }
+Quad { 1, 11, 2, 12 }
+Quad { 8, 0, 0, 9 }
+Point { 7, 0 }
+Defaults { 5, 1, 0 }
+1
+Data { 4, 8 }
+Packed { 300, "abc", [1, 2, 3] }
+Point { 2, 3 }

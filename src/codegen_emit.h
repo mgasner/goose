@@ -92,14 +92,8 @@ const VarDef *CodeGen::AliasTarget(VarDef *d, Node *init, Node *&path) {
         }
         // A frame object's tail, by fields from a variable that holds the
         // object or from a reference that stands for one: a C member of a
-        // header that never moves, on the object's own stack. A reference
-        // field on the way can be rebound, and leads elsewhere anyway.
-        auto n = u->child;
-        while (auto dot = Is<Dot>(n)) {
-            if (!dot->IsField() || !dot->obj->exprtype) return nullptr;
-            n = dot->obj;
-            if (!Is<Ident>(n) && n->exprtype->kind == TY_REF) return nullptr;
-        }
+        // header that never moves, on the object's own stack.
+        auto n = FieldChainRoot(u->child, true);
         auto id = Is<Ident>(n);
         if (n == u->child || !id || !id->vdef || !id->vdef->type) return nullptr;
         auto t = id->vdef;
@@ -126,14 +120,21 @@ const VarDef *CodeGen::AliasTarget(VarDef *d, Node *init, Node *&path) {
 // (where it counts again), or to an alias, which stands for what it names.
 bool CodeGen::HandedRef(Node *n) {
     auto un = Is<Unary>(n);
-    if (!un || un->op != T_BITAND) return false;
-    auto c = un->child;
-    while (auto d = Is<Dot>(c)) {
-        if (!d->IsField()) return false;
-        c = d->obj;
-        if (!Is<Ident>(c) && c->exprtype && c->exprtype->kind == TY_REF) return false;
+    return un && un->op == T_BITAND && Is<Ident>(FieldChainRoot(un->child, false));
+}
+
+// The node a run of field accesses `x.f.g` starts from (n itself where n is
+// no field access), or null where the run takes a property or a variant
+// constant, or goes through a reference not held in a variable: a reference
+// field can be rebound, and leads to another stack anyway. With `typed`, an
+// object without a type gives null too.
+Node *CodeGen::FieldChainRoot(Node *n, bool typed) {
+    while (auto d = Is<Dot>(n)) {
+        if (!d->IsField() || (typed && !d->obj->exprtype)) return nullptr;
+        n = d->obj;
+        if (!Is<Ident>(n) && n->exprtype && n->exprtype->kind == TY_REF) return nullptr;
     }
-    return Is<Ident>(c) != nullptr;
+    return n;
 }
 
 // Every binding of the body that AliasTarget accepts, in source order, so
@@ -161,7 +162,7 @@ void CodeGen::FindRefAliases(FnSpec *sp) {
 }
 
 // Which classes of stacks this specialization caches the tops of (see the
-// note above topcache in codegen.h). A reference to a resizable carries its
+// note above toporder in codegen.h). A reference to a resizable carries its
 // stack inside the reference value, so it is a second spelling of a stack the
 // body may also name directly; each class is cached only where nothing the
 // body holds can be such a second spelling of one of its stacks:
@@ -234,13 +235,13 @@ void CodeGen::PlanTopClasses(FnSpec *sp) {
     topglob = topown && !fatparam && !fatfv;
     topcap = topglob && capresz && !farreturn;
     topdst = topglob && !capresz && !globals && nonfixedret && !farreturn && !fromids.count(sp);
-    reftops = !topglob && RefTopsOk(sp);
+    reftops = !topglob && RefTopsOk(sp, farreturn);
     cachetops = topown || reftops;
 }
 
 // Whether this specialization may cache the tops of the stacks it reaches
 // through its reference parameters (the reftops mode; see the note above
-// topcache). Every condition below rules out a second spelling of one of
+// toporder). Every condition below rules out a second spelling of one of
 // those stacks, or a way for one to move without a mark:
 //  * each fat reference in the body is a parameter, named directly, so
 //    `<p>.stk` is its one spelling and is in scope throughout. A reference
@@ -257,9 +258,11 @@ void CodeGen::PlanTopClasses(FnSpec *sp) {
 //  * nothing else the body names can be one of those stacks: no global of
 //    a parameter's pointee type (a reference parameter may well be rooted
 //    at one, and the specialization key does not record which), no captured
-//    or by-value resizable, no return destination, no long-distance return
-//    channel.
-bool CodeGen::RefTopsOk(FnSpec *sp) {
+//    or by-value resizable, no return destination, and no long-distance
+//    return channel: neither this function's own nor the one a return here
+//    to a function further out constructs into (`farreturn`), a stack this
+//    body cannot place (§7.9).
+bool CodeGen::RefTopsOk(FnSpec *sp, bool farreturn) {
     set<const VarDef *> fatparams, classes;
     vector<TypeExpr *> pointees;
     auto concrete = true;
@@ -276,21 +279,11 @@ bool CodeGen::RefTopsOk(FnSpec *sp) {
     if (fatparams.empty() || (fatparams.size() > 1 && !concrete)) return false;
     for (auto pt : sp->argtypes) if (IsResz(pt)) return false;
     for (auto rt : sp->rets) if (IsBytesT(rt)) return false;
-    if (fromids.count(sp)) return false;
+    if (fromids.count(sp) || farreturn) return false;
     for (auto fv : sinfo[sp].freevars)
         if (fv->reusable || (fv->type && (IsResz(fv->type) || IsFatRef(fv->type))))
             return false;
     auto ok = true;
-    // A return exiting this function or an inlined body stays here; any
-    // other target constructs into a gs_fdst_ channel, which is a stack
-    // this body cannot place (§7.9).
-    set<SFunction *> localexits { sp->sf };
-    function<void(Node *)> ibs = [&](Node *n) {
-        if (!n) return;
-        if (auto ib = Is<InlineBlock>(n)) localexits.insert(ib->sf);
-        RunChildren(n, ibs);
-    };
-    ibs(sp->body);
     // A frame object's tail has its own addressable header (C.2), but
     // shares the owner's data stack. A parameter may therefore name the
     // whole global, any nested frame-object tail, or the final array.
@@ -321,7 +314,6 @@ bool CodeGen::RefTopsOk(FnSpec *sp) {
                 return;
             }
         }
-        if (auto r = Is<Return>(n); r && !localexits.count(r->target)) ok = false;
         NodeVars(n, check);
         RunChildren(n, walk);
     };
@@ -385,6 +377,47 @@ string CodeGen::EnsureEr(FnSpec *sp) {
     return name;
 }
 
+// The members of C type ct in order, where a brace initializer of the
+// generated code gives them all; none for any other type.
+vector<string> CodeGen::BraceFields(const string &ct) {
+    if (ct == "gs_rref") return { "hdr", "stk" };
+    if (ct == "gs_rhdr") return { "base", "len" };
+    if (slicects.count(ct)) return { "data", "len" };
+    return {};
+}
+
+// The top-level elements of a brace initializer "{ a, b }", split at the
+// commas outside parentheses, brackets, braces and literals.
+vector<string> CodeGen::SplitBraceInit(const string &init) {
+    vector<string> parts;
+    auto trim = [](string s) {
+        auto b = s.find_first_not_of(' '), e = s.find_last_not_of(' ');
+        return b == string::npos ? string() : s.substr(b, e - b + 1);
+    };
+    if (init.size() < 2 || init.front() != '{' || init.back() != '}') return parts;
+    auto body = init.substr(1, init.size() - 2);
+    int depth = 0;
+    size_t start = 0;
+    for (size_t i = 0; i < body.size(); i++) {
+        auto c = body[i];
+        if (c == '"' || c == '\'') {
+            for (i++; i < body.size() && body[i] != c; i++)
+                if (body[i] == '\\') i++;
+        } else if (c == '(' || c == '[' || c == '{') {
+            depth++;
+        } else if (c == ')' || c == ']' || c == '}') {
+            depth--;
+        } else if (c == ',' && !depth) {
+            parts.push_back(trim(body.substr(start, i - start)));
+            start = i + 1;
+        }
+    }
+    parts.push_back(trim(body.substr(start)));
+    for (auto &p : parts)
+        if (p.empty()) return {};
+    return parts;
+}
+
 // Moves every declaration of an aggregate-typed C local (a struct, array,
 // slice or header typedef; never a scalar or a pointer) out of a finished
 // body into a block of declarations for the function's opening brace,
@@ -442,10 +475,26 @@ string CodeGen::HoistAggregateDecls(string &b) {
         }
         Append(decls, "    ", type, " ", name, ";\n");
         if (!init.empty()) {
-            // A brace initializer becomes a compound literal (C99).
             out.append(indent, ' ');
-            if (init[0] == '{') Append(out, name, " = (", type, ")", init, ";\n");
-            else Append(out, name, " = ", init, ";\n");
+            if (init[0] != '{') {
+                Append(out, name, " = ", init, ";\n");
+                continue;
+            }
+            // A brace initializer of a slice or core reference type gives
+            // every member, and becomes their assignments: TinyCC compiles
+            // a compound literal into a memset call that zeroes it, its
+            // stores, and a copy. The members' values never read the
+            // variable, whose declaration they initialized. Any other one
+            // becomes a compound literal (C99).
+            auto fs = BraceFields(type);
+            auto vals = fs.empty() ? vector<string>() : SplitBraceInit(init);
+            if (fs.empty() || vals.size() != fs.size()) {
+                Append(out, name, " = (", type, ")", init, ";\n");
+                continue;
+            }
+            for (size_t k = 0; k < fs.size(); k++)
+                Append(out, k ? " " : "", name, ".", fs[k], " = ", vals[k], ";");
+            out += '\n';
         }
     }
     b = out;
@@ -479,10 +528,14 @@ void CodeGen::EmitSimdVersions(FnSpec *sp, const string &name, const string &par
     }
     auto ret = SigRet(sp);
     vector<string> versions(SIMD_LEVELS + 1);
+    // Every version above the baseline has FMA, so math's mul_add fuses in
+    // it whatever the target's mode (runtime.h).
     for (int lv = SIMD_LEVELS; lv >= 1; lv--) {
         versions[lv] = Unique(cat(name, "_simd", lv));
-        Append(code, "#if GS_SIMD >= ", lv, "\nGS_SIMD_TARGET", lv, " static ", ret, " ",
-               versions[lv], "(", params, ") {\n", fnbody, "}\n#endif\n");
+        Append(code, "#if GS_SIMD >= ", lv,
+               "\n#undef GS_MUL_ADD_MODE\n#define GS_MUL_ADD_MODE fused\nGS_SIMD_TARGET", lv,
+               " static ", ret, " ", versions[lv], "(", params, ") {\n", fnbody,
+               "}\n#undef GS_MUL_ADD_MODE\n#define GS_MUL_ADD_MODE GS_MUL_ADD_BASE\n#endif\n");
     }
     Append(code, "static ", ret, " ", name, "(", params, ") {\n",
            "#if GS_SIMD >= 1\n    switch (gs_simd_level()) {\n");
@@ -529,6 +582,13 @@ void CodeGen::EmitSpec(FnSpec *sp, bool er) {
         EnsureFromChannels(sp);
         auto tid = fromids[sp];
         for (size_t i = 0; i < sp->rets.size(); i++) {
+            if (NeedsResultLocation(sp->rets[i])) {
+                auto sav = T(), chan = cat("gs_lret_", tid, "_", i);
+                L(CT(sp->rets[i]), " *", sav, " = ", chan, ";");
+                L(chan, " = gs_r", i, ";");
+                fdstsaves.push_back(cat(chan, " = ", sav, ";"));
+                continue;
+            }
             if (!IsBytesT(sp->rets[i])) continue;
             auto sav = T();
             L("gs_stack *", sav, " = gs_fdst_", tid, "_", i, ";");
@@ -652,16 +712,16 @@ bool CodeGen::StaticInitX(Node *n, TypeExpr *t, string &out) {
             auto &a = *t->arr;
             if (a.akind != A_FIXED) return false;
             auto k = ArrSize(t->arr);
-            if (k < 1 || k > MAXSTATICELEMS) return false;
+            if (k < 1) return false;
             string s = "{ { ";
             if (auto str = Is<StrLit>(n)) {
-                if (!IsU8(a.sub) || (int64_t)str->val.size() != k) return false;
+                if (k > MAXSTATICELEMS || !IsU8(a.sub) || (int64_t)str->val.size() != k) return false;
                 for (int64_t e = 0; e < k; e++)
                     Append(s, e ? ", " : "", (int)(uint8_t)str->val[(size_t)e]);
             } else if (auto al = Is<ArrayLit>(n)) {
                 string ex;
                 if (al->fillval) {
-                    if (!StaticInitX(al->fillval, a.sub, ex)) return false;
+                    if (k > MAXSTATICELEMS || !StaticInitX(al->fillval, a.sub, ex)) return false;
                     for (int64_t e = 0; e < k; e++) Append(s, e ? ", " : "", ex);
                 } else {
                     if ((int64_t)al->elems.size() != k) return false;
@@ -682,9 +742,6 @@ bool CodeGen::StaticInitX(Node *n, TypeExpr *t, string &out) {
 
 void CodeGen::EmitGlobalDecls() {
     for (auto g : ast.globals) {
-        // The multi-value call form has one initializer for several defs;
-        // only the one-init-per-def shape can carry a static initializer.
-        auto perdef = g->inits.size() == g->defs.size();
         for (size_t di = 0; di < g->defs.size(); di++) {
             auto d = g->defs[di];
             auto name = Unique(Sanitize(g->ns, d->name));
@@ -697,7 +754,7 @@ void CodeGen::EmitGlobalDecls() {
             if (IsResz(d->type)) {
                 EmitCoreTypes();
                 auto stk = Unique(cat("gs_gstk_", name));
-                member(cat(IsFrameObj(d->type) ? CT(d->type) : string("gs_rhdr"), " ", name));
+                member(cat(RzCT(d->type), " ", name));
                 member(cat("gs_stack ", stk));
                 gstks[d] = cat("(&GS_GL->", stk, ")");
                 reg(gstks[d]);
@@ -724,7 +781,7 @@ void CodeGen::EmitGlobalDecls() {
                 // the qualifier, as the pointers and slices into it that
                 // Goose types do not mark const take it. A `var` one may
                 // be assigned as a whole.
-                if (perdef && !d->isvar && d->type->cq && !PrefVar(d) &&
+                if (!d->isvar && d->type->cq && !PrefVar(d) &&
                     StaticInitX(g->inits[di], d->type, init)) {
                     Append(data, "static const ", VarCT(d), " ", name, " = ", init, ";\n");
                     gstatic[d] = g->inits[di];
@@ -746,41 +803,22 @@ void CodeGen::EmitGlobalInit() {
     for (auto g : ast.globals) {
         if (g->inits.empty()) continue;
         PushSc(SC_STMT);
-        if (g->defs.size() > 1 && g->inits.size() == 1) {
-            auto c = Is<Call>(g->inits[0]);
-            assert(c);
-            vector<Dst> dsts;
-            for (size_t i = 0; i < g->defs.size(); i++) {
-                auto d = g->defs[i];
-                if (IsResz(d->type)) {
-                    InitGlobalStack(d);
-                    dsts.push_back(Dst { DK_STACK, gstks[d], d->type, GlobalLenLv(d) });
-                } else if (IsBytesT(d->type)) {
-                    InitGlobalStack(d);
-                    dsts.push_back(Dst { DK_STACK, gstks[d] });
-                } else {
-                    dsts.push_back(Dst { DK_LVALUE, gnames[d] });
-                }
-            }
-            EmitCallInto(c, dsts);
-        } else {
-            for (size_t i = 0; i < g->defs.size(); i++) {
-                auto d = g->defs[i];
-                if (gstatic.count(d)) continue;   // Initialized at its declaration.
-                if (IsResz(d->type)) {
-                    InitGlobalStack(d);
-                    GenConstruct(g->inits[i], gstks[d], d->type, GlobalLenLv(d));
-                } else if (IsBytesT(d->type)) {
-                    InitGlobalStack(d);
-                    GenConstruct(g->inits[i], gstks[d], d->type);
-                } else if (PrefVar(d)) {
-                    L(gnames[d], " = ", GenPrefVal(g->inits[i]), ";");
-                } else if (d->type->kind == TY_REF && d->type->ref->lenstorage >= 0) {
-                    EmitRelStoreAt(cat("(uint8_t *)&", gnames[d]), d->type, GenX(g->inits[i]),
-                                   g->inits[i]->line, true, RelValue(g->inits[i]));
-                } else {
-                    GenAny(g->inits[i], Dst { DK_LVALUE, gnames[d], d->type });
-                }
+        for (size_t i = 0; i < g->defs.size(); i++) {
+            auto d = g->defs[i];
+            if (gstatic.count(d)) continue;   // Initialized at its declaration.
+            if (IsResz(d->type)) {
+                InitGlobalStack(d);
+                GenConstruct(g->inits[i], gstks[d], d->type, GlobalLenLv(d));
+            } else if (IsBytesT(d->type)) {
+                InitGlobalStack(d);
+                GenConstruct(g->inits[i], gstks[d], d->type);
+            } else if (PrefVar(d)) {
+                L(gnames[d], " = ", GenPrefVal(g->inits[i]), ";");
+            } else if (IsRelRef(d->type)) {
+                EmitRelStoreAt(cat("(uint8_t *)&", gnames[d]), d->type, GenX(g->inits[i]),
+                               g->inits[i]->line, true, RelValue(g->inits[i]));
+            } else {
+                GenAny(g->inits[i], Dst { DK_LVALUE, gnames[d], d->type });
             }
         }
         if (termjump) cscopes.back().saves.clear();
@@ -797,11 +835,18 @@ void CodeGen::EmitGlobalInit() {
     code += "}\n\n";
 }
 
+// x, a pure expression, as a value of index or bound type t: checked below
+// (at most, for a bound) the length of the array t names (§3.11).
+string CodeGen::IndexTypeCheck(const string &x, TypeExpr *t, Line ln) {
+    auto n = GlobalLenLv(t->ix->arr);
+    if (!t->ix->upto) return cat("GS_IDX(", x, ", ", n, ", ", LocArgs(ln), ")");
+    return cat("((uint64_t)(", x, ") <= (uint64_t)(", n, ") ? (", x, ") : (gs_idxfail((int64_t)(",
+               x, "), (", n, "), ", LocArgs(ln), "), (int64_t)0))");
+}
+
 // A resizable global's receiving lvalue: its header's count, or the
 // whole frame object.
-string CodeGen::GlobalLenLv(VarDef *d) {
-    return IsFrameObj(d->type) ? gnames[d] : cat(gnames[d], ".len");
-}
+string CodeGen::GlobalLenLv(VarDef *d) { return RzLenLv(d->type, gnames[d]); }
 
 void CodeGen::InitGlobalStack(VarDef *d) {
     auto stk = gstks[d];
@@ -844,6 +889,16 @@ void CodeGen::EmitProgramInit() {
                  "    if (gs_program_initialized) return;\n"
                  "    gs_rt_init(argc, argv, ", mainstacks, ", ", mainstacks + globalregions,
            ", ", workerregions, ");\n");
+    // The shared libraries' functions, before a global's initializer could
+    // call one: on the main thread, before any worker exists, so the
+    // pointers are written once here and read thereafter without
+    // synchronization. A failure to open a library or find a symbol is a
+    // runtime error naming it (design/dynamic_externs.md §4).
+    auto dllibs = DlLibs();
+    for (auto sp : usedexterns) dlbinds += !sp->sf->dylib.empty();
+    if (!dllibs.empty())
+        Append(code, "    gs_dl_bind(gs_dllibs, ", dllibs.size(), ", gs_dlbinds, ", dlbinds,
+               ");\n");
     // The queues, before anything that could use one runs.
     vector<string> qnames;
     for (auto &[m, q] : queues) qnames.push_back(q);

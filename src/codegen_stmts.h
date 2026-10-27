@@ -41,7 +41,10 @@ void CodeGen::GenStmt(Node *n) {
     PushSc(SC_STMT);
     termjump = false;
     GenStmt2(n);
-    if (termjump) cscopes.back().saves.clear();   // Nothing runs after a jump.
+    if (termjump) {   // Nothing runs after a jump.
+        cscopes.back().saves.clear();
+        cscopes.back().defers.clear();
+    }
     PopSc();
     termjump = false;
 }
@@ -54,37 +57,53 @@ void CodeGen::GenStmt(Node *n) {
 // the watermarks of declarations it ran past, so the continue label
 // sits after the fallthrough restores rather than sharing them.
 
+// The scope of a Goose loop, opened ahead of the C loop or loops that run its
+// body: the divisors fixed for the loop (HoistDivisors), declared in front of
+// it, its break and continue labels, where its break values go, and its
+// region for top caching.
+CodeGen::OpenedLoop CodeGen::OpenLoop(Block *bodyb, Node *cond,
+                                             const vector<const VarDef *> &binders,
+                                             const Dst &d) {
+    OpenedLoop lp;
+    lp.divisors = HoistDivisors(bodyb, cond, binders);
+    PushSc(SC_LOOP);
+    lp.si = (int)cscopes.size() - 1;
+    cscopes[lp.si].brklbl = Lbl();
+    cscopes[lp.si].cntlbl = Lbl();
+    EnterDst(lp.si, d);
+    lp.loopid = MarkLoopBegin();
+    return lp;
+}
+
+// Closes a loop's scope after its last C loop: the break label follows where
+// a break used it, and the loop's divisors retire.
+void CodeGen::CloseLoop(const OpenedLoop &lp) {
+    assert(lp.si == (int)cscopes.size() - 1);
+    auto usedbrk = cscopes[lp.si].usedbrk;
+    auto brklbl = cscopes[lp.si].brklbl;
+    cscopes[lp.si].saves.clear();   // Restores already emitted in-loop.
+    cscopes[lp.si].defers.clear();
+    PopSc();
+    if (usedbrk) L(brklbl, ":;");
+    MarkLoopEnd(lp.loopid);
+    for (auto &k : lp.divisors) divmagic.erase(k);
+    termjump = false;
+}
+
 void CodeGen::GenLoopBody(const function<void()> &condexit, Block *bodyb, Dst d,
                                  const string &forhead, Node *cond, size_t first,
                                  vector<const VarDef *> binders) {
-    auto divisors = HoistDivisors(bodyb, cond, binders);
-    PushSc(SC_LOOP);
-    auto si = (int)cscopes.size() - 1;
-    cscopes[si].brklbl = Lbl();
-    cscopes[si].cntlbl = Lbl();
-    EnterDst(si, d);
-    auto loopid = MarkLoopBegin();
+    auto lp = OpenLoop(bodyb, cond, binders, d);
     L(forhead.empty() ? "for (;;) {" : forhead);
     ind++;
     // The condition is the loop's exit, a branch that stays, so only the
     // body's && and || may take the unconditional form.
     if (condexit) condexit();
-    cscopes[si].straight = StraightCode(bodyb) && (!cond || StraightCode(cond));
-    for (auto i = first; i < bodyb->stmts.size(); i++) GenStmt(bodyb->stmts[i]);
-    if (bodyb->tail) GenStmt(bodyb->tail);
-    auto &sc = cscopes.back();
-    EmitRestores(sc);
-    if (sc.usedcnt) L(sc.cntlbl, ":;");
+    cscopes[lp.si].straight = StraightCode(bodyb) && (!cond || StraightCode(cond));
+    GenBodyCopy(bodyb, lp.si, first);
     ind--;
     L("}");
-    auto usedbrk = sc.usedbrk;
-    auto brklbl = sc.brklbl;
-    cscopes.back().saves.clear();   // Restores already emitted in-loop.
-    PopSc();
-    if (usedbrk) L(brklbl, ":;");
-    MarkLoopEnd(loopid);
-    for (auto &k : divisors) divmagic.erase(k);
-    termjump = false;
+    CloseLoop(lp);
 }
 
 // Whether n can compile to straight-line code once its ifs are converted:
@@ -100,6 +119,21 @@ bool CodeGen::StraightCode(Node *n) {
     return ok;
 }
 
+// Whether n, where it runs, calls a recursive function: a call the C compiler
+// cannot inline away, across which everything live is in a callee-saved
+// register or spilled.
+bool CodeGen::CallsRecursive(Node *n) {
+    if (!n) return false;
+    if (auto c = Is<Call>(n)) {
+        if (c->spec && c->spec->sf && c->spec->sf->isrec) return true;
+        for (auto s : c->dispatch)
+            if (s && s->sf && s->sf->isrec) return true;
+    }
+    auto found = false;
+    RunChildren(n, [&](Node *ch) { found = found || CallsRecursive(ch); });
+    return found;
+}
+
 // Whether the code being emitted is in a loop StraightCode accepts, the
 // innermost one around it in this function.
 bool CodeGen::InStraightLoop() {
@@ -110,16 +144,72 @@ bool CodeGen::InStraightLoop() {
     return false;
 }
 
-// An unsigned `/` or `%`, or a signed one BCE found to be of nonnegative
-// operands (Binary::nonneg), by a divisor DivisorKey names, which
+// n as the division it computes, if it is a `/` or `%`, or a `/=` or `%=`,
+// whose dividend is its target's old value (a reference's pointee where it
+// writes that).
+bool CodeGen::AsDivision(Node *n, Division &dv) {
+    if (auto b = Is<Binary>(n); b && (b->op == T_DIV || b->op == T_MOD)) {
+        dv = { b->op, b->left->exprtype, b->right, b->nonneg };
+        return true;
+    }
+    if (auto a = Is<Assign>(n); a && (a->op == T_DIVEQ || a->op == T_MODEQ)) {
+        auto t = a->lval->exprtype;
+        if (a->pointee && t && t->kind == TY_REF) t = t->ref->sub;
+        dv = { a->op == T_DIVEQ ? T_DIV : T_MOD, t, a->rhs, false };
+        return true;
+    }
+    return false;
+}
+
+// An unsigned division, or a signed one BCE found to be of nonnegative
+// operands (Division::nonneg), by a divisor DivisorKey names, which
 // HoistDivisors may find a loop cannot change.
-bool CodeGen::LoopDivisible(Binary *b) {
-    if (b->op != T_DIV && b->op != T_MOD) return false;
-    auto t = b->left->exprtype;
+bool CodeGen::LoopDivisible(const Division &dv) {
+    auto t = dv.t;
     if (!t || t->kind != TY_INT || t->intstorage == IS_VARINT) return false;
-    if (!IsUnsigned(t->intstorage) && !b->nonneg) return false;
-    auto rt = b->right->exprtype;
-    return rt && rt->kind == TY_INT && !DivisorKey(b->right).empty();
+    if (!IsUnsigned(t->intstorage) && !dv.nonneg) return false;
+    auto rt = dv.divisor->exprtype;
+    return rt && rt->kind == TY_INT && !DivisorKey(dv.divisor).empty();
+}
+
+// Whether a LoopDivisible division's operands, of the dividend's type, fit
+// in 32 bits, for a 32-bit magic: the high half of a 32x32 product, which a
+// C compiler vectorizes, where it keeps a 64x64 one scalar.
+bool CodeGen::NarrowDivision(const Division &dv) {
+    return IntBits(dv.t->intstorage) <= 32;
+}
+
+// What HoistDivisors files a LoopDivisible division's magic under: its
+// divisor's DivisorKey, distinct for a NarrowDivision, which takes a 32-bit
+// magic.
+string CodeGen::DivisionKey(const Division &dv, const VarDef **root, bool *path) {
+    auto k = DivisorKey(dv.divisor, root, path);
+    return NarrowDivision(dv) ? cat(k, " u32") : k;
+}
+
+// A division of l by a divisor fixed for an enclosing loop (HoistDivisors):
+// the high half of a product by its magic number, unless gs_divu_gen found
+// none to give. `plain`, the division by the divisor itself, where no loop
+// fixed it.
+string CodeGen::FixedDivX(const Division &dv, const string &l,
+                                 const function<string()> &plain, Line line) {
+    auto key = LoopDivisible(dv) ? DivisionKey(dv) : string();
+    auto dm = key.empty() ? divmagic.end() : divmagic.find(key);
+    if (dm == divmagic.end()) return plain();
+    auto &mg = dm->second;
+    auto ct = CT(dv.t);
+    auto lc = cat("(", ct, ")(", l, ")");
+    auto w = mg.narrow ? "uint32_t" : "uint64_t";
+    auto q = cat(mg.narrow ? "gs_divu32_q(" : "gs_divu_q(", "(", w, ")(", lc, "), ", mg.magic, ", ",
+                 mg.more, ")");
+    auto fast = dv.op == T_DIV ? q : cat("(", w, ")(", lc, ") - ", q, " * ", mg.val);
+    // Where only a zero divisor goes without, the plain division would fail.
+    // Failing outright leaves a test of the loop-invariant `more` that gcc
+    // takes out of the loop; the plain division's own zero test would be a
+    // loop exit after which the loop's stores might not run, which keeps gcc
+    // from holding them in registers (and from vectorizing the loop).
+    auto slow = mg.zeronone ? cat("(gs_divfail(", LocArgs(line), "), 0)") : plain();
+    return cat("(", ct, ")(", mg.more, " != GS_DIVU_NONE ? ", fast, " : ", slow, ")");
 }
 
 // What a divisor a loop may fix is known by, or "" where it is none: an
@@ -146,7 +236,9 @@ string CodeGen::DivisorKey(Node *n, const VarDef **root, bool *path) {
         return cat(k, ".", d->fieldidx);
     }
     if (auto c = Is<AsCast>(n)) {
-        if (!isint(c->totype) || !isint(c->child->exprtype)) return "";
+        // A conversion into an index type checks against its array, which
+        // no hoisted divisor condition stands in for (§3.11).
+        if (!isint(c->totype) || !isint(c->child->exprtype) || c->totype->ix) return "";
         auto k = DivisorKey(c->child, root, path);
         if (k.empty()) return "";
         return cat("(", k, c->unchecked ? " as! " : " as ", IntStorageName(c->totype->intstorage),
@@ -160,7 +252,7 @@ string CodeGen::DivisorKey(Node *n, const VarDef **root, bool *path) {
 // of them would fail (or stays "1"), and the value is used only under it.
 string CodeGen::DivisorValue(Node *n, string &ok) {
     auto c = Is<AsCast>(n);
-    if (!c) return GenX(n);
+    if (!c || c->totype->ix) return GenX(n);
     auto x = DivisorValue(c->child, ok);
     auto st = c->child->exprtype;
     auto is = c->totype->intstorage;
@@ -235,28 +327,29 @@ const set<const VarDef *> &CodeGen::RefdLocals() {
     return refdlocals;
 }
 
-// The divisions in a loop by a divisor the loop cannot change (LoopDivisible)
-// multiply by a magic number computed here, ahead of the loop, once for every
-// loop nested in it as well: a hardware division takes several times as long
-// as a multiply and a shift. The divisor is a variable bound before the loop
-// -- named already, and bound nowhere inside, nor by the loop itself
-// (`binders`, a `for`'s variables) -- or fields of one, or a conversion of
-// either, and the loop (its condition included) writes nothing of that
-// variable. Nothing else may: no reference is made to the variable anywhere
-// in the function (RefdLocals), nor may another function's code reach it
-// (captured, or a function's named result built at its destination). A
-// global, which other functions' code may write, or a variable of global
-// initialization code, which RefdLocals does not see, counts only as an
-// integer `let` no writable reference is bound to (VarDef::refwrite). A
-// conversion that would fail leaves the divisions plain, to fail where and
-// when one runs. Returns the divisors it adds to divmagic, for the loop to
-// retire. Tail-recursion elimination turns self-calls into a loop that
-// assigns the parameters each round (optimize_tre.h), which is a write.
+// The divisions in a loop by a divisor the loop cannot change (LoopDivisible:
+// a `/` or `%`, or a `/=` or `%=`) multiply by a magic number computed here,
+// ahead of the loop, once for every loop nested in it as well (FixedDivX): a
+// hardware division takes several times as long as a multiply and a shift.
+// The divisor is a variable bound before the loop -- named already, and bound
+// nowhere inside, nor by the loop itself (`binders`, a `for`'s variables) --
+// or fields of one, or a conversion of either, and the loop (its condition
+// included) writes nothing of that variable. Nothing else may: no reference
+// is made to the variable anywhere in the function (RefdLocals), nor may
+// another function's code reach it (captured, or a function's named result
+// built at its destination). A global, which other functions' code may
+// write, or a variable of global initialization code, which RefdLocals does
+// not see, counts only as an integer `let` no writable reference is bound to
+// (VarDef::refwrite). A conversion that would fail leaves the divisions
+// plain, to fail where and when one runs. Returns the divisors it adds to
+// divmagic, for the loop to retire. Tail-recursion elimination turns
+// self-calls into a loop that assigns the parameters each round
+// (optimize_tre.h), which is a write.
 vector<string> CodeGen::HoistDivisors(Block *loopbody, Node *cond,
                                              const vector<const VarDef *> &binders) {
     vector<string> added;
     set<const VarDef *> inner(binders.begin(), binders.end());
-    vector<Binary *> divs;
+    vector<Division> divs;
     function<void(Node *)> all = [&](Node *n) {
         if (!n) return;
         if (auto id = Is<Ident>(n); id && id->vdef) inner.insert(id->vdef);
@@ -289,15 +382,15 @@ vector<string> CodeGen::HoistDivisors(Block *loopbody, Node *cond,
             if (c->builtin >= 0 && (BuiltinByKind(c->builtin).flags & BF_WRITE))
                 written(c->FirstArg());
         }
-        if (auto b = Is<Binary>(n); b && LoopDivisible(b)) divs.push_back(b);
+        if (Division dv; AsDivision(n, dv) && LoopDivisible(dv)) divs.push_back(dv);
         RunChildren(n, walk);
     };
     walk(loopbody);
     walk(cond);
-    for (auto b : divs) {
+    for (auto &dv : divs) {
         const VarDef *root = nullptr;
         auto path = false;
-        auto key = DivisorKey(b->right, &root, &path);
+        auto key = DivisionKey(dv, &root, &path);
         if (divmagic.count(key) || inner.count(root) || root->captured || root->refwrite ||
             nrvo.count(root))
             continue;
@@ -307,14 +400,17 @@ vector<string> CodeGen::HoistDivisors(Block *loopbody, Node *cond,
             continue;
         }
         auto ok = string("1");
-        auto x = DivisorValue(b->right, ok);
+        auto x = DivisorValue(dv.divisor, ok);
         auto v = T(), m = T(), more = T();
+        auto narrow = NarrowDivision(dv);
+        auto w = narrow ? "uint32_t" : "uint64_t";
+        auto gen = narrow ? "gs_divu32_gen(" : "gs_divu_gen(";
         L("uint8_t ", more, ";");
-        L("uint64_t ", v, " = (uint64_t)(", x, ");");
-        if (ok == "1") L("uint64_t ", m, " = gs_divu_gen(", v, ", &", more, ");");
-        else L("uint64_t ", m, " = (", ok, ") ? gs_divu_gen(", v, ", &", more, ") : (", more,
+        L(w, " ", v, " = (", w, ")(", x, ");");
+        if (ok == "1") L(w, " ", m, " = ", gen, v, ", &", more, ");");
+        else L(w, " ", m, " = (", ok, ") ? ", gen, v, ", &", more, ") : (", more,
                " = GS_DIVU_NONE, 0);");
-        divmagic[key] = { v, m, more };
+        divmagic[key] = { v, m, more, narrow, narrow && ok == "1" };
         added.push_back(key);
     }
     return added;
@@ -386,10 +482,10 @@ string CodeGen::AtLeastLeft(TypeExpr *ct, const string &hi, const string &ctr, i
     return cat(ctr, " < ", hi, " && (uint64_t)", hi, " - (uint64_t)", ctr, " >= ", k);
 }
 
-// One copy of a loop's body in the C loop the caller opened, ending where a
-// continue in it lands.
-void CodeGen::GenBodyCopy(Block *bodyb, int si) {
-    for (auto st : bodyb->stmts) GenStmt(st);
+// One copy of a loop's body, from its statement `first` on, in the C loop the
+// caller opened, ending where a continue in it lands.
+void CodeGen::GenBodyCopy(Block *bodyb, int si, size_t first) {
+    for (auto i = first; i < bodyb->stmts.size(); i++) GenStmt(bodyb->stmts[i]);
     if (bodyb->tail) GenStmt(bodyb->tail);
     EmitRestores(cscopes[si]);
     if (cscopes[si].usedcnt) L(cscopes[si].cntlbl, ":;");
@@ -398,7 +494,8 @@ void CodeGen::GenBodyCopy(Block *bodyb, int si) {
 // `while (<more>) { k iterations }`, then `for (; <cond>; <step>)` for the
 // rest; `bind` declares an iteration's loop variables, and `step` advances
 // them. The two copies of the body share one Goose loop scope, so a break in
-// either leaves both, while each has its own continue label.
+// either leaves both and a divisor fixed for the loop serves both, while each
+// has its own continue label.
 //
 // Strip-mined (stripk), the block is a loop of k iterations whose counter is
 // the value of every `i % k` the body takes. An in-order sum (sumred)
@@ -406,11 +503,9 @@ void CodeGen::GenBodyCopy(Block *bodyb, int si) {
 // one after another, as the loop would have.
 void CodeGen::GenBlocked(ForLoop *f, int k, const string &more, const string &step,
                                 const function<void()> &bind, const string &cond) {
-    PushSc(SC_LOOP);
-    auto si = (int)cscopes.size() - 1;
-    cscopes[si].brklbl = Lbl();
-    cscopes[si].cntlbl = Lbl();
-    auto loopid = MarkLoopBegin();
+    auto lp = OpenLoop(f->body, nullptr, { f->vdef, f->idxdef }, Dst {});
+    auto si = lp.si;
+    cscopes[si].straight = StraightCode(f->body);
     {
         NameScope ns(*this);
         L(f->stripk ? "/* loop shape: strip-mined by " : "/* loop shape: sum terms in blocks of ",
@@ -453,6 +548,7 @@ void CodeGen::GenBlocked(ForLoop *f, int k, const string &more, const string &st
         L("}");
     }
     cscopes[si].saves.clear();
+    cscopes[si].defers.clear();
     cscopes[si].usedcnt = false;
     cscopes[si].cntlbl = Lbl();
     L("for (; ", cond, "; ", step, ") {");
@@ -461,13 +557,7 @@ void CodeGen::GenBlocked(ForLoop *f, int k, const string &more, const string &st
     GenBodyCopy(f->body, si);
     ind--;
     L("}");
-    auto usedbrk = cscopes[si].usedbrk;
-    auto brklbl = cscopes[si].brklbl;
-    cscopes.back().saves.clear();
-    PopSc();
-    if (usedbrk) L(brklbl, ":;");
-    MarkLoopEnd(loopid);
-    termjump = false;
+    CloseLoop(lp);
 }
 
 // ------------------------------------------------------------------
@@ -564,6 +654,7 @@ void CodeGen::LandValue(const string &stk, const string &top0, const string &sta
 // A break's value, or a return's leaving an inlined body, for scope si.
 void CodeGen::GenExitValue(Node *val, int si) {
     auto d = cscopes[si].dst;
+    if (d.k == DK_BRANCH) return GenBranch(val, d.when, d.s, d.exitscope);
     if (d.k != DK_STACK || !NrvoBoundAt(val, d.s, d.lenlv)) NoSelfRelCopy(val);
     auto start = d.k == DK_STACK ? ExitStart(val, d.s, d.lenlv, cscopes[si].open0) : "";
     GenAny(val, d);
@@ -583,61 +674,10 @@ void CodeGen::BindLocal(VarDef *d, Node *init, bool forlocal) {
     }
     auto name = LocalName(d);
     auto t = d->type;
-    if (IsResz(t)) {
+    if (IsResz(t) || IsBytesT(t)) {
         assert(init);
-        EmitCoreTypes();
-        string stk;
-        auto nit = nrvo.find(d);
-        if (nit != nrvo.end()) {
-            auto &nd = nit->second;
-            stk = nd.stk;
-            // The receiving prefix goes in front of the elements, so its
-            // bytes are claimed before the first one lands. A varint takes
-            // one byte here and is widened at the return only if the count
-            // does not fit (EmitPrefixPatch).
-            if (nd.prefix) {
-                nd.pref = T();
-                L("uint8_t *", nd.pref, " = ", Top(stk), ";");
-                Bump(stk, cat(PrefixBytes(nd.ls)));
-            }
-            nd.hdr = name;
-            // A return of another value finds it in front (ExitStart).
-            if (!nd.inlined) openat[stk]++;
-        } else {
-            stk = AllocStk(forlocal);
-        }
-        if (IsFrameObj(t)) {
-            L(CT(t), " ", name, ";");
-            if (nit == nrvo.end()) SaveBase(forlocal, stk, cat(FoTailHdr(t, name), ".base"));
-            vstk[d] = stk;
-            GenConstruct(init, stk, t, name);
-            return;
-        }
-        L("gs_rhdr ", name, " = { ", Top(stk), ", 0 };");
-        // The destination outlives us: no watermark to restore there.
-        if (nit == nrvo.end()) SaveBase(forlocal, stk, cat(name, ".base"));
-        vstk[d] = stk;
-        if (d->reusable) {
-            // Companion freelist: free slot indices on their own stack.
-            auto flstk = AllocStk(forlocal);
-            auto fln = Unique2(cat(name, "_fl"));
-            L("gs_rhdr ", fln, " = { ", Top(flstk), ", 0 };");
-            SaveBase(forlocal, flstk, cat(fln, ".base"));
-            vpool[d] = { fln, flstk };
-        }
-        GenConstruct(init, stk, t, cat(name, ".len"));
-        return;
-    }
-    if (IsBytesT(t)) {
-        assert(init);
-        auto nit = nrvo.find(d);
-        auto stk = nit != nrvo.end() ? nit->second.stk : AllocStk(forlocal);
-        if (nit != nrvo.end() && !nit->second.inlined) openat[stk]++;
-        L("uint8_t *", name, " = ", Top(stk), ";");
-        // A named result lives at the destination, which outlives us.
-        if (nit == nrvo.end()) SaveBase(forlocal, stk, name);
-        vstk[d] = stk;
-        GenConstruct(init, stk, t);
+        auto dst = DeclStackLocal(d, forlocal);
+        GenConstruct(init, dst.s, dst.t, dst.lenlv);
         return;
     }
     if (LargeFixedOnStack(t)) {
@@ -656,15 +696,15 @@ void CodeGen::BindLocal(VarDef *d, Node *init, bool forlocal) {
     }
     // A relative reference variable holds the offset (§3.9): whatever the
     // initializer, its value is the plain reference to encode.
-    if (t->kind == TY_REF && t->ref->lenstorage >= 0) {
+    if (IsRelRef(t)) {
         L(CT(t), " ", name, ";");
         EmitRelStoreAt(cat("(uint8_t *)&", name), t, GenX(init), init->line, true,
                        RelValue(init));
         return;
     }
-    // Literals holding relative references construct into the variable
-    // itself rather than through an initializer copy.
-    if (IsCtl(init) || Is<Call>(init) ||
+    // Literals holding relative references, and slices, construct into the
+    // variable itself rather than through an initializer copy.
+    if (IsCtl(init) || Is<Call>(init) || (Is<SliceExpr>(init) && t->kind == TY_SLICE) ||
         ((Is<StructLit>(init) || Is<ArrayLit>(init)) && HasRelRef(t))) {
         L(CT(t), " ", name, ";");
         GenAny(init, Dst { DK_LVALUE, name, t });
@@ -677,6 +717,64 @@ void CodeGen::BindLocal(VarDef *d, Node *init, bool forlocal) {
         return;
     }
     L(CT(t), " ", name, " = ", GenXD(init, t), ";");
+}
+
+// Declares the local `d` of a resizable or bytes type -- a resizable's
+// header or frame object, a reusable pool's freelist beside it, a bytes
+// value's base pointer -- at the top of a data stack of its own, or of its
+// destination's for a named result, and returns where its value is built.
+Dst CodeGen::DeclStackLocal(VarDef *d, bool forlocal) {
+    auto name = LocalName(d);
+    auto t = d->type;
+    auto resz = IsResz(t);
+    if (resz) EmitCoreTypes();
+    string stk;
+    auto nit = nrvo.find(d);
+    if (nit != nrvo.end()) {
+        auto &nd = nit->second;
+        stk = nd.stk;
+        if (resz) {
+            // The receiving prefix goes in front of the elements, so its
+            // bytes are claimed before the first one lands. A varint takes
+            // one byte here and is widened at the return only if the count
+            // does not fit (EmitPrefixPatch).
+            if (nd.prefix) {
+                nd.pref = T();
+                L("uint8_t *", nd.pref, " = ", Top(stk), ";");
+                Bump(stk, cat(PrefixBytes(nd.ls)));
+            }
+            nd.hdr = name;
+        }
+        // A return of another value finds it in front (ExitStart).
+        if (!nd.inlined) openat[stk]++;
+    } else {
+        stk = AllocStk(forlocal);
+    }
+    vstk[d] = stk;
+    // A named result lives at the destination, which outlives us: no
+    // watermark to restore there.
+    auto own = nit == nrvo.end();
+    if (!resz) {
+        L("uint8_t *", name, " = ", Top(stk), ";");
+        if (own) SaveBase(forlocal, stk, name);
+        return Dst { DK_STACK, stk, t };
+    }
+    if (IsFrameObj(t)) {
+        L(CT(t), " ", name, ";");
+        if (own) SaveBase(forlocal, stk, cat(FoTailHdr(t, name), ".base"));
+        return Dst { DK_STACK, stk, t, name };
+    }
+    L("gs_rhdr ", name, " = { ", Top(stk), ", 0 };");
+    if (own) SaveBase(forlocal, stk, cat(name, ".base"));
+    if (d->reusable) {
+        // Companion freelist: free slot indices on their own stack.
+        auto flstk = AllocStk(forlocal);
+        auto fln = Unique2(cat(name, "_fl"));
+        L("gs_rhdr ", fln, " = { ", Top(flstk), ", 0 };");
+        SaveBase(forlocal, flstk, cat(fln, ".base"));
+        vpool[d] = { fln, flstk };
+    }
+    return Dst { DK_STACK, stk, t, cat(name, ".len") };
 }
 
 // A gs_pref value from a &pool expression or another pool reference, or
@@ -729,13 +827,13 @@ void CodeGen::GenRelAssign(Loc lv, Node *lval, Node *rhs, Line ln) {
 }
 
 void CodeGen::GenRebind(Assign *a, Loc lv) {
-    if (lv.t->kind == TY_REF && lv.t->ref->lenstorage >= 0) {
+    if (IsRelRef(lv.t)) {
         GenRelAssign(lv, a->lval, a->rhs, a->line);
         return;
     }
     assert(lv.val);
     if (Is<NullLit>(a->rhs)) {
-        if (IsResz(lv.t->ref->sub)) L("memset(&", lv.s, ", 0, sizeof(", lv.s, "));");
+        if (IsResz(lv.t->ref->sub)) L("GS_MEMZERO(&", lv.s, ", sizeof(", lv.s, "));");
         else L(lv.s, " = NULL;");
         return;
     }
@@ -831,14 +929,16 @@ void CodeGen::GenNormalReturn(const vector<Node *> &vals) {
                 auto dst = cat("gs_dst", i);
                 if (IsResz(rt)) chans[i] = Dst { DK_STACK, dst, rt, cat("(*gs_rl", i, ")") };
                 else if (IsBytesT(rt)) chans[i] = Dst { DK_STACK, dst };
+                else if (NeedsResultLocation(rt))
+                    chans[i] = Dst { DK_LVALUE, cat("(*gs_r", i, ")"), rt };
                 else continue;
-                starts[i] = ExitStart(c, dst, "", 0);
+                if (IsBytesT(rt)) starts[i] = ExitStart(c, dst, "", 0);
             }
             auto fixed = GenForward(c, sp->rets, chans);
             for (size_t i = 0; i < sp->rets.size(); i++) {
                 if (IsBytesT(sp->rets[i])) continue;
                 if ((int)i == si.cret) retv = fixed[i];
-                else L("*gs_r", i, " = ", fixed[i], ";");
+                else if (!NeedsResultLocation(sp->rets[i])) L("*gs_r", i, " = ", fixed[i], ";");
             }
             for (size_t i = 0; i < sp->rets.size(); i++)
                 if (!starts[i].empty())
@@ -882,6 +982,8 @@ void CodeGen::GenNormalReturn(const vector<Node *> &vals) {
             auto start = ExitStart(vals[i], dst, "", 0);
             GenConstruct(vals[i], dst, rt);
             if (!start.empty()) LandValue(dst, DstTop0(i), start, rt, "");
+        } else if (NeedsResultLocation(rt)) {
+            GenAny(vals[i], Dst { DK_LVALUE, cat("(*gs_r", i, ")"), rt });
         } else if ((int)i == si.cret) {
             retv = T();
             L(CT(rt), " ", retv, ";");
@@ -918,7 +1020,7 @@ void CodeGen::EmitPrefixPatch(const string &pref, IntStorage ls, const string &s
     L("int64_t ", ms, " = gs_uleb_write(", tmp, ", (uint64_t)(", count, "));");
     L("memmove((", elems, ") + ", ms, " - 1, ", elems, ", (size_t)(", Top(stk), " - (",
       elems, ")));");
-    L("memcpy(", pref, ", ", tmp, ", (size_t)", ms, ");");
+    L("GS_MEMCPY(", pref, ", ", tmp, ", (size_t)", ms, ");");
     L(TopW(stk), " += ", ms, " - 1;");
     ind--;
     L("}");
@@ -983,16 +1085,21 @@ void CodeGen::GenFromReturn(Return *r) {
                              cat("gs_lret_", tid, "_", i));
             else if (IsBytesT(rets[i]))
                 GenConstruct(r->vals[i], cat("gs_fdst_", tid, "_", i), rets[i]);
-            else GenAny(r->vals[i], Dst { DK_LVALUE, cat("gs_lret_", tid, "_", i), rets[i] });
+            else {
+                auto dst = cat("gs_lret_", tid, "_", i);
+                if (NeedsResultLocation(rets[i])) dst = cat("(*", dst, ")");
+                GenAny(r->vals[i], Dst { DK_LVALUE, dst, rets[i] });
+            }
         }
     } else {
         // Forward one call's values into the channels.
         vector<Dst> chans;
         for (size_t i = 0; i < rets.size(); i++) {
             auto stk = cat("gs_fdst_", tid, "_", i), lret = cat("gs_lret_", tid, "_", i);
+            if (NeedsResultLocation(rets[i])) lret = cat("(*", lret, ")");
             if (IsResz(rets[i])) chans.push_back(Dst { DK_STACK, stk, rets[i], lret });
             else if (IsBytesT(rets[i])) chans.push_back(Dst { DK_STACK, stk });
-            else chans.push_back(Dst { DK_LVALUE, lret });
+            else chans.push_back(Dst { DK_LVALUE, lret, rets[i] });
         }
         auto fixed = GenForward(Is<Call>(r->vals[0]), rets, chans);
         for (size_t i = 0; i < rets.size(); i++)
@@ -1009,7 +1116,8 @@ void CodeGen::EnsureFromChannels(FnSpec *t) {
     auto &rets = t->rets;
     for (size_t i = 0; i < rets.size(); i++) {
         if (IsFix(rets[i])) {
-            Append(data, "static GS_TLS ", CT(rets[i]), " gs_lret_", tid, "_", i, ";\n");
+            Append(data, "static GS_TLS ", CT(rets[i]), NeedsResultLocation(rets[i]) ? " *" : " ",
+                   "gs_lret_", tid, "_", i, ";\n");
             continue;
         }
         Append(data, "static GS_TLS gs_stack *gs_fdst_", tid, "_", i, ";\n");
@@ -1021,10 +1129,8 @@ void CodeGen::EnsureFromChannels(FnSpec *t) {
 }
 
 // ------------------------------------------------------------------
-// Calls. Returns one entry per return value: a C expression for fixed
-// values, the value's base pointer for bytes-class ones. d0 is the
-// preferred destination for the first return (in-place construction);
-// alldst supplies destinations for every return (multi-value receives).
+// A call's first result as its receiver takes it (the calls themselves are
+// in codegen_calls.h).
 
 // The first return value adjusted to the context it is received in: a
 // reference received in a value context loads the pointee, and an array

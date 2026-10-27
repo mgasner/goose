@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <sys/stat.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -124,11 +125,14 @@ static int gs_os_kind(const gs_os_char *p) {
 #endif
 }
 
+/* Appends the whole file; on a failure, nothing. */
 GS_API uint8_t gs_os_read_file(sl_u8 path, gs_rref out) {
     gs_os_char p[GS_OS_PATH_MAX];
     if (gs_os_native(path, p) < 0) return 0;
     FILE *f = gs_os_fopen(p, "rb");
     if (!f) return 0;
+    int64_t len = out.hdr->len;
+    uint8_t *top = out.stk->top;
     uint8_t buf[65536];
     for (;;) {
         size_t n = fread(buf, 1, sizeof buf, f);
@@ -137,7 +141,12 @@ GS_API uint8_t gs_os_read_file(sl_u8 path, gs_rref out) {
     }
     int bad = ferror(f);
     fclose(f);
-    return bad ? 0 : 1;
+    if (bad) {
+        out.hdr->len = len;
+        out.stk->top = top;
+        return 0;
+    }
+    return 1;
 }
 
 /* write_file and append_file. */
@@ -232,6 +241,10 @@ GS_API uint8_t gs_os_write_file_atomic(sl_u8 path, sl_u8 data) {
             if (errno == EEXIST) continue;
             return 0;
         }
+        /* The permissions of the file it replaces, which write_file leaves
+           as they are, rather than the umask's. */
+        struct stat st;
+        if (stat(p, &st) == 0) ok = fchmod(fd, st.st_mode & 0777) == 0;
         while (ok && left > 0) {
             ssize_t w = write(fd, d, left > (1 << 30) ? (size_t)1 << 30 : (size_t)left);
             if (w < 0 && errno == EINTR) continue;
@@ -397,16 +410,18 @@ GS_API void gs_os_write_stderr(sl_u8 s) {
 
 GS_API void gs_os_flush_stdout(void) { fflush(stdout); }
 
-/* One line of stdin, without its newline; false at end of input. */
+/* One line of stdin, without its newline or a carriage return before it;
+   false at end of input. */
 GS_API uint8_t gs_os_read_line(gs_rref out) {
     int c = fgetc(stdin);
     if (c == EOF) return 0;
+    int64_t start = out.hdr->len;
     while (c != EOF && c != '\n') {
         uint8_t b = (uint8_t)c;
         gs_bld_append(out, &b, 1);
         c = fgetc(stdin);
     }
-    if (out.hdr->len > 0 && out.hdr->base[out.hdr->len - 1] == '\r') {
+    if (out.hdr->len > start && out.hdr->base[out.hdr->len - 1] == '\r') {
         out.hdr->len--;
         out.stk->top--;
     }
@@ -425,36 +440,37 @@ GS_API void gs_os_read_stdin(gs_rref out) {
 
 GS_API int64_t gs_os_arg_count(void) { return gs_argc; }
 
-/* Application resources, independent of cwd and argv[0]. JIT supplies its
-   entry source directory; AOT discovers the running executable at runtime.
-   Append only on success, including a final path separator. */
-GS_API uint8_t gs_os_resource_dir(gs_rref out) {
+/* The application's resource directory (resource_dir(), below) in native
+   form with its final separator, NUL-terminated in buf (GS_OS_PATH_MAX
+   characters): its length, or 0 where it is not known. JIT supplies its
+   entry source directory; AOT discovers the running executable. */
+static int gs_os_resource_native(gs_os_char *buf) {
 #ifdef GS_JIT_RESOURCE_DIR
-    const char *dir = GS_JIT_RESOURCE_DIR;
-    gs_bld_append(out, dir, (int64_t)strlen(dir));
-    return 1;
+    sl_u8 dir = { (uint8_t *)GS_JIT_RESOURCE_DIR, (int64_t)strlen(GS_JIT_RESOURCE_DIR) };
+    int n = gs_os_native(dir, buf);
+    return n < 0 ? 0 : n;
 #elif defined(_WIN32)
-    wchar_t path[GS_OS_PATH_MAX];
-    DWORD n = GetModuleFileNameW(NULL, path, GS_OS_PATH_MAX);
+    DWORD n = GetModuleFileNameW(NULL, buf, GS_OS_PATH_MAX);
     if (!n || n >= GS_OS_PATH_MAX) return 0;
-    while (n && path[n - 1] != L'\\' && path[n - 1] != L'/') --n;
-    return n && gs_os_append_wide(out, path, (int)n);
+    while (n && buf[n - 1] != L'\\' && buf[n - 1] != L'/') --n;
+    buf[n] = 0;
+    return (int)n;
 #else
-    char path[GS_OS_PATH_MAX];
+    char *path = buf;
     size_t n;
     #ifdef __APPLE__
-        uint32_t capacity = sizeof path;
+        uint32_t capacity = GS_OS_PATH_MAX;
         if (_NSGetExecutablePath(path, &capacity) != 0) return 0;
         /* Resolve the loader's possible relative path and symlinks. */
         char *resolved = realpath(path, NULL);
         if (!resolved) return 0;
         n = strlen(resolved);
-        if (n >= sizeof path) { free(resolved); return 0; }
+        if (n >= (size_t)GS_OS_PATH_MAX) { free(resolved); return 0; }
         memcpy(path, resolved, n + 1);
         free(resolved);
     #elif defined(__linux__)
-        ssize_t count = readlink("/proc/self/exe", path, sizeof path);
-        if (count <= 0 || (size_t)count >= sizeof path) return 0;
+        ssize_t count = readlink("/proc/self/exe", path, (size_t)GS_OS_PATH_MAX);
+        if (count <= 0 || (size_t)count >= (size_t)GS_OS_PATH_MAX) return 0;
         n = (size_t)count;
     #else
         return 0;
@@ -466,14 +482,136 @@ GS_API uint8_t gs_os_resource_dir(gs_rref out) {
         size_t suffixlen = sizeof suffix - 1;
         if (n >= suffixlen && !memcmp(path + n - suffixlen, suffix, suffixlen)) {
             n -= sizeof "MacOS/" - 1;
-            if (n + sizeof "Resources/" - 1 >= sizeof path) return 0;
+            if (n + sizeof "Resources/" - 1 >= (size_t)GS_OS_PATH_MAX) return 0;
             memcpy(path + n, "Resources/", sizeof "Resources/" - 1);
             n += sizeof "Resources/" - 1;
         }
     #endif
+    path[n] = 0;
+    return (int)n;
+#endif
+}
+
+/* Application resources, independent of cwd and argv[0]. Append only on
+   success, including a final path separator. */
+GS_API uint8_t gs_os_resource_dir(gs_rref out) {
+    gs_os_char path[GS_OS_PATH_MAX];
+    int n = gs_os_resource_native(path);
+    if (!n) return 0;
+#ifdef _WIN32
+    return gs_os_append_wide(out, path, n);
+#else
     gs_bld_append(out, path, (int64_t)n);
     return 1;
 #endif
+}
+
+/* ---- Dynamic externs: the libraries the program's extern blocks name ---- */
+
+/* The spelling this platform opens for a library, UTF-8 in buf (GS_OS_PATH_MAX
+   bytes): the sidecar's for the platform, else the block's name. A last
+   component without a dot takes the platform's library form (SDL2 is
+   SDL2.dll, libSDL2.dylib, libSDL2.so); a spelling with a separator, unless
+   absolute, is under the resource directory; a bare one goes to the loader's
+   search as it is. 0 where it does not fit or the resource directory is not
+   known. */
+static int gs_dl_spelling(const gs_dllib *lib, char *buf) {
+#ifdef _WIN32
+    const char *s = lib->onwindows, *prefix = "", *suffix = ".dll";
+#elif defined(__APPLE__)
+    const char *s = lib->onmacos, *prefix = "lib", *suffix = ".dylib";
+#else
+    const char *s = lib->onlinux, *prefix = "lib", *suffix = ".so";
+#endif
+    if (!s) s = lib->name;
+    size_t len = strlen(s), dir = 0;
+    for (size_t i = 0; i < len; i++) {
+        int sep = s[i] == '/';
+#ifdef _WIN32
+        sep = sep || s[i] == '\\';
+#endif
+        if (sep) dir = i + 1;
+    }
+    const char *leaf = s + dir;
+    int bare = !strchr(leaf, '.');
+    int absolute = s[0] == '/';
+#ifdef _WIN32
+    int drive = (s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z');
+    absolute = absolute || s[0] == '\\' || (len >= 2 && drive && s[1] == ':');
+#endif
+    char root[GS_OS_PATH_MAX];
+    root[0] = 0;
+    if (dir && !absolute) {
+        gs_os_char native[GS_OS_PATH_MAX];
+        int n = gs_os_resource_native(native);
+        if (!n) return 0;
+#ifdef _WIN32
+        n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, native, n, root, GS_OS_PATH_MAX - 1,
+                                NULL, NULL);
+        if (n <= 0) return 0;
+        root[n] = 0;
+#else
+        memcpy(root, native, (size_t)n + 1);
+#endif
+    }
+    int n = snprintf(buf, GS_OS_PATH_MAX, "%s%.*s%s%s%s", root, (int)dir, s, bare ? prefix : "",
+                     leaf, bare ? suffix : "");
+    return n > 0 && n < GS_OS_PATH_MAX ? n : 0;
+}
+
+GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *binds,
+                       int64_t nbinds) {
+    for (int64_t l = 0; l < nlibs; l++) {
+        char spelling[GS_OS_PATH_MAX], msg[GS_OS_PATH_MAX + 512];
+        if (!gs_dl_spelling(&libs[l], spelling)) {
+            snprintf(msg, sizeof msg, "cannot load %s: its path does not fit or is not known",
+                     libs[l].name);
+            gs_panic(msg);
+        }
+#ifdef _WIN32
+        sl_u8 utf8 = { (uint8_t *)spelling, (int64_t)strlen(spelling) };
+        wchar_t wide[GS_OS_PATH_MAX];
+        HMODULE h = NULL;
+        if (gs_os_native(utf8, wide) >= 0) {
+            /* A path, the resource directory's or an absolute one: the
+               libraries it depends on are looked for beside it first, as
+               a library shipped with its dependencies under lib/ needs.
+               That search wants backslashes. A bare name keeps the
+               loader's own search. */
+            int path = 0;
+            for (wchar_t *c = wide; *c; c++)
+                if (*c == L'/' || *c == L'\\') { *c = L'\\'; path = 1; }
+            h = path ? LoadLibraryExW(wide, NULL, LOAD_WITH_ALTERED_SEARCH_PATH) : LoadLibraryW(wide);
+        }
+        if (!h) {
+            snprintf(msg, sizeof msg, "cannot load %s (%s): Windows error %u", libs[l].name,
+                     spelling, (unsigned)GetLastError());
+            gs_panic(msg);
+        }
+#else
+        void *h = dlopen(spelling, RTLD_NOW | RTLD_LOCAL);
+        if (!h) {
+            const char *why = dlerror();
+            snprintf(msg, sizeof msg, "cannot load %s (%s): %s", libs[l].name, spelling,
+                     why ? why : "unknown error");
+            gs_panic(msg);
+        }
+#endif
+        for (int64_t b = 0; b < nbinds; b++) {
+            if (binds[b].lib != l) continue;
+#ifdef _WIN32
+            void *f = (void *)GetProcAddress(h, binds[b].sym);
+#else
+            void *f = dlsym(h, binds[b].sym);
+#endif
+            if (!f) {
+                snprintf(msg, sizeof msg, "%s (%s) has no symbol %s", libs[l].name, spelling,
+                         binds[b].sym);
+                gs_panic(msg);
+            }
+            *binds[b].slot = f;
+        }
+    }
 }
 
 GS_API void gs_os_arg(int64_t i, gs_rref out) {
@@ -559,7 +697,13 @@ GS_API int64_t gs_os_clock_ns(void) {
 GS_API void gs_os_sleep_ms(int64_t ms) {
     if (ms <= 0) return;
 #ifdef _WIN32
-    Sleep((DWORD)ms);
+    /* Sleep takes 32 bits, the largest of them meaning INFINITE: a longer
+       sleep goes in parts. */
+    while (ms > 0) {
+        DWORD part = ms > 0x7fffffff ? 0x7fffffff : (DWORD)ms;
+        Sleep(part);
+        ms -= part;
+    }
 #else
     struct timespec ts;
     ts.tv_sec = (time_t)(ms / 1000);
@@ -588,12 +732,20 @@ GS_API uint64_t gs_os_random_u64(void) {
         if (n == sizeof v) return v;
     }
 #endif
+    /* Which call this is, counted atomically: workers calling at once each
+       get a count of their own. */
+#ifdef _WIN32
+    static volatile LONG64 counter;
+    uint64_t count = (uint64_t)InterlockedIncrement64(&counter);
+#else
     static uint64_t counter;
+    uint64_t count = __atomic_add_fetch(&counter, 1, __ATOMIC_SEQ_CST);
+#endif
     uint64_t seed = (uint64_t)gs_os_time_ns();
     seed = gs_os_mix64(seed ^ (uint64_t)gs_os_clock_ns());
 #ifdef _WIN32
     seed = gs_os_mix64(seed ^ (uint64_t)GetCurrentProcessId());
 #endif
     seed = gs_os_mix64(seed ^ (uint64_t)(uintptr_t)&counter);
-    return gs_os_mix64(seed ^ ++counter);
+    return gs_os_mix64(seed ^ count);
 }

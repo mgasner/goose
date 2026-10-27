@@ -1,6 +1,7 @@
 .vscode/**
 .vscode-test/**
 test/**
+src/**
 node_modules/**
 package-lock.json
 build_vsix.py

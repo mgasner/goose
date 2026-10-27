@@ -1,0 +1,147 @@
+# Builds a release of the compiler on each platform whenever a version tag
+# (v1.0, v1.2.3, v2.0-rc1, ...) is pushed, and publishes the archives as a
+# GitHub release of that tag once every platform has built and passed. Run by
+# hand (workflow_dispatch), it builds and tests the same archives and leaves
+# them as the run's artifacts, without a release.
+#
+# Each archive is one directory, laid out by scripts/package_release.py: the
+# compiler with every blessed package compiled in (GOOSE_BUILTIN_LIBS=all),
+# the standard library, TinyCC's runtime, the packages' sources and the
+# libraries a `goose build` links, the docs, the samples and the VS Code
+# extension. Before it is archived, the build tree it came from is moved
+# away and the samples run with the compiler in it, in-process and through
+# `goose build`, so it is tested as it will be unpacked.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Older images where there is a choice, since what a release is
+          # built with sets what it needs: the static libraries a `goose
+          # build` links take an MSVC at least as new as the one that built
+          # them, and the Linux compiler runs where glibc is at least as new
+          # as the one it was built against (2.35 on Ubuntu 22.04).
+          - os: windows-2022
+            platform: windows-x64
+          - os: ubuntu-22.04
+            platform: linux-x64
+          - os: macos-15
+            platform: macos-arm64
+          - os: macos-15-intel
+            platform: macos-x64
+
+    env:
+      # Floating-point std::to_chars, which the compiler prints numbers
+      # with, is in the macOS C++ library from 13.3 on.
+      MACOSX_DEPLOYMENT_TARGET: "13.3"
+      # MSBuild's lingering nodes would hold the build tree the test moves.
+      MSBUILDDISABLENODEREUSE: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # As in ci.yml: what SDL3, built for the gfx package, talks to, and
+      # Mesa's lavapipe, a Vulkan device for the gfx samples to run on.
+      - name: Install SDL build dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends
+          libasound2-dev libpulse-dev libaudio-dev libfribidi-dev libjack-dev libsndio-dev
+          libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev
+          libxss-dev libxtst-dev libxkbcommon-dev libdrm-dev libgbm-dev libdbus-1-dev
+          libibus-1.0-dev libudev-dev libthai-dev libpipewire-0.3-dev libwayland-dev
+          libdecor-0-dev liburing-dev mesa-vulkan-drivers libvulkan1
+
+      - name: Name the release
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version="$GITHUB_REF_NAME"; else version="snapshot-${GITHUB_SHA::7}"; fi
+          echo "RELEASE_NAME=goose-$version-${{ matrix.platform }}" >> "$GITHUB_ENV"
+          echo "GOOSE_VERSION=$version" >> "$GITHUB_ENV"
+
+      # The version the compiler reports: the tag, as the shallow checkout
+      # may have no tags for git describe to find.
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DGOOSE_BUILTIN_LIBS=all "-DGOOSE_VERSION=${{ env.GOOSE_VERSION }}"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package
+        run: python scripts/package_release.py --build build --config Release --out dist/${{ env.RELEASE_NAME }}
+
+      # The compiler knows where its build put the standard library, TinyCC's
+      # runtime and the packages; with that gone it has to find them beside
+      # itself, as an unpacked release does.
+      - name: Move the build tree away
+        shell: bash
+        run: mv build build-moved
+
+      # A compiler that cannot find a package it has compiled in fetches and
+      # builds it into GOOSE_HOME instead (build/goose-home for the samples
+      # runner), which passes the samples but is not a release that works
+      # without git and cmake.
+      - name: Test the release
+        shell: bash
+        run: |
+          python samples/run_samples.py --exe "dist/$RELEASE_NAME/goose${{ runner.os == 'Windows' && '.exe' || '' }}"
+          if [ -e build/goose-home/pkg ]; then
+            echo "the release fetched packages it has compiled in:"; ls -R build/goose-home/pkg | head -20; exit 1
+          fi
+
+      - name: Archive
+        shell: bash
+        working-directory: dist
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a -tzip "$RELEASE_NAME.zip" "$RELEASE_NAME"
+          else
+            tar -czf "$RELEASE_NAME.tar.gz" "$RELEASE_NAME"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.RELEASE_NAME }}
+          path: dist/${{ env.RELEASE_NAME }}.*
+          if-no-files-found: error
+
+  release:
+    name: Publish
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          name: Goose ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+          body: |
+            Prebuilt compilers with the blessed packages (gfx, audio, ui, physics) compiled in. Unpack anywhere and put the directory on PATH; see "Install a release" in README.md for what each platform needs besides.

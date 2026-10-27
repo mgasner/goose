@@ -64,8 +64,30 @@ jobs:
       - name: Build
         run: cmake --build build --config Debug --parallel
 
+      # The samples and the standard library are kept as goose format
+      # writes them. On Linux only: a Windows checkout may have \r\n line
+      # breaks, which the formatter would report in every file.
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: build/goose format --check samples stdlib
+
       - name: Test
         run: python test/run_tests.py --exe build/${{ runner.os == 'Windows' && 'Debug/goose.exe' || 'goose' }} --profile baseline --cc native --require-clang
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The VS Code extension's tests: its grammar, its reading of the
+      # compiler's diagnostics, and the language server over its own
+      # protocol, against the compiler just built.
+      - name: Test the VS Code extension
+        working-directory: vscode
+        env:
+          GOOSE_TEST_COMPILER: ${{ github.workspace }}/build/${{ runner.os == 'Windows' && 'Debug/goose.exe' || 'goose' }}
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
 
   sanitize:
     name: Linux / ASan + UBSan

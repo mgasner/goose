@@ -6,7 +6,9 @@ steps, chunks of `len / k`, `a..a + n` windows, scanners slicing
 `start..pos`, ranges from `i + 1`, inclusive range ends, searches returning
 an index or -1, doubling merge passes, helpers with early returns, push
 loops a `continue` in a block may cut short, cursors moved before a break,
-if-values as indices), each with random off-by-one
+if-values as indices, multiples and quotients of an index against those of a
+length, stride loops from a start above zero, masked probes, nonzero guards,
+whole-struct stores through element references), each with random off-by-one
 mutations that make some of them unsafe. Every program runs through the JIT
 with the pass on and off; a check the pass wrongly elides turns an abort into
 a read past the end, so the two runs differ. Programs that differ are kept.
@@ -30,7 +32,7 @@ def shape(r, a, n):
     off = pick(0, 0, 0, 1, -1)
     off2 = pick(0, 0, 0, 1, -1, 2)
     k = r.randint(0, 4)
-    kind = r.randint(0, 15)
+    kind = r.randint(0, 21)
     if kind == 0:   # two indices towards each other
         return [f"var {i} = {max(0, off)};", f"var {j} = {a}.len - {1 - off2 if off2 <= 1 else 0};",
                 f"while {i} {pick('<', '<', '<=')} {j} {{",
@@ -91,6 +93,38 @@ def shape(r, a, n):
         return [f"if {a}.len > 0 {{",
                 f"    let {e} = if {a}[0] > {k} {{ {a}.len - 1 }} else {{ {max(0, off)} + {pick(0, 0, 1)} }};",
                 f"    acc += {a}[{e}];", "}"]
+    if kind == 16:  # multiples of the index against a multiple of the length
+        c = pick(2, 3, 4)
+        return [f"var r{n}: i64[>..] = [];", f"r{n}.resize({c} * {a}.len{pick('', '', ' - 1', ' + 1')}, 1);",
+                f"for {i} in {a}.len {{",
+                f"    for {j} in {c + max(0, off)} {{ acc += r{n}[{pick(f'{i} * {c}', f'{c} * {i}')} + {j}]; }}",
+                f"    let {w} = r{n}[{c} * {i}..{c} * {i} + {c + max(0, off2 - 1)}];",
+                f"    acc += {w}[{c - 1 + max(0, off)}] + r{n}[({i} + 1) * {c} - {1 - max(-1, min(off, 1))}];", "}"]
+    if kind == 17:  # quotients of the index against a rounded-up quotient length
+        sh = pick(1, 2, 3, 5)
+        return [f"var f{n}: i64[>..] = [];",
+                f"f{n}.resize(({a}.len + {(1 << sh) - pick(1, 1, 1, 2)}) >> {sh}, 1);",
+                f"for {i} in {a}.len{' + 1' if off == 1 else ''} {{",
+                f"    acc += f{n}[{i} >> {sh}];", f"    var {j} = {i} << 1;",
+                f"    while {j} {pick('<', '<', '<=')} {a}.len {{ acc += f{n}[{j} >> {sh}]; {j} += {i} + 1; }}", "}"]
+    if kind == 18:  # a stride loop from a start above zero
+        c = pick(2, 3, 4)
+        return [f"var {j} = {pick(1, 2, 3, 0, -1)};",
+                f"while {j} + {c + min(0, off)} <= {a}.len {{",
+                f"    acc += {a}[{j}] + {a}[{j} + {c - 1}];", f"    {j} += {c};", "}"]
+    if kind == 19:  # an open-addressing probe under a mask
+        return [f"if {a}.len {pick('!=', '!=', '>=')} 0 {{",
+                f"    let m{n} = {a}.len{pick(' - 1', ' - 1', ' * 2 - 1', '')};",
+                f"    var {i} = {k} & m{n};",
+                f"    for {j} in 3 {{ acc += {a}[{i}]; {i} = ({i} + {pick(1, 1, 3)}) & m{n}; }}", "}"]
+    if kind == 20:  # a nonzero guard before an index below
+        return [f"for {i} in {a}.len {{", f"    if {i} != {pick(0, 0, 1)} {{ acc += {a}[{i} - 1]; }}", "}",
+                f"if {a}.len != {pick(0, 0, 1)} {{ acc += {a}[{a}.len - 1] + {a}[0]; }}"]
+    if kind == 21:  # whole-struct stores through element references
+        return [f"var q{n}: Pt[>..] = [];", f"for {i} in {a}.len {{ q{n}.push(Pt {{ x: {a}[{i}], y: {i} }}); }}",
+                f"for &p{n}, {i} in q{n} {{",
+                f"    p{n} = Pt {{ x: p{n}.y, y: p{n}.x }};",
+                f"    acc += {a}[{i}{' + 1' if off == 1 else ''}] + p{n}.x;", "}"]
     return [f"var {w} = 1;", f"while {w} < {a}.len {{", f"    var {i} = 0;",   # doubling passes
             f"    while {i} < {a}.len {{", f"        let {s} = min({i} + {w}, {a}.len);",
             f"        if {s} > {i} {{ acc += {a}[{s} - 1]; }}",
@@ -100,7 +134,7 @@ def shape(r, a, n):
 
 def program(seed):
     r = random.Random(seed)
-    lines = ["import std;",
+    lines = ["import std;", "struct Pt { x: i64, y: i64 }",
              "fn find(xs: i64[:], v: i64) -> i64 {", "    for x, i in xs { if x == v { return i; } }",
              "    return -1;", "}",
              "fn clampi(x: i64, lo: i64, hi: i64) -> i64 {",

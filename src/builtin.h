@@ -76,9 +76,55 @@ inline int BuiltinIndex(const BuiltinPackage *b) {
     return b ? (int)(b - builtin_packages) : -1;
 }
 
+// The root of the builtin package `b`, with a trailing slash: where the
+// compiler's build put it, else pkg/<name>/ beside the compiler, where a
+// release (scripts/package_release.py) keeps it.
+inline string BuiltinSrcDir(const BuiltinPackage &b, const string &exedir) {
+    if (PathExists(cat(b.srcdir, b.name, ".goose"))) return b.srcdir;
+    auto beside = cat(exedir, "pkg/", b.name, "/");
+    for (auto &c : beside) if (c == '\\') c = '/';
+    return beside;
+}
+
+// A response file beside the compiler names the libraries a release ships
+// relative to its own directory, which a linker would take relative to the
+// directory it runs in instead. The link takes a copy under GOOSE_HOME with
+// those made absolute, one per place the compiler is installed.
+inline string AbsoluteLinkFile(const string &rsp, const string &pkgname, const string &style) {
+    std::error_code ec;
+    auto dir = filesystem::absolute(filesystem::path(rsp), ec).parent_path();
+    string text;
+    if (ec || !LoadFile(rsp, text)) throw CompileError { cat("cannot read ", rsp) };
+    string out;
+    for (size_t i = 0; i < text.size();) {
+        auto end = text.find('\n', i);
+        if (end == string::npos) end = text.size();
+        auto item = text.substr(i, end - i);
+        i = end + 1;
+        if (!item.empty() && item.back() == '\r') item.pop_back();
+        if (item.empty()) continue;
+        if (item.size() > 1 && item.front() == '"' && item.back() == '"')
+            item = item.substr(1, item.size() - 2);
+        auto path = filesystem::path(item);
+        if (item[0] != '-' && path.is_relative() && filesystem::exists(dir / path, ec))
+            item = (dir / path).lexically_normal().generic_string();
+        Append(out, item.find(' ') != string::npos ? cat("\"", item, "\"") : item, "\n");
+    }
+    auto dest = cat(GooseHome(), "/build/builtin/", pkgname, "-", Hex8(dir.generic_string()),
+                    "/link-", style, ".rsp");
+    string old;
+    if (LoadFile(dest, old) && old == out) return dest;
+    filesystem::create_directories(filesystem::path(dest).parent_path(), ec);
+    // Another goose may be linking with this file: it is replaced whole.
+    FileLock lock(cat(dest, ".lock"),
+                  cat("waiting for another goose writing the link file of ", pkgname));
+    if (!WriteFileIfChanged(dest, out)) throw CompileError { cat("cannot write ", dest) };
+    return dest;
+}
+
 // The response file a program using the builtin package `b` links: in the
 // directory the compiler's build recorded, else in pkg/<name> beside the
-// compiler, for a copied build tree.
+// compiler, for a release or a copied build tree.
 inline string BuiltinPackageLinkFile(const BuiltinPackage &b, const string &style,
                                      const string &exedir) {
     if (style != "msvc" && style != "cc")
@@ -86,11 +132,11 @@ inline string BuiltinPackageLinkFile(const BuiltinPackage &b, const string &styl
     if (!*b.rspdir)
         throw CompileError { cat("the package ", b.name, " has no native part to link") };
     auto name = cat("link-", style, ".rsp");
+    auto recorded = cat(b.rspdir, "/", name);
+    if (PathExists(recorded)) return recorded;
     auto beside = cat(exedir, "pkg/", b.name);
-    for (auto &dir : { string(b.rspdir), beside }) {
-        auto path = cat(dir, "/", name);
-        if (PathExists(path)) return path;
-    }
+    if (auto shipped = cat(beside, "/", name); PathExists(shipped))
+        return AbsoluteLinkFile(shipped, b.name, style);
     throw CompileError { cat("cannot find ", name, " of the builtin package ", b.name,
                              " (looked in ", b.rspdir, " and ", beside, ")") };
 }

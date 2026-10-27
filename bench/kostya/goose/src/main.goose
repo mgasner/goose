@@ -112,9 +112,13 @@ fn dispatch(b: Bench&) -> u32, bool {
         return execute(b, s, neural_net::prepare, neural_net::run, neural_net::checksum), true;
     }
     if n == "Etc::CacheSimulation" {
-        var map = dictionary<u8[..16], cache_simulation::Node?> {};
+        // The slice pool of the cache's strings, which outlives the benchmark
+        // whose cache keeps them (a struct can't hold a pool).
+        reusable[] var strings: u8[>..] = [];
+        var map = dictionary<u8[:], cache_simulation::Node?> {};
         var s = cache_simulation::new_cache_simulation(map);
-        return execute(b, s, cache_simulation::prepare, cache_simulation::run, cache_simulation::checksum), true;
+        fn run(sim, iteration_id) { cache_simulation::run(sim, iteration_id, strings); }
+        return execute(b, s, cache_simulation::prepare, run, cache_simulation::checksum), true;
     }
     if n == "Etc::GameOfLife" {
         reusable[] var pool: game_of_life::Cell[>..] = [];
@@ -150,14 +154,23 @@ fn dispatch(b: Bench&) -> u32, bool {
         var s = buffer_hash::new_buffer_hash_crc32();
         return execute(b, s, buffer_hash::prepare, buffer_hash::run, buffer_hash::checksum), true;
     }
-    if n == "Calculator::Ast" { var s = calculator_ast::new_calculator_ast(); return execute(b, s, calculator_ast::prepare, calculator_ast::run, calculator_ast::checksum), true; }
-    if n == "Calculator::Interpreter" {
-        // The node pool of the interpreter's tree, which outlives the
-        // benchmark that keeps the tree (a struct holds one growable array).
+    if n == "Calculator::Ast" {
+        // The program text and the node pool, which outlive the benchmark
+        // that refers to them (a struct holds one growable array).
+        var text: u8[>..] = [];
         var nodes: calculator_ast::Node..[>..] = [];
-        fn prepare(s) { calculator_interpreter::prepare(s, nodes); }
-        var s = calculator_interpreter::new_calculator_interpreter();
-        return execute(b, s, prepare, calculator_interpreter::run, calculator_interpreter::checksum), true;
+        var s = calculator_ast::new_calculator_ast(text, nodes);
+        return execute(b, s, calculator_ast::prepare, calculator_ast::run, calculator_ast::checksum), true;
+    }
+    if n == "Calculator::Interpreter" {
+        // The program text and the node pool of the interpreter's tree,
+        // which outlive the benchmark that keeps the tree (a struct holds
+        // one growable array).
+        var text: u8[>..] = [];
+        var nodes: calculator_ast::Node..[>..] = [];
+        var s = calculator_interpreter::new_calculator_interpreter(text, nodes);
+        return execute(b, s, calculator_interpreter::prepare, calculator_interpreter::run,
+                       calculator_interpreter::checksum), true;
     }
     if n == "Maze::Generator" || n == "Maze::BFS" || n == "Maze::AStar" {
         // The slice pool of the maze's rows, which outlives the benchmark

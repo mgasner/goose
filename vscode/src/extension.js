@@ -3,34 +3,71 @@
 const vscode = require('vscode');
 const path = require('node:path');
 const { settings, argumentsFor, stdlibDirectories, absolute } = require('./config');
-const { parseDiagnostics, failureMessage, runCompiler, CheckQueue } = require('./diagnostics');
+const { parseDiagnostics, parseJsonDiagnostics, failureMessage, runCompiler, CheckQueue } = require('./diagnostics');
 const { declarations, imports, importCandidates } = require('./language');
+const { probe, serverSetup, createClient } = require('./client');
 
 const isGoose = doc => doc.languageId === 'goose' && doc.uri.scheme === 'file';
 
-function activate(context) {
+// What deactivation stops: the language server of the window, if one runs.
+let stopOnDeactivate = async () => {};
+
+async function activate(context) {
     const diagnostics = vscode.languages.createDiagnosticCollection('goose');
     const output = vscode.window.createOutputChannel('Goose');
     let disposed = false;
     let publication = 0;
     let reportedFailure = '';
 
+    // The extension runs in one of two modes. With a compiler that serves an
+    // editor (`goose lsp`), the language server analyzes the programs as they
+    // are edited and answers the editor's queries; otherwise, and in an
+    // untrusted workspace, the saved files are checked with `goose check`
+    // (the check-on-save mode: the queue, the outline and the import links
+    // below). `server` is the language server's state: off, starting or
+    // running, with the setup it was started for.
+    let server = { status: 'off' };
+    // The check-on-save mode's subscriptions while it runs.
+    let fallback;
+
     // What the last check of each entry file found: a failure with no source
     // location, or the number of errors, and whether sources changed since.
     let checked = new Map();
-    // The status of the active file's entry, in the bottom status bar: its last
-    // check, marked stale once sources change, with a spinner while a new check
-    // runs. Another entry's results never stand in for it.
+    // The status of the active file's entry, in the bottom status bar. With
+    // the server: the errors it reports, over every file. Without: the last
+    // check, marked stale once sources change, with a spinner while a new
+    // check runs. Another entry's results never stand in for it.
     const checkStatus = vscode.window.createStatusBarItem('goose.check', vscode.StatusBarAlignment.Left, 4);
     checkStatus.name = 'Goose: Check';
     function updateCheckStatus() {
         const doc = vscode.window.activeTextEditor?.document;
         if (!vscode.workspace.isTrusted || doc?.languageId !== 'goose') { checkStatus.hide(); return; }
+        checkStatus.command = 'goose.showOutput';
+        checkStatus.backgroundColor = undefined;
+        if (server.status !== 'off') {
+            if (server.status === 'starting') {
+                checkStatus.text = '$(sync~spin) Goose: Starting';
+                checkStatus.tooltip = 'Starting the Goose language server.';
+            } else {
+                let errors = 0;
+                for (const [, items] of vscode.languages.getDiagnostics()) {
+                    errors += items.filter(item => item.source === 'goose' && item.severity === vscode.DiagnosticSeverity.Error).length;
+                }
+                if (errors) {
+                    checkStatus.text = `$(error) Goose: ${errors} error${errors === 1 ? '' : 's'}`;
+                    checkStatus.tooltip = 'The Goose language server reports errors. Click to open Problems.';
+                    checkStatus.command = 'workbench.actions.view.problems';
+                } else {
+                    checkStatus.text = '$(check) Goose';
+                    checkStatus.tooltip = 'The Goose language server reports no errors. Click to open the Goose output.';
+                }
+            }
+            checkStatus.show();
+            return;
+        }
         const config = isGoose(doc) ? settings(vscode, doc.uri) : undefined;
         const running = config && queue.jobs.has(config.file);
         const last = config && checked.get(config.file);
-        checkStatus.command = 'goose.showOutput';
-        checkStatus.backgroundColor = undefined;
         if (running) {
             checkStatus.text = '$(sync~spin) Goose: Checking';
             checkStatus.tooltip = last && !last.stale ? 'Checking again.' : 'Checking the saved files.';
@@ -60,8 +97,23 @@ function activate(context) {
     // checked: a stale result keeps them as they were while files are edited.
     async function build(result) {
         const { config, error, output: text } = result;
-        const parsed = parseDiagnostics(text, config.cwd);
-        output.appendLine(`> ${config.compiler} ${argumentsFor('check', config).map(arg => JSON.stringify(arg)).join(' ')}`);
+        const lines = new Map();
+        async function sourceLine(file, line) {
+            if (!lines.has(file)) {
+                const open = vscode.workspace.textDocuments.find(doc => doc.uri.fsPath === file);
+                try {
+                    const source = open ? open.getText() : Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.file(file))).toString('utf8');
+                    lines.set(file, source.split(/\r?\n/));
+                } catch { lines.set(file, []); }
+            }
+            return lines.get(file)[line];
+        }
+        // The diagnostics as data from a compiler with --diagnostics json, or
+        // read from the text of one without.
+        const parsed = result.diagnostics
+            ? await parseJsonDiagnostics(result.diagnostics, config.cwd, sourceLine)
+            : parseDiagnostics(text, config.cwd);
+        output.appendLine(`> ${config.compiler} ${(result.args || argumentsFor('check', config)).map(arg => JSON.stringify(arg)).join(' ')}`);
         if (text.trim()) output.appendLine(text.trimEnd());
         // A failure with no source location is not an error on any line. It is
         // listed in Problems against the checked file at an empty range, so it
@@ -81,29 +133,29 @@ function activate(context) {
                 void vscode.window.showWarningMessage(message);
             }
         } else if (!error) reportedFailure = '';
-        const lines = new Map();
-        async function sourceLine(file, line) {
-            if (!lines.has(file)) {
-                const open = vscode.workspace.textDocuments.find(doc => doc.uri.fsPath === file);
-                try {
-                    const source = open ? open.getText() : Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.file(file))).toString('utf8');
-                    lines.set(file, source.split(/\r?\n/));
-                } catch { lines.set(file, []); }
-            }
-            return lines.get(file)[line] || '';
-        }
         const files = new Map();
         let errors = 0;
         for (const item of parsed) {
-            const line = await sourceLine(item.file, item.line);
+            const line = (await sourceLine(item.file, item.line)) ?? '';
             const start = item.column === undefined ? Math.max(0, line.search(/\S/)) : Math.min(item.column, line.length);
-            const end = item.empty ? start : item.column === undefined ? line.length : Math.min(line.length, start + (line.slice(start).match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0].length || 1));
-            const range = new vscode.Range(item.line, start, item.line, Math.max(start, end));
+            const from = new vscode.Position(item.line, start);
+            let range;
+            if (item.empty) range = new vscode.Range(from, from);
+            else if (item.endLine !== undefined) {
+                // The range the compiler reports, ending one past its last character.
+                const endLine = item.endLine === item.line ? line : (await sourceLine(item.file, item.endLine)) ?? '';
+                const to = new vscode.Position(item.endLine, Math.min(item.endColumn, endLine.length));
+                range = new vscode.Range(from, to.isBefore(from) ? from : to);
+            } else {
+                // Without one: the identifier at the column, or the line's text.
+                const end = item.column === undefined ? line.length : Math.min(line.length, start + (line.slice(start).match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0].length || 1));
+                range = new vscode.Range(item.line, start, item.line, Math.max(start, end));
+            }
             const diagnostic = new vscode.Diagnostic(range, item.message,
                 item.severity === 'warning' ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Error);
             diagnostic.source = 'Goose';
             diagnostic.relatedInformation = item.related.map(frame => new vscode.DiagnosticRelatedInformation(
-                new vscode.Location(vscode.Uri.file(frame.file), new vscode.Range(frame.line, 0, frame.line, 0)), frame.message));
+                new vscode.Location(vscode.Uri.file(frame.file), new vscode.Range(frame.line, frame.column ?? 0, frame.line, frame.column ?? 0)), frame.message));
             const entry = files.get(item.file) || [];
             if (entry.some(other => other.message === diagnostic.message && other.range.isEqual(range))) continue;
             entry.push(diagnostic);
@@ -146,7 +198,7 @@ function activate(context) {
     const dirtyIn = cwd => vscode.workspace.textDocuments.some(doc => isGoose(doc) && doc.isDirty && cwdOf(doc) === cwd);
 
     function check(doc) {
-        if (disposed || !vscode.workspace.isTrusted || !isGoose(doc) || doc.isDirty) return;
+        if (disposed || !fallback || !vscode.workspace.isTrusted || !isGoose(doc) || doc.isDirty) return;
         const config = settings(vscode, doc.uri);
         if (config.checkOnSave && !dirtyIn(config.cwd)) void queue.schedule(config);
     }
@@ -154,6 +206,7 @@ function activate(context) {
     // Check the entry files of open documents in cwd (or everywhere), and drop
     // the results of entries no open document checks any more.
     function recheck(cwd) {
+        if (!fallback) return;
         const entries = new Map();
         for (const doc of vscode.workspace.textDocuments) {
             if (!isGoose(doc)) continue;
@@ -171,15 +224,148 @@ function activate(context) {
         recheck(cwd);
     }
 
-    async function savedActiveDocument() {
-        const doc = vscode.window.activeTextEditor?.document;
+    // The check-on-save mode: the checks of saved files, the outline from a
+    // lexical scan and the import links, which the server provides otherwise.
+    function startFallback() {
+        if (fallback || disposed) return;
+        const watcher = vscode.workspace.createFileSystemWatcher('**/*.goose');
+        const changedOnDisk = async uri => {
+            const cwd = settings(vscode, uri).cwd;
+            // Filesystem notifications can arrive after a manual check of a just-
+            // saved file. Do not cancel that check or erase its current results.
+            let modified = Infinity;
+            try { modified = (await vscode.workspace.fs.stat(uri)).mtime; } catch { /* Deleted file. */ }
+            if (disposed || !fallback) return;
+            // A stale result is already due to be replaced, so it does not count.
+            const existing = [...queue.results.values(), ...queue.jobs.values()].filter(item => item.config.cwd === cwd && !item.stale);
+            if (existing.length && existing.every(item => item.startedAt === undefined || item.startedAt > modified)) return;
+            refresh(cwd);
+        };
+        fallback = vscode.Disposable.from(
+            vscode.languages.registerDocumentSymbolProvider([{ language: 'goose', scheme: 'file' }, { language: 'goose', scheme: 'untitled' }], {
+                provideDocumentSymbols(doc) {
+                    return declarations(doc.getText()).map(item => new vscode.DocumentSymbol(item.name, item.detail,
+                        vscode.SymbolKind[item.kind], new vscode.Range(doc.positionAt(item.rangeStart), doc.positionAt(item.rangeEnd)),
+                        new vscode.Range(doc.positionAt(item.start), doc.positionAt(item.end))));
+                }
+            }),
+            vscode.languages.registerDocumentLinkProvider({ language: 'goose', scheme: 'file' }, {
+                async provideDocumentLinks(doc, token) {
+                    const config = settings(vscode, doc.uri);
+                    const dirs = stdlibDirectories(config);
+                    const links = [];
+                    for (const item of imports(doc.getText())) {
+                        for (const candidate of importCandidates(item, doc.uri.fsPath, config.file, dirs)) {
+                            if (token.isCancellationRequested) return [];
+                            try {
+                                const uri = vscode.Uri.file(candidate);
+                                const stat = await vscode.workspace.fs.stat(uri);
+                                if (!(stat.type & vscode.FileType.File)) continue;
+                                const link = new vscode.DocumentLink(new vscode.Range(doc.positionAt(item.start), doc.positionAt(item.end)), uri);
+                                link.tooltip = 'Open Goose module';
+                                links.push(link);
+                                break;
+                            } catch { /* Try the next location, as the compiler does. */ }
+                        }
+                    }
+                    return links;
+                }
+            }),
+            vscode.workspace.onDidOpenTextDocument(check),
+            vscode.workspace.onDidSaveTextDocument(doc => {
+                if (isGoose(doc)) refresh(cwdOf(doc));
+            }),
+            vscode.workspace.onDidChangeTextDocument(event => {
+                if (isGoose(event.document) && event.contentChanges.length) queue.stale(cwdOf(event.document));
+            }),
+            vscode.workspace.onDidCloseTextDocument(doc => {
+                if (isGoose(doc)) refresh(cwdOf(doc));
+            }),
+            watcher, watcher.onDidCreate(changedOnDisk), watcher.onDidChange(changedOnDisk), watcher.onDidDelete(changedOnDisk)
+        );
+        recheck();
+        updateCheckStatus();
+    }
+
+    function stopFallback() {
+        if (!fallback) return;
+        fallback.dispose();
+        fallback = undefined;
+        queue.invalidate();
+    }
+
+    // --- the language server ---------------------------------------------
+
+    async function stopServer() {
+        const client = server.client;
+        server = { status: 'off' };
+        if (client) {
+            try { await client.stop(); } catch { /* It may be gone already. */ }
+        }
+        updateCheckStatus();
+    }
+    stopOnDeactivate = stopServer;
+
+    async function startServer(setup, version) {
+        await stopServer();
+        if (disposed) return;
+        const client = createClient(require('vscode-languageclient/node'), setup, output,
+            vscode.workspace.createFileSystemWatcher('**/*.goose'));
+        server = { status: 'starting', client, setup, version };
+        updateCheckStatus();
+        output.appendLine(`> ${setup.compiler} ${setup.args.map(arg => JSON.stringify(arg)).join(' ')}  (language server, protocol ${version})`);
+        try {
+            await client.start();
+            if (server.client !== client) return;
+            server.status = 'running';
+        } catch (error) {
+            if (server.client !== client) return;
+            output.appendLine(`The Goose language server did not start: ${error.message}`);
+            server = { status: 'off' };
+            void vscode.window.showWarningMessage(`The Goose language server did not start (${error.message}); checking saved files instead. See the Goose output.`);
+            startFallback();
+        }
+        updateCheckStatus();
+    }
+
+    // Which mode runs: the server where the settings ask for one, the
+    // workspace is trusted and the compiler serves an editor, else the checks
+    // of saved files. Decided again when that may have changed: the settings,
+    // the folders, the workspace's trust, a restart. A server already running
+    // for the same setup stays.
+    let deciding = Promise.resolve();
+    function decide(restart = false) {
+        deciding = deciding.then(async () => {
+            if (disposed) return;
+            const setup = serverSetup(vscode);
+            const version = vscode.workspace.isTrusted && setup.enabled ? await probe(setup.compiler, setup.cwd) : undefined;
+            if (disposed) return;
+            if (!version) {
+                await stopServer();
+                startFallback();
+                return;
+            }
+            if (!restart && server.client && JSON.stringify(server.setup) === JSON.stringify(setup)) return;
+            stopFallback();
+            await startServer(setup, version);
+        }).catch(error => output.appendLine(`Language server: ${error.message}`));
+        return deciding;
+    }
+
+    // The document a command acts on, the active editor's or the one at
+    // `uri`, saved with the open Goose files of its folder.
+    async function savedDocument(uri) {
+        const pick = async () => uri
+            ? vscode.workspace.openTextDocument(uri).then(doc => doc, () => undefined)
+            : vscode.window.activeTextEditor?.document;
+        const doc = await pick();
         if (!doc || doc.languageId !== 'goose') return undefined;
         if (!vscode.workspace.isTrusted) {
             void vscode.window.showWarningMessage('Trust this workspace to run the Goose compiler.');
             return undefined;
         }
         if (doc.isUntitled && !await doc.save()) return undefined;
-        const active = vscode.window.activeTextEditor?.document;
+        const active = await pick();
         if (!active || !isGoose(active)) return undefined;
         const cwd = cwdOf(active);
         for (const open of vscode.workspace.textDocuments) {
@@ -240,7 +426,7 @@ function activate(context) {
                 }
                 uri = vscode.Uri.file(absolute(file, base || path.dirname(file), active?.uri.fsPath || ''));
             } else if (!folder || active && vscode.workspace.getWorkspaceFolder(active.uri)?.uri.toString() === folder.uri.toString()) {
-                uri = (await savedActiveDocument())?.uri;
+                uri = (await savedDocument())?.uri;
             }
             if (!uri) {
                 void vscode.window.showErrorMessage('Open a Goose file or set goose.entryFile to run with JIT.');
@@ -258,22 +444,47 @@ function activate(context) {
 
     context.subscriptions.push(
         diagnostics, output, runStatus, checkStatus,
-        { dispose() { disposed = true; queue.invalidate(); } },
+        { dispose() { disposed = true; stopFallback(); queue.invalidate(); void stopServer(); } },
         vscode.window.onDidChangeActiveTextEditor(() => { updateRunStatus(); updateCheckStatus(); }),
-        vscode.workspace.onDidGrantWorkspaceTrust(() => { updateRunStatus(); updateCheckStatus(); }),
+        vscode.languages.onDidChangeDiagnostics(() => { if (server.status !== 'off') updateCheckStatus(); }),
+        vscode.workspace.onDidGrantWorkspaceTrust(() => { updateRunStatus(); updateCheckStatus(); void decide(); }),
         vscode.debug.registerDebugConfigurationProvider('goose', launchProvider),
         vscode.debug.registerDebugConfigurationProvider('goose', { provideDebugConfigurations: jitConfigurations }, vscode.DebugConfigurationProviderTriggerKind.Dynamic),
         vscode.commands.registerCommand('goose.showOutput', () => output.show()),
+        vscode.commands.registerCommand('goose.restartServer', () => decide(true)),
         vscode.commands.registerCommand('goose.check', async () => {
-            const doc = await savedActiveDocument();
+            const doc = await savedDocument();
             if (!doc) return;
+            // With the server checking the program as it is edited, an explicit
+            // check shows the compiler's whole output in a terminal.
+            if (server.status !== 'off') {
+                await vscode.tasks.executeTask(makeTask({ type: 'goose', action: 'check' }, doc.uri));
+                return;
+            }
             const completed = await queue.schedule(settings(vscode, doc.uri), 0);
             if (completed) output.show(true);
         }),
-        ...['run', 'build', 'generateC'].map(action => vscode.commands.registerCommand(`goose.${action}`, async () => {
-            const doc = await savedActiveDocument();
+        // The server's code lens above a `main` passes its file's URI, as a
+        // string: that file runs. The editor title's play button passes its
+        // resource, which runs as the active file does, the entry file
+        // standing for it where goose.entryFile sets one.
+        vscode.commands.registerCommand('goose.run', async target => {
+            const uri = typeof target === 'string' ? vscode.Uri.parse(target) : undefined;
+            const doc = await savedDocument(uri);
+            if (!doc) return;
+            const definition = { type: 'goose', action: 'run' };
+            if (uri) definition.file = doc.uri.fsPath;
+            await vscode.tasks.executeTask(makeTask(definition, doc.uri));
+        }),
+        ...['build', 'generateC'].map(action => vscode.commands.registerCommand(`goose.${action}`, async () => {
+            const doc = await savedDocument();
             if (doc) await vscode.tasks.executeTask(makeTask({ type: 'goose', action }, doc.uri));
         })),
+        // The server's code lens above a generic function: its
+        // specializations, one per line.
+        vscode.commands.registerCommand('goose.showInstantiations', (name, lines) => {
+            if (Array.isArray(lines)) void vscode.window.showQuickPick(lines, { title: `Instantiations of ${name}` });
+        }),
         vscode.tasks.registerTaskProvider('goose', {
             provideTasks() {
                 if (!vscode.workspace.isTrusted) return [];
@@ -311,69 +522,31 @@ function activate(context) {
                 return resolved;
             }
         }),
-        vscode.languages.registerDocumentSymbolProvider([{ language: 'goose', scheme: 'file' }, { language: 'goose', scheme: 'untitled' }], {
-            provideDocumentSymbols(doc) {
-                return declarations(doc.getText()).map(item => new vscode.DocumentSymbol(item.name, item.detail,
-                    vscode.SymbolKind[item.kind], new vscode.Range(doc.positionAt(item.rangeStart), doc.positionAt(item.rangeEnd)),
-                    new vscode.Range(doc.positionAt(item.start), doc.positionAt(item.end))));
-            }
-        }),
-        vscode.languages.registerDocumentLinkProvider({ language: 'goose', scheme: 'file' }, {
-            async provideDocumentLinks(doc, token) {
-                const config = settings(vscode, doc.uri);
-                const dirs = stdlibDirectories(config);
-                const links = [];
-                for (const item of imports(doc.getText())) {
-                    for (const candidate of importCandidates(item, doc.uri.fsPath, config.file, dirs)) {
-                        if (token.isCancellationRequested) return [];
-                        try {
-                            const uri = vscode.Uri.file(candidate);
-                            const stat = await vscode.workspace.fs.stat(uri);
-                            if (!(stat.type & vscode.FileType.File)) continue;
-                            const link = new vscode.DocumentLink(new vscode.Range(doc.positionAt(item.start), doc.positionAt(item.end)), uri);
-                            link.tooltip = 'Open Goose module';
-                            links.push(link);
-                            break;
-                        } catch { /* Try the next location, as the compiler does. */ }
-                    }
-                }
-                return links;
-            }
-        }),
-        vscode.workspace.onDidOpenTextDocument(check),
-        vscode.workspace.onDidSaveTextDocument(doc => {
-            if (isGoose(doc)) refresh(cwdOf(doc));
-        }),
-        vscode.workspace.onDidChangeTextDocument(event => {
-            if (isGoose(event.document) && event.contentChanges.length) queue.stale(cwdOf(event.document));
-        }),
-        vscode.workspace.onDidCloseTextDocument(doc => {
-            if (isGoose(doc)) refresh(cwdOf(doc));
-        }),
-        // Results checked with other settings or workspace folders no longer apply.
+        // Results checked with other settings or workspace folders no longer
+        // apply, and the server may be wanted, or wanted otherwise.
         vscode.workspace.onDidChangeConfiguration(event => {
-            if (event.affectsConfiguration('goose')) { queue.invalidate(); recheck(); }
+            if (!event.affectsConfiguration('goose')) return;
+            if (fallback) { queue.invalidate(); recheck(); }
+            void decide();
         }),
-        vscode.workspace.onDidChangeWorkspaceFolders(() => { queue.invalidate(); recheck(); }),
-        vscode.workspace.onDidGrantWorkspaceTrust(() => recheck())
+        vscode.workspace.onDidChangeWorkspaceFolders(() => {
+            if (fallback) { queue.invalidate(); recheck(); }
+            void decide();
+        }),
+        // A Goose file opened without a folder decides the server's working
+        // directory: the first one starts the server.
+        vscode.workspace.onDidOpenTextDocument(doc => {
+            if (isGoose(doc) && !vscode.workspace.workspaceFolders?.length && server.status === 'off') void decide();
+        })
     );
-    const watcher = vscode.workspace.createFileSystemWatcher('**/*.goose');
-    const changedOnDisk = async uri => {
-        const cwd = settings(vscode, uri).cwd;
-        // Filesystem notifications can arrive after a manual check of a just-
-        // saved file. Do not cancel that check or erase its current results.
-        let modified = Infinity;
-        try { modified = (await vscode.workspace.fs.stat(uri)).mtime; } catch { /* Deleted file. */ }
-        if (disposed) return;
-        // A stale result is already due to be replaced, so it does not count.
-        const existing = [...queue.results.values(), ...queue.jobs.values()].filter(item => item.config.cwd === cwd && !item.stale);
-        if (existing.length && existing.every(item => item.startedAt === undefined || item.startedAt > modified)) return;
-        refresh(cwd);
-    };
-    context.subscriptions.push(watcher, watcher.onDidCreate(changedOnDisk), watcher.onDidChange(changedOnDisk), watcher.onDidDelete(changedOnDisk));
     updateRunStatus();
     updateCheckStatus();
-    recheck();
+    await decide();
+    return { server: () => server };
 }
 
-module.exports = { activate };
+function deactivate() {
+    return stopOnDeactivate();
+}
+
+module.exports = { activate, deactivate };

@@ -403,12 +403,53 @@ recursive fn tre_inloop(n: i64) -> i64 {
     return n;
 }
 
+// A walk handing on the node it read out of a copy of its parameter's
+// payload: that lies outside the activation, so the loop carries it.
+enum TreList { Nil, Cons { v: i64, next: TreList? } }
+recursive fn tre_walk(l: TreList&) -> i64 {
+    match l {
+        Cons c => {
+            let next = c.next;
+            guard next else { return c.v; }
+            return c.v + tre_walk(next);
+        },
+        Nil => 0,
+    }
+}
+
+// A reference to a local, which the recursion keeps for the call, but which
+// the loop would reinitialize: this one keeps its calls.
+recursive fn tre_local(n: i64, p: i64&) -> i64 {
+    var t = 100;
+    if n == 0 { return p; }
+    t = p + 1;
+    return 1 + tre_local(n - 1, t);
+}
+
+// `&` over u64: the accumulator starts at all ones, a u64 above i64.max,
+// and so is the fold of u64_fold's constants; the runner checks that the
+// --specs dump shows them as those values.
+recursive fn tre_and(n: i64) -> u64 {
+    let before_basecase = 0;
+    if n <= 0 { return 18446744073709551615; }
+    return tre_and(n - 1) & 0xFFFF;
+}
+fn u64_fold() -> u64 {
+    let top: u64 = 18446744073709551615;
+    return top - 12345;
+}
+
 fn tailrec_op() {
     print(tre_add(6) + tre_rev(5) + tre_mod(4));      // 42 + 3 + 29 = 74
     print(tre_mixed(5) + tre_plain(4, 0));            // 51 + 10 = 61
     print(tre_flt(3, 0.125));                         // 1.625
     print(tre_from(6));                               // 6 + 5 + 100 = 111
     print(tre_inloop(3));                             // 10 + 10 + 10 + 0 = 30
+    var tl_end: TreList = TreList.Cons { v: 4, next: null };
+    let tl: TreList = TreList.Cons { v: 5, next: tl_end };
+    var tl_x = 6;
+    print(tre_walk(tl) + tre_local(2, tl_x));         // 9 + 10 = 19
+    print(tre_and(3), " ", u64_fold());               // 65535 18446744073709539270
 }
 
 // --- variable-mode ADT payloads by reference through inlining ----------------
@@ -636,6 +677,61 @@ fn guarded_op() {
     print(root.gb_method(3), " ", gb_visits);        // 120 126
 }
 
+// --- min/max chains -------------------------------------------------------------
+// A chain of integer min or max with an operand the loop carries from the last
+// iteration combines that operand last (optimize_reassoc.h): ra_edit's
+// insertion cost, its second operand, binds as operand2 and is the outer
+// call's last argument. A chain already combining it last, one outside a
+// loop and one over floats stay as they are. The pass goes by the shape of
+// std's min and max, which these have.
+
+fn ra_min<T>(a: T, b: T) -> T { if b < a { return b; } return a; }
+fn ra_max<T>(a: T, b: T) -> T { if a < b { return b; } return a; }
+
+fn ra_edit(s: u8[:], t: u8[:]) -> u32 {
+    var prev_row: u32[>..] = [];
+    var curr_row: u32[>..] = [];
+    for i in s.len + 1 {
+        prev_row.push(i as u32);
+        curr_row.push(0);
+    }
+    var prev: u32[:] = prev_row;
+    var curr: u32[:] = curr_row;
+    for c, j in t {
+        curr[0] = (j + 1) as u32;
+        for i in s.len {
+            let cost: u32 = if s[i] != c { 1 } else { 0 };
+            curr[i + 1] = ra_min(ra_min(prev[i + 1] + 1, curr[i] + 1), prev[i] + cost);
+        }
+        let done = curr;
+        curr = prev;
+        prev = done;
+    }
+    return prev[s.len];
+}
+
+fn ra_last(xs: i64[:]) -> i64 {
+    var acc = 1000;
+    for x in xs { acc = ra_min(ra_min(x * 3, x + 50), acc - 1); }
+    return acc;
+}
+
+fn ra_noloop(a: i64, b: i64, c: i64) -> i64 { ra_max(ra_max(a, b), c) }
+
+fn ra_float(xs: f64[:]) -> f64 {
+    var acc = 0.0;
+    for x in xs { acc = ra_max(ra_max(x, acc + 0.5), x * 2.0); }
+    return acc;
+}
+
+fn reassoc_op() {
+    print(ra_edit("kitten", "sitting"), " ", ra_edit("sunday", "saturday")); // 3 3
+    let xs: i64[4] = [40, 7, 90, -2];
+    print(ra_last(xs), " ", ra_noloop(4, 9, 2));     // -6 9
+    let fs: f64[3] = [1.0, 0.25, -3.0];
+    print(ra_float(fs));                             // 3.0
+}
+
 // --- inlining heuristics ------------------------------------------------------
 // A callee whose one call is in a cold branch -- the else of a guard, the body
 // of an early return -- and that only the single-use rule would inline stays
@@ -789,6 +885,13 @@ inline fn il_pair(x: i64) -> i64, i64 {
     if x < 0 { return -x, 1; }
     return x / 3, x % 3;
 }
+// A function value passed by name, as well as one passed as a block, leaves
+// the call inlinable.
+inline fn il_apply<F>(x: i64) -> i64 {
+    if x < 0 { return F(-x); }
+    return F(x) + 1;
+}
+fn il_sq(x: i64) -> i64 { x * x }
 
 fn inline_op() {
     let inline = 7;                                  // still a name
@@ -803,6 +906,7 @@ fn inline_op() {
     print(s + q + r);                                // 1569
     inline fn twice_plus(v: i64) -> i64 { v * 2 + inline }
     print(twice_plus(4));                            // 15
+    print(il_apply(inline, il_sq) + il_apply(-3) { it * 2 });    // 56
 }
 
 fn main_optimize() {
@@ -829,6 +933,7 @@ fn main_optimize() {
     guarded_op();
     heuristics_op();
     inline_op();
+    reassoc_op();
     print(ginit + G);
     var acc = 0;
     acc += gv;

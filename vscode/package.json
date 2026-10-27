@@ -1,15 +1,15 @@
 {
   "name": "goose-language",
   "displayName": "Goose Language",
-  "description": "Syntax highlighting, compiler diagnostics, navigation and tasks for Goose, without a language server.",
-  "version": "0.3.1",
+  "description": "Syntax highlighting, the Goose language server (diagnostics as you type, hover, go to definition, symbols, semantic highlighting, signature help) and tasks for Goose.",
+  "version": "0.4.0",
   "publisher": "aardappel",
   "license": "Apache-2.0",
   "repository": { "type": "git", "url": "https://github.com/aardappel/goose.git", "directory": "vscode" },
   "engines": { "vscode": "^1.85.0" },
   "categories": ["Programming Languages", "Snippets"],
   "keywords": ["goose"],
-  "main": "./src/extension.js",
+  "main": "./dist/extension.js",
   "activationEvents": ["onLanguage:goose", "onTaskType:goose", "onDebugResolve:goose", "onDebugInitialConfigurations", "onDebugDynamicConfigurations:goose"],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -21,11 +21,16 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "package": "vsce package --no-dependencies --out goose-language.vsix",
+    "bundle": "esbuild src/extension.js --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.js",
+    "package": "npm run bundle && vsce package --no-dependencies --out goose-language.vsix",
     "vscode:prepublish": "npm test"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.6.2",
+    "esbuild": "^0.28.2",
     "vscode-oniguruma": "^2.0.1",
     "vscode-textmate": "^9.2.0"
   },
@@ -41,7 +46,8 @@
       { "command": "goose.run", "title": "Run with JIT", "category": "Goose", "icon": "$(play)", "enablement": "editorLangId == goose && isWorkspaceTrusted" },
       { "command": "goose.build", "title": "Build Executable", "category": "Goose", "enablement": "editorLangId == goose && isWorkspaceTrusted" },
       { "command": "goose.generateC", "title": "Generate C", "category": "Goose", "enablement": "editorLangId == goose && isWorkspaceTrusted" },
-      { "command": "goose.showOutput", "title": "Show Compiler Output", "category": "Goose" }
+      { "command": "goose.showOutput", "title": "Show Compiler Output", "category": "Goose" },
+      { "command": "goose.restartServer", "title": "Restart Language Server", "category": "Goose", "enablement": "isWorkspaceTrusted" }
     ],
     "menus": {
       "editor/title": [{ "command": "goose.run", "when": "editorLangId == goose && isWorkspaceTrusted", "group": "navigation" }]
@@ -76,7 +82,8 @@
         "goose.compilerPath": { "type": "string", "default": "", "scope": "resource", "description": "Compiler executable or command on PATH. Empty searches goose and build/{Release,Debug}/goose in the workspace, then PATH. Relative paths use the workspace folder. Supports ${workspaceFolder}." },
         "goose.entryFile": { "type": "string", "default": "", "scope": "resource", "description": "Program entry file, relative to the workspace folder. Empty checks/runs the current file. Set this when editing imported modules. Supports ${workspaceFolder}." },
         "goose.stdlibPath": { "type": "string", "default": "", "scope": "resource", "description": "Standard-library directory passed as --stdlib. Empty uses the compiler's default lookup (including GOOSE_STDLIB). Supports ${workspaceFolder}." },
-        "goose.checkOnSave": { "type": "boolean", "default": true, "scope": "resource", "description": "Check saved Goose files on open and save. Checks wait until open Goose files in the same workspace folder are saved." },
+        "goose.useLanguageServer": { "type": "boolean", "default": true, "scope": "window", "description": "Start the compiler's language server (goose lsp) for diagnostics as you type, hover, go to definition, symbols, semantic highlighting and signature help. A compiler without it, or this off, checks saved files instead (goose.checkOnSave)." },
+        "goose.checkOnSave": { "type": "boolean", "default": true, "scope": "resource", "description": "Without the language server: check saved Goose files on open and save. Checks wait until open Goose files in the same workspace folder are saved." },
         "goose.useRunKeybindings": { "type": "boolean", "default": true, "description": "Run with JIT on Ctrl+Shift+B (Cmd+Shift+B on macOS), F5, and Ctrl+F5 while editing Goose. Disable to use VS Code's usual task/debug keybindings." },
         "goose.checkTimeout": { "type": "number", "default": 15000, "minimum": 1000, "maximum": 300000, "scope": "resource", "description": "Maximum time in milliseconds for a background compiler check." },
         "goose.runArguments": { "type": "array", "items": { "type": "string" }, "default": [], "scope": "resource", "description": "Program arguments passed after -- by Run Program. Each item is one argument." }

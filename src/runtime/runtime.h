@@ -25,10 +25,28 @@
      GS_RUNTIME_VERSION names gs_rt_start after the runtime's text, so a
      program linked with another compiler's runtime fails to link. */
 
+/* SRW locks, condition variables, and GetTickCount64 require Windows Vista.
+   Set the target before any system header can supply an older default. */
+#ifdef _WIN32
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#elif _WIN32_WINNT < 0x0600
+#error "Goose requires Windows Vista or later (_WIN32_WINNT >= 0x0600)"
+#endif
+#endif
+
 /* The OS layer (runtime_os.h) opens files on Windows with _wfopen, which the
    Microsoft CRT deprecates in favour of its own _s variant. */
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS 1
+#endif
+
+/* The POSIX and BSD declarations the runtime uses (sigaltstack, stack_t,
+   MAP_ANONYMOUS, ...) are what glibc's headers declare by default, but a
+   strict ISO mode (-std=c11, -std=c23) hides them unless this comes before
+   the first system header. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE 1
 #endif
 
 #include <stdint.h>
@@ -49,6 +67,16 @@
 #pragma GCC optimize("fp-contract=off")
 #elif defined(_MSC_VER)
 #pragma fp_contract(off)
+#endif
+
+/* The function a dynamic extern is called through (§7.10). Its pointer has
+   the Goose declaration's C types, which match the library's in layout but
+   not in name (struct Point_g for the library's Point), so clang's
+   -fsanitize=function would report a call that the ABI makes sound. */
+#if defined(__clang__)
+#define GS_DL_CALL __attribute__((no_sanitize("function")))
+#else
+#define GS_DL_CALL
 #endif
 
 #ifndef GS_NEED_THREADS
@@ -130,9 +158,10 @@
 #endif
 
 /* ---------------------------------------------------------------------------
-   Aborts (§9.3). Not catchable; message + nonzero exit. Compiler-emitted
-   checks carry an error id plus a file (a static string in the generated
-   code) and line; runtime-internal failures use gs_panic. The int64_t
+   Aborts (§9.3). Not catchable; message + nonzero exit, or in a contained
+   worker message + the end of that worker. Compiler-emitted checks carry an
+   error id plus a file (a static string in the generated code) and line;
+   runtime-internal failures use gs_panic, which always exits. The int64_t
    returns let checks sit inside expressions. */
 
 enum {
@@ -152,6 +181,7 @@ enum {
     GS_E_POOLSLICE,    /* a slice handed to a slice pool is not one of its runs */
     GS_E_RELNULL,      /* a non-null optional self-relative target has offset zero */
     GS_E_POPN,         /* pop_n of a negative count or more than the length */
+    GS_E_QBOUND,       /* a queue limit of zero or less */
 };
 
 GS_API GS_NORETURN void gs_panic(const char *msg);
@@ -201,13 +231,45 @@ GS_API GS_NORETURN void gs_asfail_f(const char *why, double d, int f32, const ch
    instruction-set level, the baseline under the function's name, and the
    baseline calls the highest version the CPU supports. GS_SIMD is the
    highest level built: 0 just the baseline, 1 adds an AVX2 version (with
-   BMI1, BMI2, LZCNT and POPCNT, which the check below asks for one by one),
-   2 an AVX-512 one as well (F, BW, CD, DQ and VL: x86-64-v4). The versions
-   are built by clang on x86-64, through its target attribute and inline
-   assembly for cpuid; the contraction pragma above keeps their float
-   results the baseline's, though AVX-512 implies FMA to clang. Elsewhere
-   the versions are left out, and so is the choice. -DGS_SIMD=0 or 1 lowers
-   the level; nothing raises it. */
+   FMA, BMI1, BMI2, LZCNT and POPCNT, which the check below asks for one by
+   one), 2 an AVX-512 one as well (F, BW, CD, DQ and VL: x86-64-v4). The
+   versions are built by clang on x86-64, through its target attribute and
+   inline assembly for cpuid; the contraction pragma above keeps their float
+   results the baseline's, though both have FMA: only math's mul_add uses
+   it (GS_MUL_ADD_MODE, below). Elsewhere the versions are left out, and so
+   is the choice. -DGS_SIMD=0 or 1 lowers the level; nothing raises it. */
+/* Whole-vector elementwise arithmetic (spec §6.1). Where the C compiler has
+   GCC's vector extensions, an elementwise operation on a struct or fixed
+   array of 2 to 16 floats of one width, 16, 32 or 64 bytes with no padding,
+   is one operation on a vector type of the same layout. Lane by lane it
+   computes what the members do. Elsewhere (MSVC, TinyCC, or -DGS_VEC=0) the
+   operation stays member by member.
+
+   The vector types are aligned(1), since such a value may sit at any
+   address (structs are packed), and may_alias, since the generated code
+   reads and writes the value's memory through them. It uses them only
+   inside expressions: GS_VLD, GS_VST and vector literals, never as a local
+   (the generated code gathers declarations at the top of a function,
+   outside the GS_VEC test) and never as a parameter or result, so code
+   built for one instruction set never hands a vector to code built for
+   another, which the x86-64 ABI forbids for wide vectors. */
+#if !defined(GS_VEC) && (defined(__clang__) || defined(__GNUC__)) && !defined(__TINYC__)
+#define GS_VEC 1
+#endif
+#if GS_VEC
+typedef double gs_vf64_2 __attribute__((vector_size(16), aligned(1), may_alias));
+typedef double gs_vf64_4 __attribute__((vector_size(32), aligned(1), may_alias));
+typedef double gs_vf64_8 __attribute__((vector_size(64), aligned(1), may_alias));
+typedef float gs_vf32_4 __attribute__((vector_size(16), aligned(1), may_alias));
+typedef float gs_vf32_8 __attribute__((vector_size(32), aligned(1), may_alias));
+typedef float gs_vf32_16 __attribute__((vector_size(64), aligned(1), may_alias));
+#define GS_VLD(V, p) (*(const V *)(const void *)(p))
+#define GS_VST(V, p, x) ((void)(*(V *)(void *)(p) = (x)))
+#else
+#undef GS_VEC
+#define GS_VEC 0
+#endif
+
 #if defined(__clang__) && (defined(__x86_64__) || defined(_M_X64)) && !defined(__TINYC__)
 #ifndef GS_SIMD
 #define GS_SIMD 2
@@ -217,9 +279,9 @@ GS_API GS_NORETURN void gs_asfail_f(const char *why, double d, int f32, const ch
 #define GS_SIMD 0
 #endif
 #if GS_SIMD >= 1
-#define GS_SIMD_TARGET1 __attribute__((target("avx2,bmi,bmi2,lzcnt,popcnt")))
+#define GS_SIMD_TARGET1 __attribute__((target("avx2,fma,bmi,bmi2,lzcnt,popcnt")))
 #define GS_SIMD_TARGET2 \
-    __attribute__((target("avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,bmi,bmi2,lzcnt,popcnt")))
+    __attribute__((target("avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,fma,bmi,bmi2,lzcnt,popcnt")))
 
 static inline void gs_cpuid(uint32_t leaf, uint32_t r[4]) {
     __asm__ volatile("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf), "c"(0));
@@ -232,8 +294,10 @@ static inline int gs_simd_detect(void) {
     gs_cpuid(0, r);
     if (r[0] < 7) return 0;
     gs_cpuid(1, r);
-    /* OSXSAVE, AVX, POPCNT. */
-    if ((r[2] & (1u << 27 | 1u << 28 | 1u << 23)) != (1u << 27 | 1u << 28 | 1u << 23)) return 0;
+    /* OSXSAVE, AVX, POPCNT, FMA. */
+    if ((r[2] & (1u << 27 | 1u << 28 | 1u << 23 | 1u << 12)) !=
+        (1u << 27 | 1u << 28 | 1u << 23 | 1u << 12))
+        return 0;
     __asm__ volatile("xgetbv" : "=a"(xcr0), "=d"(xhi) : "c"(0));
     (void)xhi;
     if ((xcr0 & 0x6) != 0x6) return 0;                  /* XMM and YMM state. */
@@ -266,10 +330,74 @@ static inline int gs_simd_level(void) {
 }
 #endif
 
-/* Unaligned loads of 4 and 8 bytes. The optimizing backends turn the
-   fixed-size memcpy into one move. */
+/* math's mul_add (runtime_ext.h): x * y + z, rounded once where the code
+   is built for FMA and twice where it is not, so its results are the
+   implementation's (§7.12). GS_MUL_ADD_BASE says which for code built for
+   the target as a whole: fused on arm64 and on x86-64 built for AVX2 or
+   past it (-march=x86-64-v3, clang-cl's /arch:AVX2), separate everywhere
+   else, under TinyCC and under MSVC. MSVC compiles fma() to a call into the
+   C library, even with /arch:AVX2, which also keeps a loop around it from
+   vectorizing: a matrix multiply ran 2.7x slower fused than separate. A
+   simd function's AVX2 and AVX-512 versions have FMA whatever the target,
+   so the compiler sets GS_MUL_ADD_MODE to fused around them, and back to
+   the base after (EmitSimdVersions). */
+#if !defined(__TINYC__) && !(defined(_MSC_VER) && !defined(__clang__)) && \
+    (defined(__FMA__) || defined(__aarch64__) || defined(_M_ARM64))
+#define GS_MUL_ADD_BASE fused
+#else
+#define GS_MUL_ADD_BASE separate
+#endif
+#define GS_MUL_ADD_MODE GS_MUL_ADD_BASE
+
+/* The generated code's memcpy and memset of zeros. Most move or clear the
+   1 to 32 bytes of a field, an element or a reference, a constant size the
+   optimizing backends turn into a few moves. TinyCC calls the C library for
+   every memcpy and memset, so under it a constant size of up to 32 bytes
+   is written out as loads and stores, overlapping where the size is not a
+   power of two (which needs the runs not to overlap, as memcpy's do not).
+   TinyCC generates only the arm a constant condition selects, so these
+   macros compile to the stores alone or to the library call alone; the
+   stores name d and s several times, which the compiler's operands allow
+   (addresses of locals, fields, elements and data-stack tops). */
+#ifdef __TINYC__
+#define GS_KSZ(n, lo, hi) (__builtin_constant_p(n) && (n) >= (lo) && (n) <= (hi))
+#define GS_AT(T, p, k) (*(T *)((uint8_t *)(p) + (k)))
+#define GS_CP(T, d, s, k) (GS_AT(T, d, k) = GS_AT(const T, s, k))
+#define GS_MEMCPY(d, s, n) \
+    (GS_KSZ(n, 8, 8) ? (void)GS_CP(uint64_t, d, s, 0) \
+     : GS_KSZ(n, 4, 4) ? (void)GS_CP(uint32_t, d, s, 0) \
+     : GS_KSZ(n, 1, 1) ? (void)GS_CP(uint8_t, d, s, 0) \
+     : GS_KSZ(n, 2, 2) ? (void)GS_CP(uint16_t, d, s, 0) \
+     : GS_KSZ(n, 3, 3) ? (void)(GS_CP(uint16_t, d, s, 0), GS_CP(uint8_t, d, s, 2)) \
+     : GS_KSZ(n, 5, 7) ? (void)(GS_CP(uint32_t, d, s, 0), GS_CP(uint32_t, d, s, (n) - 4)) \
+     : GS_KSZ(n, 9, 16) ? (void)(GS_CP(uint64_t, d, s, 0), GS_CP(uint64_t, d, s, (n) - 8)) \
+     : GS_KSZ(n, 17, 32) ? (void)(GS_CP(uint64_t, d, s, 0), GS_CP(uint64_t, d, s, 8), \
+                                  GS_CP(uint64_t, d, s, (n) - 16), GS_CP(uint64_t, d, s, (n) - 8)) \
+     : (void)memcpy((d), (s), (n)))
+#define GS_MEMZERO(d, n) \
+    (GS_KSZ(n, 8, 8) ? (void)(GS_AT(uint64_t, d, 0) = 0) \
+     : GS_KSZ(n, 4, 4) ? (void)(GS_AT(uint32_t, d, 0) = 0) \
+     : GS_KSZ(n, 1, 1) ? (void)(GS_AT(uint8_t, d, 0) = 0) \
+     : GS_KSZ(n, 2, 2) ? (void)(GS_AT(uint16_t, d, 0) = 0) \
+     : GS_KSZ(n, 3, 3) ? (void)(GS_AT(uint16_t, d, 0) = 0, GS_AT(uint8_t, d, 2) = 0) \
+     : GS_KSZ(n, 5, 7) ? (void)(GS_AT(uint32_t, d, 0) = 0, GS_AT(uint32_t, d, (n) - 4) = 0) \
+     : GS_KSZ(n, 9, 16) ? (void)(GS_AT(uint64_t, d, 0) = 0, GS_AT(uint64_t, d, (n) - 8) = 0) \
+     : GS_KSZ(n, 17, 32) ? (void)(GS_AT(uint64_t, d, 0) = 0, GS_AT(uint64_t, d, 8) = 0, \
+                                  GS_AT(uint64_t, d, (n) - 16) = 0, GS_AT(uint64_t, d, (n) - 8) = 0) \
+     : (void)memset((d), 0, (n)))
+#else
+#define GS_MEMCPY(d, s, n) memcpy((d), (s), (n))
+#define GS_MEMZERO(d, n) memset((d), 0, (n))
+#endif
+
+/* Unaligned loads of 4 and 8 bytes. */
+#ifdef __TINYC__
+#define gs_ld32(p) GS_AT(const uint32_t, p, 0)
+#define gs_ld64(p) GS_AT(const uint64_t, p, 0)
+#else
 static uint32_t gs_ld32(const void *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static uint64_t gs_ld64(const void *p) { uint64_t v; memcpy(&v, p, 8); return v; }
+#endif
 
 /* The low k bytes of a word set (none for k <= 0, all for k >= 8): which
    bytes of a little-endian load lie within a length. */
@@ -286,18 +414,17 @@ static uint64_t gs_bytemask(int64_t k) {
    on the length; as the C library's memcpy, it takes runs that do not
    overlap. */
 static void gs_memcpy(void *dst, const void *src, size_t n) {
-#ifndef __TINYC__
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
     if (n <= 16) {
         if (n >= 8) {
             uint64_t a = gs_ld64(s), b = gs_ld64(s + n - 8);
-            memcpy(d, &a, 8);
-            memcpy(d + n - 8, &b, 8);
+            GS_MEMCPY(d, &a, 8);
+            GS_MEMCPY(d + n - 8, &b, 8);
         } else if (n >= 4) {
             uint32_t a = gs_ld32(s), b = gs_ld32(s + n - 4);
-            memcpy(d, &a, 4);
-            memcpy(d + n - 4, &b, 4);
+            GS_MEMCPY(d, &a, 4);
+            GS_MEMCPY(d + n - 4, &b, 4);
         } else if (n) {
             uint8_t a = s[0], b = s[n >> 1], c = s[n - 1];
             d[0] = a;
@@ -307,12 +434,11 @@ static void gs_memcpy(void *dst, const void *src, size_t n) {
         return;
     }
     if (n <= 256) {
-        for (size_t i = 0; i + 16 < n; i += 16) memcpy(d + i, s + i, 16);
-        memcpy(d + n - 16, s + n - 16, 16);
+        for (size_t i = 0; i + 16 < n; i += 16) GS_MEMCPY(d + i, s + i, 16);
+        GS_MEMCPY(d + n - 16, s + n - 16, 16);
         return;
     }
-#endif
-    if (n) memcpy(dst, src, n);
+    memcpy(dst, src, n);
 }
 
 static void gs_memmove(void *dst, const void *src, size_t n) {
@@ -324,9 +450,7 @@ static void gs_memmove(void *dst, const void *src, size_t n) {
    the last 16 overlapping, up to 256, the library's memcmp beyond. Below
    that a call and memcmp's own dispatch cost more than the compare. The
    longer compares are a function of their own, so that gs_memeq stays small
-   enough for the C compiler to inline where the length is known. TinyCC
-   inlines no memcpy, so its build calls memcmp for every length. */
-#ifndef __TINYC__
+   enough for the C compiler to inline where the length is known. */
 static GS_NOINLINE int gs_memeq_long(const uint8_t *p, const uint8_t *q, size_t n) {
     if (n > 256) return memcmp(p, q, n) == 0;
     for (size_t i = 0; i + 16 < n; i += 16)
@@ -335,10 +459,8 @@ static GS_NOINLINE int gs_memeq_long(const uint8_t *p, const uint8_t *q, size_t 
     return ((gs_ld64(p + n - 16) ^ gs_ld64(q + n - 16)) |
             (gs_ld64(p + n - 8) ^ gs_ld64(q + n - 8))) == 0;
 }
-#endif
 
 static int gs_memeq(const void *a, const void *b, size_t n) {
-#ifndef __TINYC__
     const uint8_t *p = (const uint8_t *)a, *q = (const uint8_t *)b;
     if (n >= 8 && n <= 16)
         return ((gs_ld64(p) ^ gs_ld64(q)) | (gs_ld64(p + n - 8) ^ gs_ld64(q + n - 8))) == 0;
@@ -347,9 +469,6 @@ static int gs_memeq(const void *a, const void *b, size_t n) {
     if (n < 4)
         return n == 0 || ((p[0] ^ q[0]) | (p[n >> 1] ^ q[n >> 1]) | (p[n - 1] ^ q[n - 1])) == 0;
     return gs_memeq_long(p, q, n);
-#else
-    return n == 0 || memcmp(a, b, n) == 0;
-#endif
 }
 
 /* ---------------------------------------------------------------------------
@@ -359,9 +478,8 @@ static int gs_memeq(const void *a, const void *b, size_t n) {
    does not fit the type. Shifts mask their count to the width; division is
    zero-checked always.
 
-   Only division and modulo check anything in a release build, so only they
-   need to be functions there; everything else is a macro whose body is the
-   expression the release function would have returned. An optimizing backend
+   In a release build every operation is a macro whose body is the
+   expression the debug function would have returned. An optimizing backend
    inlines either form to the same instruction, but a backend that does not
    inline (libtcc, or any -O0 build) would otherwise pay a call for every
    arithmetic operation in the program — which measured as 13-37% of total
@@ -371,41 +489,66 @@ static int gs_memeq(const void *a, const void *b, size_t n) {
    operation, for the debug build's overflow message; the release macros
    drop them unevaluated. */
 
-#if GS_DEBUG
-#define GS_OVFCHK(r, MIN, MAX, a, op, b, type, file, line) \
-    do { if ((r) < (MIN) || (r) > (MAX)) gs_ovf((a), (op), (b), (type), (file), (line)); } while (0)
-#else
-#define GS_OVFCHK(r, MIN, MAX, a, op, b, type, file, line) ((void)0)
-#endif
+/* Division and modulo, both builds: the zero check is not optional, `%` is
+   Euclidean, and i64.min / -1 aborts. They are macros for the reason the
+   other operations are, but each names its operands more than once, so the
+   compiler passes side-effect-free ones (as GS_IDX's index); a signed
+   modulo also takes t, an int64_t of the caller's that holds the C
+   remainder while its sign is fixed. Operands convert to the operation's
+   type first, as a function's parameters would. Only the debug build's
+   narrow signed division, which also checks that the quotient fits (-128 /
+   -1 in i8), is a function. */
+#define GS_DIVU(T, a, b, f, l) \
+    ((T)(b) ? (T)((T)(a) / (T)(b)) : (gs_divfail((f), (l)), (T)0))
+#define GS_MODU(T, a, b, f, l) \
+    ((T)(b) ? (T)((T)(a) % (T)(b)) : (gs_divfail((f), (l)), (T)0))
+#define GS_DIVS(T, a, b, f, l) \
+    ((T)(b) ? (T)((int64_t)(T)(a) / (int64_t)(T)(b)) : (gs_divfail((f), (l)), (T)0))
+#define GS_MODS(T, t, a, b, f, l) \
+    ((T)(b) == 0 ? (gs_divfail((f), (l)), (T)0) \
+     : (T)(((t) = (int64_t)(T)(a) % (int64_t)(T)(b)) < 0 \
+               ? (t) + ((T)(b) < 0 ? -(int64_t)(T)(b) : (int64_t)(T)(b)) : (t)))
 
-/* Division and modulo, both builds: the zero check is not optional, and `%`
-   is Euclidean. */
+#define gs_div_u8(a, b, f, l)  GS_DIVU(uint8_t, a, b, f, l)
+#define gs_div_u16(a, b, f, l) GS_DIVU(uint16_t, a, b, f, l)
+#define gs_div_u32(a, b, f, l) GS_DIVU(uint32_t, a, b, f, l)
+#define gs_div_u64(a, b, f, l) GS_DIVU(uint64_t, a, b, f, l)
+#define gs_mod_u8(a, b, f, l)  GS_MODU(uint8_t, a, b, f, l)
+#define gs_mod_u16(a, b, f, l) GS_MODU(uint16_t, a, b, f, l)
+#define gs_mod_u32(a, b, f, l) GS_MODU(uint32_t, a, b, f, l)
+#define gs_mod_u64(a, b, f, l) GS_MODU(uint64_t, a, b, f, l)
+#define gs_mod_i8(t, a, b, f, l)  GS_MODS(int8_t, t, a, b, f, l)
+#define gs_mod_i16(t, a, b, f, l) GS_MODS(int16_t, t, a, b, f, l)
+#define gs_mod_i32(t, a, b, f, l) GS_MODS(int32_t, t, a, b, f, l)
+#define gs_div_i64(a, b, f, l) \
+    ((int64_t)(b) == 0 ? (gs_divfail((f), (l)), (int64_t)0) \
+     : (int64_t)(a) == INT64_MIN && (int64_t)(b) == -1 ? (gs_divovf((f), (l)), (int64_t)0) \
+     : (int64_t)(a) / (int64_t)(b))
+/* i64.min % -1 would trap, and is exactly 0 as every x % -1 is; |b| is
+   unsigned, so a divisor of i64.min (unrepresentable negated) works. */
+#define gs_mod_i64(t, a, b, f, l) \
+    ((int64_t)(b) == 0 ? (gs_divfail((f), (l)), (int64_t)0) \
+     : (int64_t)(b) == -1 ? (int64_t)0 \
+     : ((t) = (int64_t)(a) % (int64_t)(b)) < 0 \
+         ? (int64_t)((uint64_t)(t) + ((int64_t)(b) < 0 ? 0u - (uint64_t)(int64_t)(b) \
+                                                       : (uint64_t)(int64_t)(b))) \
+         : (t))
+
+#if GS_DEBUG
 #define GS_DIVOPS_S(SFX, T, MIN, MAX) \
 static T gs_div_##SFX(T a, T b, const char *file, int line) { \
     if (b == 0) gs_divfail(file, line); \
     int64_t r = (int64_t)a / (int64_t)b; \
-    GS_OVFCHK(r, MIN, MAX, a, "/", b, #SFX, file, line); \
-    return (T)r; } \
-static T gs_mod_##SFX(T a, T b, const char *file, int line) { \
-    if (b == 0) gs_divfail(file, line); \
-    int64_t r = (int64_t)a % (int64_t)b; \
-    if (r < 0) r += (int64_t)b < 0 ? -(int64_t)b : (int64_t)b; \
+    if (r < (MIN) || r > (MAX)) gs_ovf(a, "/", b, #SFX, file, line); \
     return (T)r; }
-
-#define GS_DIVOPS_U(SFX, T) \
-static T gs_div_##SFX(T a, T b, const char *file, int line) { \
-    if (b == 0) gs_divfail(file, line); \
-    return (T)(a / b); } \
-static T gs_mod_##SFX(T a, T b, const char *file, int line) { \
-    if (b == 0) gs_divfail(file, line); \
-    return (T)(a % b); }
-
 GS_DIVOPS_S(i8, int8_t, -128, 127)
 GS_DIVOPS_S(i16, int16_t, -32768, 32767)
 GS_DIVOPS_S(i32, int32_t, INT32_MIN, INT32_MAX)
-GS_DIVOPS_U(u8, uint8_t)
-GS_DIVOPS_U(u16, uint16_t)
-GS_DIVOPS_U(u32, uint32_t)
+#else
+#define gs_div_i8(a, b, f, l)  GS_DIVS(int8_t, a, b, f, l)
+#define gs_div_i16(a, b, f, l) GS_DIVS(int16_t, a, b, f, l)
+#define gs_div_i32(a, b, f, l) GS_DIVS(int32_t, a, b, f, l)
+#endif
 
 #if GS_DEBUG
 
@@ -539,30 +682,6 @@ static uint64_t gs_shr_u64(uint64_t a, int64_t n) { return a >> (n & 63); }
 
 #endif  /* GS_DEBUG */
 
-/* 64-bit division and modulo. Division overflow (i64.min / -1) would trap in
-   hardware and aborts in every build. */
-static int64_t gs_div_i64(int64_t a, int64_t b, const char *file, int line) {
-    if (b == 0) gs_divfail(file, line);
-    if (a == INT64_MIN && b == -1) gs_divovf(file, line);
-    return a / b;
-}
-static int64_t gs_mod_i64(int64_t a, int64_t b, const char *file, int line) {
-    if (b == 0) gs_divfail(file, line);
-    if (b == -1) return 0;   /* Exactly 0, and i64.min % -1 would trap. */
-    int64_t r = a % b;
-    /* |b| unsigned, so a divisor of i64.min (unrepresentable negated) works. */
-    if (r < 0) r = (int64_t)((uint64_t)r + (b < 0 ? 0u - (uint64_t)b : (uint64_t)b));
-    return r;
-}
-static uint64_t gs_div_u64(uint64_t a, uint64_t b, const char *file, int line) {
-    if (b == 0) gs_divfail(file, line);
-    return a / b;
-}
-static uint64_t gs_mod_u64(uint64_t a, uint64_t b, const char *file, int line) {
-    if (b == 0) gs_divfail(file, line);
-    return a % b;
-}
-
 /* Unsigned division by a divisor a loop does not change, in libdivide's
    form: computed once before the loop (gs_divu_gen), x / d is then the high
    half of a product, adjusted where GS_DIVU_ADD is in `more` and shifted
@@ -644,6 +763,39 @@ static uint64_t gs_divu_q(uint64_t x, uint64_t magic, uint8_t more) {
 #endif
 }
 
+/* The same for a dividend and divisor that fit in 32 bits, with a 32-bit
+   magic: x / d is the high half of a 32x32 product, which a C compiler
+   vectorizes where it keeps the 64x64 one scalar, and which needs no
+   128-bit arithmetic, so only a zero divisor gets GS_DIVU_NONE. */
+static uint32_t gs_divu32_gen(uint32_t d, uint8_t *more) {
+    int k = 31;
+    uint64_t n;
+    uint32_t m, rem;
+    if (d == 0) { *more = GS_DIVU_NONE; return 0; }
+    while (!(d >> k)) k--;
+    if (!(d & (d - 1))) { *more = (uint8_t)k; return 0; }
+    n = (uint64_t)1 << (32 + k);
+    m = (uint32_t)(n / d);
+    rem = (uint32_t)(n % d);
+    if (d - rem < ((uint32_t)1 << k)) {
+        *more = (uint8_t)k;
+    } else {
+        uint32_t twice = rem + rem;
+        m += m;
+        if (twice >= d || twice < rem) m++;
+        *more = (uint8_t)(k | GS_DIVU_ADD);
+    }
+    return m + 1;
+}
+
+static uint32_t gs_divu32_q(uint32_t x, uint32_t magic, uint8_t more) {
+    uint32_t q;
+    if (!magic) return x >> more;
+    q = (uint32_t)(((uint64_t)magic * x) >> 32);
+    if (more & GS_DIVU_ADD) return (((x - q) >> 1) + q) >> (more & GS_DIVU_SHIFT);
+    return q >> more;
+}
+
 /* `as!` float-to-int: truncate toward zero, wrap modulo 2^64 (§6.3). Defined
    the same on every platform, unlike a raw C cast of an out-of-range value.
    A value lies in the i64 range exactly when its truncation does, and there
@@ -722,6 +874,11 @@ typedef struct {
     uint8_t *top;
 } gs_stack;
 
+/* The program defines what goose.h gives C compiled on its own (gs_stack
+   here, gs_rhdr, gs_rref and gs_bld_append after the generated types), so
+   an --include header including it gets nothing more. */
+#define GOOSE_H 1
+
 /* Starts the runtime on main's thread: the program's arguments, each
    region's usable reservation and trailing guard gap, the address space
    budgeted for regions over the whole program, and the most regions the
@@ -730,7 +887,7 @@ typedef struct {
 GS_API void gs_rt_start(int argc, char **argv, uint64_t reserve, uint64_t gap,
                         uint64_t budget, int64_t mainregions, int64_t workerregions);
 /* A fresh region, registered to the calling thread program. */
-GS_API uint8_t *gs_reserve_region(void);
+GS_API uint8_t *gs_reserve_region(gs_stack *stack);
 /* The calling thread program's stack use, on stderr (GS_STACK_STATS):
    `stacks` is how many of its indexed data stacks exist. */
 GS_API void gs_stack_stats(int64_t stacks);
@@ -739,20 +896,53 @@ GS_API void gs_stack_stats(int64_t stacks);
 GS_API void gs_release_regions(void);
 
 /* ---------------------------------------------------------------------------
+   Dynamic externs (§7.10): the shared libraries the program's extern blocks
+   name, and the functions it calls through them, bound by name as the
+   program starts (docs/design/dynamic_externs.md). */
+
+/* A library: the name its block gives and, where the sidecar spells it for
+   a platform, that spelling; NULL where the platform derives its own
+   (name.dll, libname.dylib, libname.so). */
+typedef struct gs_dllib {
+    const char *name, *onwindows, *onmacos, *onlinux;
+} gs_dllib;
+/* One function: its library's index in the table, the symbol the library
+   is asked for, and the pointer the generated code calls through. */
+typedef struct gs_dlbind {
+    int32_t lib;
+    const char *sym;
+    void **slot;
+} gs_dlbind;
+/* Opens each library once and fills every slot, on the main thread before
+   the globals are initialized. A library that does not load, or a symbol it
+   does not have, is a runtime error naming both. */
+GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *binds,
+                       int64_t nbinds);
+
+/* ---------------------------------------------------------------------------
    Threads and typed queues (§11.2), runtime_threads.h. */
 
 GS_API int64_t gs_hardware_threads(void);
-/* Runs run(entry, args) on a new thread, args a copy of argsize bytes, and
-   returns the worker's id. */
+/* Runs run(entry, args) and then release() on a new thread, args a copy of
+   argsize bytes, and returns the worker's id. In a contained worker an
+   abort ends run early. */
 GS_API int64_t gs_thread_start(void (*run)(void (*)(uint8_t *), uint8_t *),
-                               void (*entry)(uint8_t *), const void *args, int64_t argsize);
-GS_API void gs_thread_wait(int64_t id, const char *file, int line);
+                               void (*release)(void), void (*entry)(uint8_t *),
+                               const void *args, int64_t argsize, int contained);
+/* Whether the worker returned rather than aborted, once it has ended. Where
+   `msg` is not NULL, the first such wait for a worker that aborted takes its
+   message: `msg` and `len` are set to it, which the caller frees with
+   gs_free_msg, or to NULL and no bytes. */
+GS_API uint8_t gs_thread_wait(int64_t id, uint8_t **msg, int64_t *len,
+                               const char *file, int line);
+GS_API void gs_free_msg(uint8_t *msg);
 
 /* One queue per flat element type the program uses (the compiler emits a
    gs_queue global per type, which main sets up before anything can use it).
-   Values are contiguous byte images: gs_qget and gs_qpoll return a malloc'd
-   node the caller copies from and frees, gs_qpoll NULL when the queue is
-   empty. */
+   Values are contiguous byte images: gs_qget, gs_qwait and gs_qpoll return a
+   malloc'd node the caller copies from and frees, gs_qwait and gs_qpoll NULL
+   when nothing came. gs_qput returns 0, queueing nothing, when the queue is
+   at its limit. */
 typedef struct gs_qnode {
     struct gs_qnode *next;
     int64_t size;
@@ -763,9 +953,11 @@ typedef struct gs_qstate *gs_queue;
 #define GS_QUEUE_INIT NULL
 
 GS_API void gs_qinit(gs_queue *q);
-GS_API void gs_qput(gs_queue *q, const void *data, int64_t size);
+GS_API uint8_t gs_qput(gs_queue *q, const void *data, int64_t size);
 GS_API gs_qnode *gs_qget(gs_queue *q);
+GS_API gs_qnode *gs_qwait(gs_queue *q, int64_t ms);
 GS_API gs_qnode *gs_qpoll(gs_queue *q);
+GS_API void gs_qlimit(gs_queue *q, int64_t n, const char *file, int line);
 
 #ifndef GS_RUNTIME_OBJECT
 
@@ -785,7 +977,7 @@ static GS_TLS void *gs_gl;
 #define GS(i) (&gs_stks[i])
 
 static void gs_stack_init(gs_stack *s) {
-    s->top = gs_reserve_region();
+    s->top = gs_reserve_region(s);
 }
 
 /* The calling thread program's block of n stacks, each with its region:
@@ -814,29 +1006,27 @@ static void gs_rt_stats(void) {
 #endif
 }
 
-/* Every region the calling thread program owns, with its stack block. No
-   Goose reference to these mappings may outlive it. */
-static void gs_free_thread_stacks(void) {
-    gs_release_regions();
-    free(gs_stks);
-    gs_stks = NULL;
-    gs_nstks = 0;
-}
-
 #if GS_NEED_THREADS
 /* A worker's thread program: its entry thunk opens the stack block, whose
-   count the compiler knows, and the runtime releases the regions after
-   this returns. */
+   count the compiler knows, and allocates the globals instance. */
 static void gs_thread_run(void (*entry)(uint8_t *), uint8_t *args) {
     entry(args);
     gs_rt_stats();
+}
+
+/* What the thread program holds once it has returned or aborted; the
+   runtime releases the regions after this. */
+static void gs_thread_release(void) {
+    free(gs_gl);
+    gs_gl = NULL;
     free(gs_stks);
     gs_stks = NULL;
     gs_nstks = 0;
 }
 
-static int64_t gs_thread_spawn(void (*entry)(uint8_t *), const void *args, int64_t argsize) {
-    return gs_thread_start(gs_thread_run, entry, args, argsize);
+static int64_t gs_thread_spawn(void (*entry)(uint8_t *), const void *args, int64_t argsize,
+                               int contained) {
+    return gs_thread_start(gs_thread_run, gs_thread_release, entry, args, argsize, contained);
 }
 #endif
 
@@ -996,14 +1186,8 @@ GS_API int64_t gs_fmt_bool(uint8_t *dst, int64_t v);
 /* A u8 array inside an aggregate: quoted, with the escapes Goose reads. */
 GS_API int64_t gs_fmt_quoted(uint8_t *dst, const uint8_t *s, int64_t n);
 
-/* print(...) (§3.7): each argument's text, then a newline. */
-GS_API void gs_out_int(int64_t v);
-GS_API void gs_out_uint(uint64_t v);
-GS_API void gs_out_flt(double v);
-GS_API void gs_out_f32(float v);
-GS_API void gs_out_bool(int64_t v);
+/* print(...) (§3.7): the whole line, rendered first, in one write. */
 GS_API void gs_out_bytes(const uint8_t *p, int64_t len);
-GS_API void gs_out_nl(void);
 
 /* Byte search behind std's find_any and find_pair (runtime_impl.h): the
    first i < n with p[i] in the set, or with p[i] in a and p[i + d] in b

@@ -40,7 +40,7 @@ FnSpec *CodeGen::FmtSpecFor(Call *c, TypeExpr *t) {
     return nullptr;
 }
 
-// The scalar, bool, u8-array cases EmitOutArg/FmtCall handle directly.
+// The scalar, bool, u8-array cases EmitFormatInto/EmitStr handle directly.
 bool CodeGen::SimpleText(Call *c, TypeExpr *t) {
     if (FmtSpecFor(c, t)) return false;
     if (t->kind == TY_INT || t->kind == TY_FLT || t->kind == TY_BOOL) return true;
@@ -50,7 +50,7 @@ bool CodeGen::SimpleText(Call *c, TypeExpr *t) {
 }
 
 void CodeGen::RenderLit(Loc &out, const string &text) {
-    L("memcpy(", Top(out.stk), ", ", StrRaw(text), ", ", text.size(), ");");
+    L("GS_MEMCPY(", Top(out.stk), ", ", StrRaw(text), ", ", text.size(), ");");
     Bump(out.stk, cat(text.size()));
     L(out.lenlv, " += ", text.size(), ";");
 }
@@ -164,7 +164,7 @@ void CodeGen::RenderLoc(Loc &out, Loc lv, TypeExpr *t, bool nested, Call *c, Lin
             // Variable-size elements are walked with this as the cursor.
             auto p = T();
             if (v.typedelems) L(CT(elem), " *", p, " = ", v.elems, ";");
-            else L("const uint8_t *", p, " = (const uint8_t *)(", v.elems, ");");
+            else L("uint8_t *", p, " = ", v.elems, ";");
             L("for (int64_t ", i, " = 0; ", i, " < ", cnt, "; ", i, "++) {");
             ind++;
             PushSc(SC_PLAIN);
@@ -315,14 +315,33 @@ string CodeGen::RefArg(const Loc &lv, TypeExpr *sub, Line ln) {
     return lv.val ? cat("&", lv.s) : cat("(", CT(sub), " *)(", lv.s, ")");
 }
 
+// A pool reference to the reusable pool at lv, for a parameter its
+// specialization takes one for (IsPoolParam), as a call's argument is
+// (EmitArg): the pool's header and stack, and its free list's.
+string CodeGen::PrefArg(const Loc &lv, Line ln) {
+    if (lv.hdr.empty() || lv.stk.empty() || lv.fl.empty() || lv.flstk.empty())
+        Fail(ln, "internal: a pool reference to storage that is no pool");
+    auto p = T();
+    L("gs_pref ", p, " = { &", lv.hdr, ", ", lv.stk, ", &", lv.fl, ", ", lv.flstk, " };");
+    return p;
+}
+
 // A user `format(out, v)` overload applied to the value at lv.
 void CodeGen::EmitUserFormat(Loc &out, Loc lv, FnSpec *sp, Line ln) {
     assert(!out.hdr.empty() && !out.stk.empty());
     PushSc(SC_PLAIN);
-    auto r = T();
-    L("gs_rref ", r, " = { (gs_rhdr *)&", out.hdr, ", ", out.stk, " };");
+    auto outpool = IsPoolParam(sp, 0), pool = IsPoolParam(sp, 1);
+    string r;
+    if (outpool) {
+        r = PrefArg(out, ln);
+    } else {
+        r = T();
+        L("gs_rref ", r, " = { (gs_rhdr *)&", out.hdr, ", ", out.stk, " };");
+    }
     auto pt = sp->argtypes[1];
-    auto arg = pt->kind == TY_REF ? RefArg(lv, pt->ref->sub, ln) : LoadLoc(lv, pt, ln);
+    auto arg = pool                ? PrefArg(lv, ln)
+               : pt->kind == TY_REF ? RefArg(lv, pt->ref->sub, ln)
+                                    : LoadLoc(lv, pt, ln);
     if (IsLargeFixed(pt)) arg = cat("&", Snapshot(pt, arg));
     MarkFlush();
     auto &ki = sinfo[sp];
@@ -334,9 +353,9 @@ void CodeGen::EmitUserFormat(Loc &out, Loc lv, FnSpec *sp, Line ln) {
     if (ki.needssp) NoStackAcrossCycleCall(sp, ln);
     if (ki.needssp) NoteStackCall(sp, ln);
     vector<string> args;
-    PushArg(args, sp->argtypes[0], false, r);
+    PushArg(args, sp->argtypes[0], outpool, r);
     if (IsLargeFixed(pt)) args.push_back(arg);
-    else PushArg(args, pt, false, arg);
+    else PushArg(args, pt, pool, arg);
     if (ki.needssp) args.push_back(SpTop());
     string argstr;
     for (auto &a : args) Append(argstr, argstr.empty() ? "" : ", ", a);
@@ -446,29 +465,6 @@ CodeGen::Loc CodeGen::RenderToTemp(Node *a, Call *c) {
     return b;
 }
 
-void CodeGen::EmitOutArg(Node *a, Call *c) {
-    c = FmtContext(c, a);
-    auto t = a->exprtype;
-    if (!SimpleText(c, t)) {
-        auto b = RenderToTemp(a, c);
-        L("gs_out_bytes(", b.hdr, ".base, ", b.hdr, ".len);");
-        return;
-    }
-    if (t->kind == TY_INT) {
-        if (t->intstorage == IS_U64) L("gs_out_uint(", GenX(a), ");");
-        else L("gs_out_int((int64_t)(", GenX(a), "));");
-    } else if (IsF32(t)) {
-        L("gs_out_f32(", GenX(a), ");");
-    } else if (t->kind == TY_FLT) {
-        L("gs_out_flt((double)(", GenX(a), "));");
-    } else if (t->kind == TY_BOOL) {
-        L("gs_out_bool(", GenX(a), ");");
-    } else {
-        auto se = GenSrcElems(a);
-        L("gs_out_bytes((const uint8_t *)(", se.elems, "), ", se.n, ");");
-    }
-}
-
 // The C expression formatting scalar `a` at `dst`, yielding the byte count.
 string CodeGen::FmtCall(Node *a, const string &dst) {
     auto t = a->exprtype;
@@ -564,7 +560,7 @@ vector<string> CodeGen::EmitStr(Call *c, vector<Node *> &an, Dst d0, Line ln) {
         if (!SimpleText(context, t)) {
             auto b = RenderToTemp(a, context);
             L("int64_t ", n, " = ", b.hdr, ".len;");
-            L("memcpy(", Top(stk), ", ", b.hdr, ".base, (size_t)", n, ");");
+            L("GS_MEMCPY(", Top(stk), ", ", b.hdr, ".base, (size_t)", n, ");");
         } else if (t->kind == TY_ARRAY || t->kind == TY_SLICE) {
             auto se = GenSrcElems(a);
             L("int64_t ", n, " = ", se.n, ";");

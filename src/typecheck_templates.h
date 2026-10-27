@@ -25,6 +25,7 @@ template<typename F> bool TypeCheck::StableTypeQuery(TypePairCache &cache, TypeE
     return r;
 }
 
+
 // From typecheck_exprs.h.
 
 // The operands of n, in evaluation order (§2), each with how n consumes it
@@ -316,6 +317,7 @@ template<typename F> void TypeCheck::AfterHead(Node *n, Node *next, F f) {
     }
 }
 
+
 // From typecheck_flow.h.
 
 // A control construct's value (§6.4), which `check` checks at a
@@ -373,6 +375,7 @@ template<typename F> Val TypeCheck::CheckJoin(Node *x, TypeExpr *expected, F che
     return TempCopy(v);
 }
 
+
 // From typecheck_calls.h.
 
 // Runs f, which checks the default of parameter `param` of the function
@@ -393,10 +396,28 @@ void TypeCheck::InParamDefault(Call *c, const MatchInfo &mi, FnSpec *env, size_t
     f();
 }
 
+// spec's `return from` target t on one call path that reaches spec, of n
+// entries, outermost first: step(i) is a (function, specialization) pair,
+// with no function for a function value's body, which `from` cannot name.
+// The innermost call of t's function on it must be t (§7.9), and every
+// specialization after it lies between them, needing t as well.
+template<typename F>
+void TypeCheck::NeedOnPath(FnSpec *spec, FnSpec *t, Node *at, int n, F step) {
+    auto found = n - 1;
+    while (found >= 0 && step(found).first != t->sf) found--;
+    if (found < 0)
+        Error(at, cat("call to ", spec->sf->name, " requires an enclosing call of ", t->sf->name,
+                      " (it does `return ... from ", t->sf->name, "`)"));
+    if (step(found).second != t)
+        Error(at, "recursive call changes the enclosing specialization of a long-distance return");
+    for (auto i = found + 1; i < n; i++) AddNeed(step(i).second, t);
+}
+
+
 // From typecheck_builtins.h.
 
 template <typename P, typename X>
-void TypeCheck::NoteRootEvent(VarDef *root, P param, X external) {
+inline void TypeCheck::NoteRootEvent(VarDef *root, P param, X external) {
     auto current = CurRealFrame().spec;
     if (!current) return;
     if (root->type) {
@@ -407,12 +428,17 @@ void TypeCheck::NoteRootEvent(VarDef *root, P param, X external) {
         auto spec = frames[fi].spec;
         if (!spec) continue;
         auto found = false;
-        // A view's class is reached through its parameter's slot, which its
-        // callers' storage behind the slot bounds (FnSpec::views).
+        // A view's contents are a different effect target from the holder
+        // or slice slot itself, even though one parameter reaches both.
         for (size_t i = 0; i < spec->params.size(); i++) {
-            if (RefRootOf(spec->params[i]) != root && ViewClassOf(spec, i) != root) continue;
-            param(spec, (int)i);
-            found = true;
+            if (RefRootOf(spec->params[i]) == root) {
+                param(spec, (int)i);
+                found = true;
+            }
+            if (ViewClassOf(spec, i) == root) {
+                param(spec, (int)(spec->params.size() + i));
+                found = true;
+            }
         }
         if (found) {
             if (spec != current) external(current, root);
@@ -434,7 +460,7 @@ template<typename F> void TypeCheck::EachHolderRoot(VarDef *holder, size_t from,
         if (!seen.insert(h).second) return;
         for (auto i = start; i < storeevents.size(); i++) {
             auto e = storeevents[i];
-            if (e.container != h) continue;
+            if (e.container != h || StoredLater(i)) continue;
             if (e.src && !e.src->isglobal && e.src->type) {
                 walk(e.src, 0);
                 continue;

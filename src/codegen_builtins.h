@@ -53,13 +53,13 @@ vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
     auto ln = c->line;
     switch ((BuiltinKind)c->builtin) {
         case B_PRINT: {
-            // The whole line is rendered before any of it is written, so
-            // an argument that prints on its own (a call) cannot interleave
-            // with it (§3.7).
+            // The whole line, newline included, is rendered before any of
+            // it is written, so an argument that prints on its own (a call)
+            // cannot interleave with it, and it goes out as one write (§3.7).
             auto b = TempBuilder();
             for (auto a : an) EmitFormatInto(b, a, ln, c);
+            RenderLit(b, "\n");
             L("gs_out_bytes(", b.hdr, ".base, ", b.hdr, ".len);");
-            L("gs_out_nl();");
             return {};
         }
         case B_STR: return EmitStr(c, an, d0, ln);
@@ -69,6 +69,13 @@ vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
             return {};
         }
         case B_ASSERT: {
+            if (BranchChain(an[0])) {
+                auto ok = Lbl();
+                GenBranch(an[0], true, ok);
+                L("gs_abort(GS_E_ASSERT, ", LocArgs(ln), ");");
+                L(ok, ":;");
+                return {};
+            }
             auto x = GenTruth(an[0]);
             L("if (!(", x, ")) gs_abort(GS_E_ASSERT, ", LocArgs(ln), ");");
             return {};
@@ -121,36 +128,66 @@ vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
         }
         case B_THREAD_WAIT: {
             usesthreads = true;
-            L("gs_thread_wait(", GenX(an[0]), ", ", LocArgs(ln), ");");
-            return {};
+            // Emitted here, not returned as text: a discarded result would
+            // drop the wait.
+            auto t = T();
+            if (an.size() == 1) {
+                L("uint8_t ", t, " = gs_thread_wait(", GenX(an[0]), ", NULL, NULL, ",
+                  LocArgs(ln), ");");
+                return { t };
+            }
+            // thread_wait(id, msg): the abort's message, which this wait takes
+            // if no wait has, appended to msg.
+            auto id = GenX(an[0]);
+            auto m = T(), n = T();
+            L("uint8_t *", m, ";");
+            L("int64_t ", n, ";");
+            L("uint8_t ", t, " = gs_thread_wait(", id, ", &", m, ", &", n, ", ", LocArgs(ln),
+              ");");
+            L("if (", m, ") {");
+            ind++;
+            AppendBytes(RecvLoc(an[1]), m, n, ln);
+            L("gs_free_msg(", m, ");");
+            ind--;
+            L("}");
+            return { t };
         }
-        case B_THREAD_SPAWN: return EmitThreadSpawn(c, an);
+        case B_THREAD_SPAWN: case B_THREAD_SPAWN_CONTAINED: return EmitThreadSpawn(c, an);
         case B_QPUT: {
             auto t = an[0]->exprtype;
             auto q = QueueFor(t);
+            // Emitted here, not returned as text: a discarded result would
+            // drop the put.
+            auto ok = T();
             if (IsResz(t)) {
                 auto src = GenLoc(an[0]);
                 if (src.t->kind == TY_REF) DerefLoc(src);
                 string stk;
                 auto base = BytesTemp(stk);
                 EmitRzImage(src, t, stk, ln);
-                L("gs_qput(&", q, ", ", base, ", ", Top(stk), " - ", base, ");");
+                L("uint8_t ", ok, " = gs_qput(&", q, ", ", base, ", ", Top(stk), " - ", base, ");");
             } else if (IsBytesT(t)) {
                 auto p = GenPtr(an[0]);
-                L("gs_qput(&", q, ", ", p, ", ", SizeX(t, p), ");");
+                L("uint8_t ", ok, " = gs_qput(&", q, ", ", p, ", ", SizeX(t, p), ");");
             } else {
                 auto tv = T();
                 FixedLocal(t, tv, GenX(an[0]));
-                L("gs_qput(&", q, ", &", tv, ", ", FixedSize(t), ");");
+                L("uint8_t ", ok, " = gs_qput(&", q, ", &", tv, ", ", FixedSize(t), ");");
             }
-            return {};
+            return { ok };
         }
+        case B_QLIMIT:
+            L("gs_qlimit(&", QueueFor(c->qtype), ", ", GenX(an[0]), ", ", LocArgs(ln), ");");
+            return {};
         case B_QGET: case B_QPOLL: {
             auto t = c->rettypes[0];
             auto q = QueueFor(t);
             auto nn = T();
-            auto poll = c->builtin == B_QPOLL;
-            L("gs_qnode *", nn, poll ? " = gs_qpoll(&" : " = gs_qget(&", q, ");");
+            // qpoll<T>() and qget<T>(ms) say whether a value came.
+            auto poll = c->rettypes.size() > 1;
+            if (c->builtin == B_QPOLL) L("gs_qnode *", nn, " = gs_qpoll(&", q, ");");
+            else if (poll) L("gs_qnode *", nn, " = gs_qwait(&", q, ", ", GenX(an[0]), ");");
+            else L("gs_qnode *", nn, " = gs_qget(&", q, ");");
             string got;
             if (poll) {
                 got = T();
@@ -178,7 +215,7 @@ vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
                     // The zero value until the image is read (a missed poll
                     // leaves it), with the tail header at the top, where
                     // the elements land.
-                    L("memset(&", lenlv, ", 0, sizeof(", lenlv, "));");
+                    L("GS_MEMZERO(&", lenlv, ", sizeof(", lenlv, "));");
                     L(FoTailHdr(t, lenlv), ".base = ", Top(stk), ";");
                 } else if (poll) {
                     L(lenlv, " = 0;");
@@ -187,12 +224,12 @@ vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
                 ind++;
                 if (fo) {
                     auto pre = FoPrefixSize(t);
-                    L("memcpy(&", lenlv, ", ", image, ", ", pre, ");");
+                    L("GS_MEMCPY(&", lenlv, ", ", image, ", ", pre, ");");
                     image = cat(image, " + ", pre);
                     n = cat("(", nn, "->size - 8 - ", pre, ")");
                 }
                 L(cnt, " = *(int64_t *)(", nn, " + 1);");
-                L("memcpy(", Top(stk), ", ", image, ", (size_t)", n, ");");
+                L("GS_MEMCPY(", Top(stk), ", ", image, ", (size_t)", n, ");");
                 Bump(stk, n);
                 L("free(", nn, ");");
                 ind--;
@@ -212,7 +249,7 @@ vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
                 if (poll) L("if (", nn, ") {");
                 else L("{");
                 ind++;
-                L("memcpy(", Top(stk), ", ", nn, " + 1, (size_t)", nn, "->size);");
+                L("GS_MEMCPY(", Top(stk), ", ", nn, " + 1, (size_t)", nn, "->size);");
                 Bump(stk, cat(nn, "->size"));
                 L("free(", nn, ");");
                 ind--;
@@ -220,8 +257,8 @@ vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
                     // A missed poll still yields a valid (zero) value.
                     L("} else {");
                     ind++;
-                    L("memset(", Top(stk), ", 0, ", ZeroSize(t), ");");
-                    Bump(stk, cat(ZeroSize(t)));
+                    L("GS_MEMZERO(", Top(stk), ", ", MinBytes(t, true), ");");
+                    Bump(stk, cat(MinBytes(t, true)));
                     ind--;
                 }
                 L("}");
@@ -232,14 +269,14 @@ vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
             if (!FixedSize(t)) {
                 // A value of no bytes (§3.4): the node holds none to fill the
                 // object C gives it.
-                L("memset(&", tv, ", 0, sizeof(", tv, "));");
+                L("GS_MEMZERO(&", tv, ", sizeof(", tv, "));");
                 L("free(", nn, ");");
             } else if (poll) {
-                L("memset(&", tv, ", 0, sizeof(", tv, "));");
-                L("if (", nn, ") { memcpy(&", tv, ", ", nn, " + 1, sizeof(", tv,
+                L("GS_MEMZERO(&", tv, ", sizeof(", tv, "));");
+                L("if (", nn, ") { GS_MEMCPY(&", tv, ", ", nn, " + 1, sizeof(", tv,
                   ")); free(", nn, "); }");
             } else {
-                L("memcpy(&", tv, ", ", nn, " + 1, sizeof(", tv, "));");
+                L("GS_MEMCPY(&", tv, ", ", nn, " + 1, sizeof(", tv, "));");
                 L("free(", nn, ");");
             }
             return poll ? vector<string> { tv, got } : vector<string> { tv };
@@ -280,7 +317,7 @@ vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
             // A relative-reference element leaves as the plain reference it
             // loads as (§3.9): its offset is measured from the slot it
             // leaves, whose bytes nothing has written over yet.
-            if (elem->kind == TY_REF && elem->ref->lenstorage >= 0)
+            if (IsRelRef(elem))
                 return { LoadLoc(BytesLoc(at, elem, lv), c->rettypes[0], ln) };
             auto tv = T();
             FixedLocal(elem, tv, cat("*(", CT(elem), " *)", at));
@@ -310,7 +347,7 @@ vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
             auto elem = v.elem;
             auto esz = FixedSize(elem);
             auto ak = lv.t->arr->akind;
-            auto relref = elem->kind == TY_REF && elem->ref->lenstorage >= 0;
+            auto relref = IsRelRef(elem);
             if (ak != A_LIMITED) NoteLen(lv.stk, v.lenlv);
             auto nn = GenPure(an[1]);
             string fv;
@@ -401,7 +438,7 @@ vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
             L(v.lenlv, " = 0;");
             return {};
         }
-        case B_ALLOC_INDEX: case B_ALLOC_REF: return EmitAlloc(c, an);
+        case B_ALLOC_INDEX: case B_ALLOC_REF: return EmitAlloc(c, an, ln);
         case B_ALLOC_SLICE: case B_REALLOC_SLICE: case B_FREE_SLICE:
             return EmitSlicePool(c, an, ln);
         case B_FREE: {
@@ -515,29 +552,46 @@ bool CodeGen::UniformFillByte(Node *n, TypeExpr *t, int &byte) {
     return true;
 }
 
+// The element `n` a push or an alloc adds to an array of `elem`, as far as
+// it goes before its slot is claimed. The receiver is evaluated, then the
+// argument, then the element is added (§2), and the argument may itself
+// grow the array. A fixed-size element is therefore evaluated here, so that
+// it follows whatever the argument added and the returned reference names
+// it, and a relative-reference element is the plain reference its slot
+// encodes. A variable-size element, and a fixed one holding relative
+// references of either form (a self-relative offset measures from where the
+// element lives, an `in pool` `self` is its position in the pool), are built
+// at the slot instead and give nothing here; the checker keeps the array
+// from growing while such a value is under construction (§1.3,
+// BuiltInPlace).
+string CodeGen::ElemValue(Node *n, TypeExpr *elem) {
+    if (IsRelRef(elem)) {
+        auto ev = T();
+        L("uint8_t *", ev, " = (uint8_t *)(", GenX(n), ");");
+        return ev;
+    }
+    if (IsBytesT(elem) || HasRelRef(elem)) return "";
+    return Snapshot(elem, GenXD(n, elem));
+}
+
+// Writes the fixed-size element `n`, given what ElemValue made of it, into
+// the claimed slot the typed pointer `e` names.
+void CodeGen::StoreElemAt(Node *n, TypeExpr *elem, const string &e, const string &ev,
+                                 Line ln) {
+    // A relative-reference element stores the offset from its own slot,
+    // not the pointer (§3.9).
+    if (IsRelRef(elem))
+        EmitRelStoreAt(cat("(uint8_t *)", e), elem, ev, ln, true, RelValue(n));
+    else if (ev.empty()) GenAny(n, Dst { DK_LVALUE, cat("(*", e, ")"), elem });
+    else StoreWhole(e, elem, ev);
+}
+
 vector<string> CodeGen::EmitPush(vector<Node *> &an, Line ln) {
     auto lv = RecvLoc(an[0]);
     auto v = ArrayView(lv);
     auto elem = v.elem;
     auto ak = lv.t->arr->akind;
-    // The receiver is evaluated, then the argument, then the element is
-    // added (§2), and the argument may itself grow the array. A fixed-size
-    // element is therefore evaluated before its slot is claimed, so that it
-    // follows whatever the argument pushed and the returned reference names
-    // it. A variable-size element, and a fixed one holding relative
-    // references of either form (a self-relative offset measures from where
-    // the element lives, an `in pool` `self` is its position in the pool),
-    // are built in place instead; the checker keeps the array from growing
-    // while such a value is under construction at its top (§1.3).
-    auto relref = elem->kind == TY_REF && elem->ref->lenstorage >= 0;
-    auto inplace = IsBytesT(elem) || (!relref && HasRelRef(elem));
-    string ev;   // The evaluated element, or the plain reference a relative slot encodes.
-    if (relref) {
-        ev = T();
-        L("uint8_t *", ev, " = (uint8_t *)(", GenX(an[1]), ");");
-    } else if (!inplace) {
-        ev = Snapshot(elem, GenXD(an[1], elem));
-    }
+    auto ev = ElemValue(an[1], elem);
     string ref;
     if (ak == A_LIMITED) {
         auto nl = T();
@@ -545,15 +599,7 @@ vector<string> CodeGen::EmitPush(vector<Node *> &an, Line ln) {
         L("if (", nl, " >= ", LimitedCap(lv), ") gs_abort(GS_E_CAPACITY, ", LocArgs(ln), ");");
         auto e = T();
         L(CT(elem), " *", e, " = (", CT(elem), " *)(", ElemAddr(v, nl), ");");
-        if (relref) {
-            // A relative-reference element stores the offset from its
-            // own slot, not the pointer (§3.9).
-            EmitRelStoreAt(cat("(uint8_t *)", e), elem, ev, ln, true, RelValue(an[1]));
-        } else if (inplace) {
-            GenAny(an[1], Dst { DK_LVALUE, cat("(*", e, ")"), elem });
-        } else {
-            StoreWhole(e, elem, ev);
-        }
+        StoreElemAt(an[1], elem, e, ev, ln);
         L(v.lenlv, " = (", LenCast(lv), ")(", nl, " + 1);");
         ref = e;
     } else {
@@ -565,15 +611,27 @@ vector<string> CodeGen::EmitPush(vector<Node *> &an, Line ln) {
         } else {
             L(CT(elem), " *", e, " = (", CT(elem), " *)", Top(lv.stk), ";");
         }
-        if (relref) EmitRelStore(lv.stk, elem, ev, ln, RelValue(an[1]));
-        else if (inplace) GenConstruct(an[1], lv.stk, elem);
+        // StoreElemAt's three cases, at the stack's top, which each moves
+        // past the element.
+        if (IsRelRef(elem))
+            EmitRelStore(lv.stk, elem, ev, ln, RelValue(an[1]));
+        else if (ev.empty()) GenConstruct(an[1], lv.stk, elem);
         else EmitValStore(lv.stk, elem, ev);
         L(v.lenlv, "++;");
         ref = e;
     }
-    // push returns a reference on grow-only and limited arrays (§3.3), which
-    // a receiver decaying it loads from (CallVal0).
-    return { ref };
+    return { NewElemResult(ref, elem, lv, ln) };
+}
+
+// What push and alloc_ref return for the element just added at `e`, a
+// pointer to its slot: a reference to it (§3.3), which a receiver decaying it
+// loads from (CallVal0). An element that is itself a reference gives the one
+// it holds instead, loaded if relative, as `&` of it does: there are no
+// references to references (§3.8).
+string CodeGen::NewElemResult(const string &e, TypeExpr *elem, const Loc &lv, Line ln) {
+    if (elem->kind != TY_REF) return e;
+    if (elem->ref->lenstorage >= 0) return LoadLoc(BytesLoc(e, elem, lv), elem, ln);
+    return Snapshot(elem, cat("*", e));
 }
 
 void CodeGen::EmitAppend(vector<Node *> &an, Line ln) {
@@ -631,7 +689,7 @@ void CodeGen::EmitAppend(vector<Node *> &an, Line ln) {
             L(v.lenlv, " += ", nn, ";");
             return;
         }
-        auto count = al->fillval ? Is<IntLit>(al->fillcount)->val : (int64_t)al->elems.size();
+        auto count = LitCount(al);
         string ol, at = Top(lv.stk);
         if (ak == A_LIMITED) {
             ol = T();
@@ -671,24 +729,22 @@ void CodeGen::EmitAppend(vector<Node *> &an, Line ln) {
     L(v.lenlv, " += ", nn, ";");
 }
 
-vector<string> CodeGen::EmitAlloc(Call *c, vector<Node *> &an) {
+vector<string> CodeGen::EmitAlloc(Call *c, vector<Node *> &an, Line ln) {
     auto lv = RecvLoc(an[0]);
     assert(!lv.fl.empty() && !lv.stk.empty());
     auto v = ArrayView(lv);
     auto elem = v.elem;
     auto esz = FixedSize(elem);
-    // A literal holding relative references is built once the slot is
-    // known, so its offsets measure from the slot; anything else keeps
-    // its value evaluated ahead of the freelist bookkeeping.
-    auto atslot = (Is<StructLit>(an[1]) || Is<ArrayLit>(an[1])) && HasRelRef(elem);
-    auto ev = atslot ? string() : GenPure(an[1]);
-    // A freelist slot is taken before the literal's initializers run, so
-    // nothing they free can change which one it is. A fresh slot at the
-    // top joins the array only once the element is written, as a pushed
-    // one does: until then no index reaches it, and the checker keeps the
-    // array from growing into it meanwhile (§1.3(4)). Freed slots all lie
-    // below the length, since a pool never shrinks, so the index tells
-    // which kind was taken.
+    // The element is evaluated ahead of the freelist bookkeeping, or built
+    // at the slot once that is known, as a pushed one is (ElemValue).
+    auto ev = ElemValue(an[1], elem);
+    // A freelist slot is taken before an element built at it runs its
+    // initializers, so nothing they free can change which one it is. A
+    // fresh slot at the top joins the array only once the element is
+    // written, as a pushed one does: until then no index reaches it, and the
+    // checker keeps the array from growing into it meanwhile (§1.3(4)).
+    // Freed slots all lie below the length, since a pool never shrinks, so
+    // the index tells which kind was taken.
     auto iv = T();
     L("int64_t ", iv, ";");
     L("if (", lv.fl, ".len > 0) {");
@@ -704,8 +760,7 @@ vector<string> CodeGen::EmitAlloc(Call *c, vector<Node *> &an) {
     L("}");
     auto e = T();
     L(CT(elem), " *", e, " = (", CT(elem), " *)(", ElemAddr(v, iv), ");");
-    if (atslot) FixedLitAtLv(an[1], cat("(*", e, ")"), true);
-    else StoreWhole(e, elem, ev);
+    StoreElemAt(an[1], elem, e, ev, ln);
     L("if (", iv, " == ", lv.lenlv, ") {");
     ind++;
     L(lv.lenlv, "++;");
@@ -713,7 +768,7 @@ vector<string> CodeGen::EmitAlloc(Call *c, vector<Node *> &an) {
     ind--;
     L("}");
     if (c->builtin == B_ALLOC_INDEX) return { iv };
-    return { e };
+    return { NewElemResult(e, elem, lv, c->line) };
 }
 
 // A slice pool (§5.4): the element region grows like any grow-only array's,
@@ -724,6 +779,7 @@ vector<string> CodeGen::EmitSlicePool(Call *c, vector<Node *> &an, Line ln) {
     auto v = ArrayView(lv);
     auto elem = v.elem;
     auto esz = FixedSize(elem);
+    assert(esz > 0);   // No element is zero-size (§3.4).
     // A slice handed back becomes an index into the pool. An empty one can be
     // a default slice pointing at no storage at all; with no cells to free or
     // keep, index 0 serves it. A non-empty one the checker rooted at this pool
@@ -731,9 +787,9 @@ vector<string> CodeGen::EmitSlicePool(Call *c, vector<Node *> &an, Line ln) {
     // one is checked to, and to end inside the length (§5.4).
     auto indexof = [&](const string &sv) {
         auto i = T();
-        if (!c->poolcheck || !esz) {
+        if (!c->poolcheck) {
             L("int64_t ", i, " = ", sv, ".len ? ((uint8_t *)", sv, ".data - (uint8_t *)", v.elems,
-              ") / ", std::max<int64_t>(esz, 1), " : 0;");
+              ") / ", esz, " : 0;");
             return i;
         }
         L("int64_t ", i, " = 0;");
@@ -824,11 +880,8 @@ string CodeGen::SliceLen(Node *n, TypeExpr *elem, Line ln) {
     auto nv = T();
     L("int64_t ", nv, " = (int64_t)(", GenX(n), ");");
     auto esz = FixedSize(elem);
-    if (esz)
-        L("if ((uint64_t)", nv, " > GS_STACK_RESERVE / ", esz, ") gs_abort(GS_E_SLICELEN, ",
-          LocArgs(ln), ");");
-    else
-        L("if (", nv, " < 0) gs_abort(GS_E_SLICELEN, ", LocArgs(ln), ");");
+    L("if ((uint64_t)", nv, " > GS_STACK_RESERVE / ", esz, ") gs_abort(GS_E_SLICELEN, ",
+      LocArgs(ln), ");");
     return nv;
 }
 
@@ -849,9 +902,8 @@ void CodeGen::EmitSliceExtend(const Loc &lv, const string &end, int64_t esz) {
 void CodeGen::EmitDefaultElems(const ArrView &v, const string &first,
                                       const string &count, Node *init) {
     auto esz = FixedSize(v.elem);
-    if (!esz) return;
     if (!HasFieldDefaults(v.elem)) {
-        L("memset(", ElemAddr(v, cat("(", first, ")")), ", 0, (size_t)((", count, ") * ", esz,
+        L("GS_MEMZERO(", ElemAddr(v, cat("(", first, ")")), ", (size_t)((", count, ") * ", esz,
           "));");
         return;
     }
@@ -877,7 +929,7 @@ void CodeGen::EmitRzImage(Loc src, TypeExpr *t, const string &stk, Line ln) {
         auto th = FoTailHdr(t, src.s);
         EmitValStore(stk, ast.inttypes[IS_I64], cat(th, ".len"));
         auto pre = FoPrefixSize(t);
-        L("memcpy(", Top(stk), ", &", src.s, ", ", pre, ");");
+        L("GS_MEMCPY(", Top(stk), ", &", src.s, ", ", pre, ");");
         Bump(stk, pre);
         EmitCopyElems(stk, FoTailArr(t)->arr->sub, cat(th, ".base"), cat(th, ".len"));
         return;
@@ -921,10 +973,10 @@ vector<VarDef *> &CodeGen::ThreadGlobals(FnSpec *entry) {
     return out;
 }
 
-// thread_spawn(worker, args...): the arguments constructed contiguously,
-// then the worker program's globals as copies of this instance's, each as
-// [int64 size][image] (§11.2); the thunk unpacks them into the worker's
-// fresh instance.
+// thread_spawn(worker, args...) and thread_spawn_contained: the arguments
+// constructed contiguously, then the worker program's globals as copies of
+// this instance's, each as [int64 size][image] (§11.2); the thunk unpacks
+// them into the worker's fresh instance.
 vector<string> CodeGen::EmitThreadSpawn(Call *c, vector<Node *> &an) {
     usesthreads = true;
     auto sp = c->spec;
@@ -954,7 +1006,7 @@ vector<string> CodeGen::EmitThreadSpawn(Call *c, vector<Node *> &an) {
             L(CT(pt), " ", h, ";");
             GenConstruct(an[1 + i], stk, pt, h);
             L("*", cntp, " = ", FoTailHdr(pt, h), ".len;");
-            L("memcpy(", pp, ", &", h, ", ", pre, ");");
+            L("GS_MEMCPY(", pp, ", &", h, ", ", pre, ");");
         } else {
             GenConstruct(an[1 + i], stk, pt, cat("(*", cntp, ")"));
         }
@@ -972,17 +1024,17 @@ vector<string> CodeGen::EmitThreadSpawn(Call *c, vector<Node *> &an) {
                 auto &p = gpools[d];
                 auto flsz = FlEntrySize(d);
                 EmitValStore(stk, ast.inttypes[IS_I64], cat(p.first, ".len"));
-                L("memcpy(", Top(stk), ", ", p.first, ".base, (size_t)(", p.first,
+                L("GS_MEMCPY(", Top(stk), ", ", p.first, ".base, (size_t)(", p.first,
                   ".len * ", flsz, "));");
                 Bump(stk, cat(p.first, ".len * ", flsz));
             }
         } else if (IsBytesT(d->type)) {
             auto n = T();
             L("int64_t ", n, " = ", SizeX(d->type, lv.s), ";");
-            L("memcpy(", Top(stk), ", ", lv.s, ", (size_t)", n, ");");
+            L("GS_MEMCPY(", Top(stk), ", ", lv.s, ", (size_t)", n, ");");
             Bump(stk, n);
         } else {
-            L("memcpy(", Top(stk), ", &", lv.s, ", ", FixedSize(d->type), ");");
+            L("GS_MEMCPY(", Top(stk), ", &", lv.s, ", ", FixedSize(d->type), ");");
             Bump(stk, cat(FixedSize(d->type)));
         }
         L("*", szp, " = ", Top(stk), " - (uint8_t *)(", szp, " + 1);");
@@ -990,7 +1042,7 @@ vector<string> CodeGen::EmitThreadSpawn(Call *c, vector<Node *> &an) {
     // Emitted here, not returned as text: a discarded result would drop the spawn.
     auto id = T();
     L("int64_t ", id, " = gs_thread_spawn(", thunk, ", ", base, ", ", Top(stk), " - ", base,
-      ");");
+      c->builtin == B_THREAD_SPAWN_CONTAINED ? ", 1);" : ", 0);");
     return { id };
 }
 
@@ -1007,8 +1059,9 @@ string CodeGen::EnsureThreadThunk(FnSpec *sp) {
 
 // The worker's entry: opens the thread program's block of `stacks` data
 // stacks, unpacks the arguments, then gives the thread a fresh instance of
-// the globals filled from the spawn image, runs the body, and frees the
-// instance (its stacks are released with the thread's others).
+// the globals filled from the spawn image, and runs the body. The runtime
+// frees the instance (gs_thread_release), and releases its stacks with the
+// thread's others.
 void CodeGen::EmitThreadThunk(FnSpec *sp, int64_t stacks) {
     auto name = thunks[sp];
     auto &ki = sinfo[sp];
@@ -1023,15 +1076,15 @@ void CodeGen::EmitThreadThunk(FnSpec *sp, int64_t stacks) {
             auto a = cat("a", i), stk = cat(a, "_stk");
             regions++;
             Append(b, "    gs_stack ", stk, "; gs_stack_init(&", stk, ");\n",
-                   "    ", IsFrameObj(pt) ? CT(pt) : string("gs_rhdr"), " ", a, ";\n",
+                   "    ", RzCT(pt), " ", a, ";\n",
                    "    {\n        int64_t sz = *(int64_t *)p; p += 8;\n");
             auto pre = IsFrameObj(pt) ? FoPrefixSize(pt) : string("0");
             auto hdr = IsFrameObj(pt) ? FoTailHdr(pt, a) : a;
             if (IsFrameObj(pt))
-                Append(b, "        memcpy(&", a, ", p + 8, ", pre, ");\n");
+                Append(b, "        GS_MEMCPY(&", a, ", p + 8, ", pre, ");\n");
             Append(b, "        ", hdr, ".base = ", stk, ".top;\n",
                    "        ", hdr, ".len = *(int64_t *)p;\n",
-                   "        memcpy(", stk, ".top, p + 8 + ", pre,
+                   "        GS_MEMCPY(", stk, ".top, p + 8 + ", pre,
                    ", (size_t)(sz - 8 - ", pre, "));\n",
                    "        ", stk, ".top += sz - 8 - ", pre, "; p += sz;\n    }\n");
             args.push_back(a);
@@ -1072,10 +1125,10 @@ void CodeGen::EmitThreadThunk(FnSpec *sp, int64_t stacks) {
             if (IsFrameObj(d->type)) {
                 auto th = FoTailHdr(d->type, gn);
                 auto pre = FoPrefixSize(d->type);
-                Append(b, "        memcpy(&", gn, ", img + 8, ", pre, ");\n",
+                Append(b, "        GS_MEMCPY(&", gn, ", img + 8, ", pre, ");\n",
                        "        ", th, ".base = ", stk, "->top;\n",
                        "        ", th, ".len = *(int64_t *)img;\n",
-                       "        memcpy(", stk, "->top, img + 8 + ", pre, ", (size_t)(sz - 8 - ",
+                       "        GS_MEMCPY(", stk, "->top, img + 8 + ", pre, ", (size_t)(sz - 8 - ",
                        pre, "));\n",
                        "        ", stk, "->top += sz - 8 - ", pre, ";\n");
             } else if (d->reusable) {
@@ -1088,18 +1141,18 @@ void CodeGen::EmitThreadThunk(FnSpec *sp, int64_t stacks) {
                 Append(b, "        int64_t cnt = *(int64_t *)img, ebytes = cnt * ", esz, ";\n",
                        "        ", gn, ".base = ", stk, "->top;\n",
                        "        ", gn, ".len = cnt;\n",
-                       "        memcpy(", stk, "->top, img + 8, (size_t)ebytes);\n",
+                       "        GS_MEMCPY(", stk, "->top, img + 8, (size_t)ebytes);\n",
                        "        ", stk, "->top += ebytes;\n",
                        "        gs_stack_init(", p.second, ");\n",
                        "        ", p.first, ".base = ", p.second, "->top;\n",
                        "        ", p.first, ".len = *(int64_t *)(img + 8 + ebytes);\n",
-                       "        memcpy(", p.second, "->top, img + 16 + ebytes, (size_t)(",
+                       "        GS_MEMCPY(", p.second, "->top, img + 16 + ebytes, (size_t)(",
                        p.first, ".len * ", flsz, "));\n",
                        "        ", p.second, "->top += ", p.first, ".len * ", flsz, ";\n");
             } else {
                 Append(b, "        ", gn, ".base = ", stk, "->top;\n",
                        "        ", gn, ".len = *(int64_t *)img;\n",
-                       "        memcpy(", stk, "->top, img + 8, (size_t)(sz - 8));\n",
+                       "        GS_MEMCPY(", stk, "->top, img + 8, (size_t)(sz - 8));\n",
                        "        ", stk, "->top += sz - 8;\n");
             }
         } else if (IsBytesT(d->type)) {
@@ -1107,16 +1160,16 @@ void CodeGen::EmitThreadThunk(FnSpec *sp, int64_t stacks) {
             regions++;
             Append(b, "        gs_stack_init(", stk, ");\n",
                    "        ", gn, " = ", stk, "->top;\n",
-                   "        memcpy(", stk, "->top, img, (size_t)sz);\n",
+                   "        GS_MEMCPY(", stk, "->top, img, (size_t)sz);\n",
                    "        ", stk, "->top += sz;\n");
         } else {
-            Append(b, "        memcpy(&", gn, ", img, (size_t)sz);\n");
+            Append(b, "        GS_MEMCPY(&", gn, ", img, (size_t)sz);\n");
         }
         Append(b, "    }\n");
     }
     string argstr;
     for (size_t i = 0; i < args.size(); i++) Append(argstr, i ? ", " : "", args[i]);
-    Append(b, "    ", ki.cname, "(", argstr, ");\n    free(gs_gl);\n}\n\n");
+    Append(b, "    ", ki.cname, "(", argstr, ");\n}\n\n");
     code += b;
     thunkregions[sp] = regions;
 }
@@ -1254,7 +1307,7 @@ vector<string> CodeGen::EmitToBytes(vector<Node *> &an, Dst d0, Line ln) {
         return {};
     }
     auto rd = OpenRzDest(GrowU8(), d0, ln, "to_bytes");
-    L("memcpy(", Top(rd.stk), ", ", pfx, ", (size_t)", pn, ");");
+    L("GS_MEMCPY(", Top(rd.stk), ", ", pfx, ", (size_t)", pn, ");");
     Bump(rd.stk, pn);
     L(CopyFn(), "(", Top(rd.stk), ", ", src, ", (size_t)", sz, ");");
     Bump(rd.stk, sz);
@@ -1301,7 +1354,7 @@ vector<string> CodeGen::EmitFromBytes(Call *c, vector<Node *> &an, Dst d0, Line 
         auto bn = T();
         L("int64_t ", bn, " = (", pn, " + 7) / 8;");
         L("if (", bn, " > GS_BM_MAX) { ", bn, " = 0; ", ok, " = 0; }");
-        L("memset(", bm, ", 0, (size_t)", bn, ");");
+        L("GS_MEMZERO(", bm, ", (size_t)", bn, ");");
         Bump(bstk, bn);
     }
     auto cnt = T();
@@ -1310,7 +1363,7 @@ vector<string> CodeGen::EmitFromBytes(Call *c, vector<Node *> &an, Dst d0, Line 
     auto rd = OpenRzDest(t, d0, ln, "from_bytes");
     L("if (", ok, ") {");
     ind++;
-    L("memcpy(", Top(rd.stk), ", ", pay, ", (size_t)", pn, ");");
+    L("GS_MEMCPY(", Top(rd.stk), ", ", pay, ", (size_t)", pn, ");");
     Bump(rd.stk, pn);
     ind--;
     L("}");

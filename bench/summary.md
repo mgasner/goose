@@ -1,114 +1,77 @@
-**Over sixteen benchmarks Goose runs at about 3.5x the speed of idiomatic C++,
-about 1.25x the speed of hand-optimised C++, and ahead of the best safe Rust
-(1.12x under v145, 1.19x under clang), on 2.0x, 1.3x and 1.3x less memory.**
-Against the Rust *arena* implementations, which use indexed storage for
-linked data and win each comparison with the corresponding Rust pointer-based
-implementation, Goose wins nine of the sixteen under both backends, is level
-on three, splits three by backend, and loses one: `calc`.
+**The October 16, 2026 run puts Goose at 3.51x / 3.54x the speed of
+idiomatic C++, 1.24x / 1.26x the speed of expert C++, and 1.13x / 1.19x the
+speed of the best safe Rust rows**, under MSVC / clang respectively. These
+are geometric means over the sixteen benchmarks at their large sizes.
+Peak-memory ratios are 1.95x, 1.32x and 1.25x in Goose's favor. The full
+suite was rebuilt and rerun at all three sizes, including the separate JIT
+measurements.
 
-**Data representation accounts for the clearest gains.** These comparisons
-benefit from layouts and reference rules that ordinary Rust types do not
-provide. A variable-mode enum costs each
-element its own variant instead of the largest, so `records` is 2.1-2.3x faster
-on 4.1x less memory than a Rust `enum` whose every element is sized for its
-`String` arm; `interp` is the same property in a tree, 1.3-1.5x faster on 2.2x less.
-Variable-size parts nest inside their containing records, so `respond` builds a DTO
-whose name, item list and per-item sku are one inline value, renders it with no
-allocation anywhere, and beats the Rust DTO by 2.2-2.3x, landing between the
-C++ and Rust streaming rows that never build an object at all. References stay valid
-into a container that is still growing, which `push` has no safe Rust spelling
-for and `tree`, `graph`, `scene`, `bintrees` and `calc` can only reach as `u32`
-indices. And links can be narrower than a pointer: `sexp`'s nodes link with
-4-byte offsets and `calc`'s with 2-byte ones, where Rust's arena reaches four
-bytes only as an untyped index that needs a sentinel slot and goes stale
-silently when the pool is reused.
+**The source improvement in this refresh is check-free graph traversal.**
+Both Goose graph rows store vertex IDs as `u32 in dist`; CSR also stores
+prefix offsets as `u32 upto out`. Validation happens during construction,
+and `checkfree fn bfs` verifies that no bounds check remains in the
+traversal. The entries are still four bytes, and construction and validation
+are still timed.
+The fresh large CSR times are 699/617 ms, against C++ 784/761 and Rust 811:
+1.12x/1.23x ahead of matching C++, and 1.16x/1.32x ahead of Rust. Linked
+adjacency remains much slower than CSR in every language. Alternating
+same-compiler trials against the original Goose sources measured speedups of
+1.21x/1.19x for linked adjacency and 1.08x/1.17x for CSR at the large size
+(`notes.md`). These measure the whole source rewrite; the full-suite table
+alone does not isolate a source change from other changes since the previous
+report.
 
-**One consistent loss remains, and three comparisons depend on the backend.**
-`calc` (0.84-0.87x) has costs specific to the Goose implementation: a global parse
-cursor, a `return from` discriminant on every frame of the way out (spec 7.9),
-and a varint decode per evaluated number, on inputs of about 40 bytes in a run
-that never leaves L1. `scene` is level with the Rust arena under clang and
-0.83x under v145, where the C++ arena row is 10% behind its own clang build on
-the same float-and-pointer mix, and padding the 117-byte node to an aligned
-120 changes nothing. `lru` is 0.72x under v145 and 1.10x under clang because
-MSVC will not schedule a base-plus-offset load the way clang does, and `blur`'s
-flat kernel 0.98x and 1.10x because MSVC will not vectorise it. Two former
-losses are gone: `particles`, a flat float kernel where the design never
-predicted an advantage, is 2-4% ahead, inside the noise of the row, and
-`bintrees`, which trailed the Rust arena by 24% under clang, is 13-16% ahead
-under both backends since the compiler keeps a by-reference pool's top and
-count in locals across the recursion.
+**Compact representation remains the clearest advantage.** `records` is
+2.02-2.26x faster than Rust on 3.98x less memory: a variable-mode enum stores
+each record at the size of its own payload, including inline text. `interp`
+is 1.29-1.41x faster on 2.04x less memory for the same distinction in a
+tree. `sexp` uses 2.43x less memory than the Rust arena and 5.04x less than
+the C++ owning nodes. For `strlist`, distinguish Goose's owned inline
+strings from the borrowing `string_view`, flat-offset and `Vec<&str>` rows;
+those have different lifetime requirements.
 
-**`blur` tests a likely weakness: bounds checks in an image kernel.** The obvious
-`src[y*W + x]` form has all ten of its checks proven, from the lengths `main`
-establishes. Under clang it is 1.10x ahead of flat Rust (256 against 282 ms).
-Under v145 it runs 3.3x behind flat Rust, though still ahead of flat C++,
-because MSVC cannot rule out that the stores through `dst` alias the loads
-through `src` and leaves the loop scalar. Written over row slices both
-backends vectorise it, and Goose is level with Rust (285/255 against 280-282
-ms). The checks themselves matter under v145 only: `notes.md` measures proving
-them as worth 1.8x on the flat kernel and 2.9x on the row slices, and nothing
-under clang, which vectorises around them as LLVM does for Rust's checked
-implementation.
+**Losses and near-ties remain.** `calc` takes 481/491 ms against the Rust
+arena's 436 ms. `lru` takes 2,760/2,068 ms against Rust's 2,249, so it loses
+under MSVC and wins under clang. `scene` is 460/371 ms against Rust 379,
+again a loss under MSVC and approximately level under clang. This refresh
+measures these differences; it does not re-establish the older diagnostic
+claims about which individual compiler mechanisms caused them.
 
-**Peak memory use is 2.0x smaller than idiomatic C++, 1.3x
-smaller than expert C++, 1.3x smaller than Rust.** Where the layouts are
-literally the same the rows land within 1%; the gaps are where Goose can
-express something a fixed enum or a heap-owning string cannot -- variable-mode
-payloads (`records` 4.1x against Rust, `sexp` 2.4x, `interp` 2.2x), inline
-strings (`strlist` 2.2x against `Vec<String>`), the 16-byte `lru` node against
-a `std::list` node plus a map node (3.2x), and the 117-byte `scene` node
-against a node plus a child vector (1.3x). `sexp` is the clearest case:
-its links are 4-byte offsets throughout, including the null that ends every
-sibling chain, and that alone is 1.3x of the row's memory. Three benchmarks
-(`calc`, `respond`, `bintrees`) never accumulate anything, and every row but
-the two `bintrees` allocator ones reports 4-32 MB: their working set is one
-input, one request or one tree, and the process floor is most of it. The
-1.11x against Rust on `calc` and `respond` is the half-megabyte difference
-between the two languages' process floors.
+**A check-free kernel can still be limited by backend optimization.** The
+flat blur is now explicitly `checkfree` and takes 952/266 ms. The row-slice
+form, also `checkfree` including slice construction, takes 298/269 ms.
+Rust's two forms take 299-300 ms. Removing bounds checks therefore does not
+by itself close the MSVC flat-kernel gap. The scene composition and recursive
+update also carry `checkfree` contracts. The fastest particle rows are nearly
+level across Goose, Rust and clang C++; small differences are not evidence
+of a language advantage on this flat numeric workload.
 
-**Similar performance sometimes requires different interfaces.** In seven of the
-sixteen -- `push`, `tree`, `interp`, `sexp`, `scene`, `calc`, `bintrees` --
-the Rust row that comes closest to Goose is linked by integer indices where
-the Goose row is linked by typed references, because safe Rust cannot hold a
-reference into a container it is still growing, and `lru`'s idiomatic Rust
-row is *already* the arena because std has no intrusive list. Where Rust does
-keep real references -- `Box` nodes -- it is 2.5x to 14x slower than its own
-arena row on the six benchmarks that have both. The linked-data comparisons therefore measure both performance and a
-difference in representation: Goose uses typed references where the Rust
-arena implementations use indices. The timing results vary by workload and
-backend, as described above.
+**Allocation and interfaces matter to the comparison.** `bintrees` takes
+206/204 ms, against C++'s arena at 393/407 and Rust's arena at 235. The
+per-node allocation rows exceed three seconds. Goose uses typed references
+into growing storage where the safe Rust arena rows use integer indices.
+In `respond`, the inline Goose DTO takes 507/491 ms against Rust's DTO at
+1,338, while Goose streaming takes 454/400 against Rust streaming at 540.
+Compare matching interfaces when deciding which result applies to an
+application.
 
-**Seven of the sixteen benchmarks use the standard library without a
-measurable slowdown.**
-Splitting, hashing, formatting, filling and table sizing come from `stdlib/`
-rather than being spelled out per benchmark, and every one of those
-substitutions was measured against the hand-written form it stands in for:
-the library lands between 0.98x and 1.07x of it, and on `strlist` and `words`
-it is the faster of the two.
-`words` additionally carries a whole second row built on `dictionary`, which
-is 1.27x smaller than the hand-written table used for comparison and 14-19%
-slower -- a table-sizing difference as much as a container one. Two adoptions
-were measured and rejected -- `format_int` in the two `respond` rows and
-`push_n` in the two `graph` rows -- and `notes.md` says why. `respond` no
-longer uses `hash` for its checksum: std's hash stopped being FNV-1a, which
-is what the other languages' rows compute.
+**The aggregate combines results from different implementations.** For each
+backend and comparison tier, it uses the fastest Goose implementation. Memory
+figures are selected separately, using the implementation with the lowest memory
+use. For example, `graph` speed comes from CSR and its memory figure from linked
+adjacency. `words` speed comes from the hand-written table and its memory figure
+from `dictionary`. The `respond` headline uses streaming; `blur` uses row slices
+under MSVC and flat indexing under clang. No single implementation has all of
+these results. Also, `words` compares different hash functions and table
+policies: the Goose dictionary uses less memory than its hand-written table but
+runs more slowly.
 
-**Ratios that need a caveat.** `graph`'s idiomatic column compares Goose's CSR
-against C++'s `vector<vector>`, and `respond`'s and `blur`'s best Goose row is
-the streaming or row-slice form, so those three idiomatic columns are partly
-data-structure comparisons; the per-benchmark tables carry the like-for-like
-rows. `push`'s expert figure is 1.26x under v145 and 2.03x under clang for
-backend reasons, so read the v145 one. `words` and `lru` compare against
-hand-rolled tables in both other languages because std's default hasher is
-SipHash by policy, and in `words` those tables hash a byte at a time with
-FNV-1a where Goose's std hash reads 8 bytes a step, which is worth 1.19x of
-the Goose row under clang and nothing under v145. And `lru`, like `graph`, is
-a cache-bound random-access row whose noise floor is about 15%.
-
-**What the timings include.** Every measurement is whole-process wall clock
-including input generation, so benchmarks that spend a large share of their
-time generating data (`sexp`, `words`, `graph`, `calc`) have their ratios
-pulled toward 1.0; the gap on the phase under test is larger than the table
-shows. The process-start floor is 8.1 ms for Goose and 8.2 ms for C++ in this
-run, and it is most of the `small` column.
+**These are whole-process measurements on one machine.** They include input
+generation, construction and teardown, use the best of three runs after two
+warm-ups, and do not pin cores. Treat small differences cautiously,
+especially in cache-sensitive graph and LRU workloads. The empty-process
+floor is now 13.1 ms for Goose and 13.8 ms for C++, versus about 8 ms in the
+October 10 report, and MSVC has changed from 19.51.36257 to 19.51.36260.
+Cross-date timing changes cannot be attributed solely to Goose compiler
+improvements. The older diagnostic studies are retained, explicitly marked
+historical, in `notes.md`; current comparisons come from the fresh tables.

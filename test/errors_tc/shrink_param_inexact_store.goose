@@ -1,4 +1,4 @@
-// error: cannot call f: it shrinks a while h is still used, and h may refer into a
+// error: cannot call g, which shrinks xs while h is still used
 // g's shrink of xs is checked at f's call of g against f's holders, from g's
 // summary. The slice stored into h was read out of the holder src names,
 // which holds what f's caller stored there: f leaves that to its call,

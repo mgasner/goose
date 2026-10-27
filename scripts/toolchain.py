@@ -11,6 +11,7 @@ intent.
 """
 
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -137,18 +138,6 @@ def gfx_link(exe, cc):
     return native_link(exe, cc, "gfx")
 
 
-def audio_link(exe, cc):
-    return native_link(exe, cc, "audio")
-
-
-def physics_link(exe, cc):
-    return native_link(exe, cc, "physics")
-
-
-def ui_link(exe, cc):
-    return native_link(exe, cc, "ui")
-
-
 # The blessed packages' modules with a native part, and the pattern of a
 # program's own import of one. The ui module draws through gfx, so a program
 # showing its ui imports both.
@@ -162,10 +151,11 @@ def native_imports(text):
 
 # What the compiler says when asked for the link inputs of a package it was
 # not built with (the runners then skip that module's fixtures, rather than
-# have the compiler build the package), and what a gfx test prints when
-# there is no GPU device to run on.
+# have the compiler build the package), and what the gfx package reports
+# when there is no GPU device to run on, whatever a program prefixes it with
+# (Mini Doom's "mini doom: ").
 GFX_UNAVAILABLE = "built without the package gfx"
-GFX_NO_DEVICE = "gfx: no GPU device"
+GFX_NO_DEVICE = "no GPU device"
 PHYSICS_UNAVAILABLE = "built without the package physics"
 UI_UNAVAILABLE = "built without the package gfx"
 AUDIO_UNAVAILABLE = "built without the package gfx"
@@ -260,6 +250,10 @@ class CC:
         # on, which is why the second compiler exists in the test runner.
         if strict_decls:
             argv.append("-Werror=implicit-function-declaration")
+            # Nor should generated C drop a const it put there; clang names
+            # the warning differently and ignores gcc's name.
+            argv.append("-Werror=incompatible-pointer-types-discards-qualifiers"
+                        if self.name == "clang" else "-Werror=discarded-qualifiers")
         if cpp:
             argv.append("-std=c++20")
         return argv + [f"-D{d}" for d in defines]
@@ -295,10 +289,12 @@ class CC:
             argv += [f"/Fe:{out}", f"/Fo:{obj}"]
         else:
             argv += ["-o", str(out)]
-            # The runtime uses threads and libm; on Windows both live in the
-            # CRT the driver links anyway, and asking for them by name fails.
+            # The runtime uses threads and libm, and dlopen for dynamic
+            # externs, in libdl on Linux before glibc 2.34 (Builder::SystemLibs);
+            # on Windows all live in the CRT the driver links anyway, and
+            # asking for them by name fails.
             if not IS_WINDOWS:
-                argv += ["-pthread", "-lm"]
+                argv += ["-pthread", "-lm"] + (["-ldl"] if sys.platform.startswith("linux") else [])
         r = subprocess.run(argv, capture_output=True, text=True, errors="replace")
         output = (r.stdout or "") + (r.stderr or "")
         if log:
@@ -337,6 +333,23 @@ class CC:
                    "    return gs_multi_mains[k](argc - 1, argv + 1);\n"
                    "}\n")
         return self.compile(units + [dispatch], out, **kwargs)
+
+    def compile_shared(self, sources, out, *, opt=None, defines=(), includes=(), extra=()):
+        """Compile `sources` into the shared library `out` (a .so, .dylib or
+        .dll by its name), with `includes` on the include path: what a
+        program's dynamic externs bind from. Returns (ok, combined output)."""
+        if isinstance(sources, (str, Path)):
+            sources = [sources]
+        out = Path(out)
+        argv = [self.cc] + self._flags(opt, defines, False, "default", True) + list(extra)
+        if self.style == "msvc":
+            argv += [f"/I{i}" for i in includes]
+            argv += ["/LD", *map(str, sources), f"/Fe:{out}", f"/Fo:{out.parent}{os.sep}"]
+        else:
+            argv += [f"-I{i}" for i in includes]
+            argv += ["-shared", "-fPIC", *map(str, sources), "-o", str(out)]
+        r = subprocess.run(argv, capture_output=True, text=True, errors="replace")
+        return r.returncode == 0, (r.stdout or "") + (r.stderr or "")
 
     def compile_object(self, source, out, *, opt=None, defines=(), extra=()):
         """Compile the C file `source` into the object file `out`, without
@@ -635,7 +648,18 @@ def run_capture(argv, cwd=None, stdin_path=None):
     argv = [str(a) for a in argv]
     stdin_f = open(stdin_path, "rb") if stdin_path else None
     try:
-        r = subprocess.run(argv, cwd=cwd, stdin=stdin_f, capture_output=True)
+        # Linux will not run a file that a process holds open for writing
+        # (ETXTBSY). A program this process has just copied can still be open
+        # in a child that another runner thread started during the copy, until
+        # that child execs, so the run is retried for a moment.
+        for attempt in range(100):
+            try:
+                r = subprocess.run(argv, cwd=cwd, stdin=stdin_f, capture_output=True)
+                break
+            except OSError as e:
+                if e.errno != errno.ETXTBSY or attempt == 99:
+                    raise
+                time.sleep(0.01)
     finally:
         if stdin_f:
             stdin_f.close()

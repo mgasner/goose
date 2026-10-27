@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const path = require('node:path');
-const { parseDiagnostics, failureMessage, CheckQueue } = require('../src/diagnostics');
+const { parseDiagnostics, parseJsonDiagnostics, failureMessage, runCompiler, CheckQueue } = require('../src/diagnostics');
 
 test('lexer carets, warnings, explicit columns and related instantiations', () => {
     const cwd = path.resolve('workspace');
@@ -37,6 +37,114 @@ test('UTF-8 byte carets become UTF-16 editor columns', () => {
 
 test('unlocated compiler failures do not become fabricated parsed errors', () => {
     assert.deepEqual(parseDiagnostics('cannot open file: missing.goose\ntypechecked ok: 2 specialization(s)', process.cwd()), []);
+});
+
+test('JSON diagnostics: ranges, instantiation calls, warnings, lines alone, and no fabricated unlocated errors', async () => {
+    const cwd = path.resolve('workspace');
+    const file = path.join(cwd, 'chain.goose');
+    const sources = { 'chain.goose': [
+        'fn get<T>(a: T) -> i64 { a.nope }', '', 'fn main() {', '    let x = get(1);', '    let y: i64 = 1;',
+        '    let z = y as i64;', '    print(x + z);', '}', ''
+    ] };
+    const result = await parseJsonDiagnostics([
+        {
+            severity: 'error', message: 'no field access on a value of type i64', file: 'chain.goose', line: 1, col: 26, endLine: 1, endCol: 32,
+            related: [
+                { message: 'in fn get(literal i64) instantiated from chain.goose:4', file: 'chain.goose', line: 4, col: 13 },
+                { message: 'in fn main() instantiated from chain.goose:3', file: 'chain.goose', line: 3, col: 1 },
+                { message: 'in the const for expansion of x' }
+            ],
+            text: 'chain.goose:1: error: no field access on a value of type i64\nfn get<T>(a: T) -> i64 { a.nope }\n  in fn get(literal i64) instantiated from chain.goose:4\n  in fn main() instantiated from chain.goose:3'
+        },
+        { severity: 'warning', message: 'redundant `as i64`: y is already i64', file: 'chain.goose', line: 6, col: 13, endLine: 6, endCol: 21, text: 'chain.goose:6: warning: redundant `as i64`: y is already i64' },
+        { severity: 'error', message: 'f keeps a bounds check', file: 'chain.goose', line: 7, col: 11, text: 'chain.goose:7: error: f keeps a bounds check' },
+        { severity: 'error', message: 'expected a declaration', file: 'chain.goose', line: 8, text: 'chain.goose:8: error: expected a declaration' },
+        { severity: 'error', message: 'cannot open file: missing.goose', text: 'cannot open file: missing.goose' }
+    ], cwd, (file, line) => sources[path.basename(file)]?.[line]);
+    assert.equal(result.length, 4);
+    assert.deepEqual(result[0], {
+        file, line: 0, column: 25, endLine: 0, endColumn: 31, severity: 'error', message: 'no field access on a value of type i64',
+        related: [{ file, line: 3, column: 12, message: 'Instantiated fn get(literal i64)' }, { file, line: 2, column: 0, message: 'Instantiated fn main()' }]
+    });
+    assert.deepEqual(result[1], { file, line: 5, column: 12, endLine: 5, endColumn: 20, severity: 'warning', message: 'redundant `as i64`: y is already i64', related: [] });
+    assert.deepEqual(result[2], { file, line: 6, column: 10, severity: 'error', message: 'f keeps a bounds check', related: [] });
+    assert.deepEqual(result[3], { file, line: 7, column: undefined, severity: 'error', message: 'expected a declaration', related: [] });
+});
+
+test('JSON byte columns become UTF-16 editor columns, on the end line and at related calls too', async () => {
+    const prefix = '\tprint("é😀"); ';
+    const lines = [prefix + 'bad(', '  "ü", worse);'];
+    const bytes = text => Buffer.byteLength(text);
+    const [item] = await parseJsonDiagnostics([{
+        severity: 'error', message: 'bad', file: 'test.goose', line: 1, col: bytes(prefix) + 1, endLine: 2, endCol: bytes('  "ü", worse') + 1,
+        related: [{ message: 'in fn f() instantiated from test.goose:2', file: 'test.goose', line: 2, col: bytes('  "ü", ') + 1 }],
+        text: `test.goose:1: error: bad\n${lines[0]}`
+    }], process.cwd(), (file, line) => lines[line]);
+    assert.equal(item.column, prefix.length);
+    assert.deepEqual([item.endLine, item.endColumn], [1, '  "ü", worse'.length]);
+    assert.deepEqual([item.related[0].line, item.related[0].column], [1, '  "ü", '.length]);
+    const [unknown] = await parseJsonDiagnostics([{ severity: 'error', message: 'bad', file: 'gone.goose', line: 3, col: 5, endLine: 3, endCol: 9, text: '' }], process.cwd(), () => undefined);
+    assert.deepEqual([unknown.column, unknown.endColumn], [4, 8], 'a line the sources do not have keeps the compiler column');
+});
+
+// A stand-in for execFile: respond(args) gives a run's error, stdout and stderr.
+function fakeCompiler(respond) {
+    const calls = [];
+    const spawn = (file, args, options, callback) => {
+        calls.push(args);
+        const { error = null, stdout = '', stderr = '' } = respond(args);
+        setImmediate(() => callback(error, stdout, stderr));
+        return { kill() {} };
+    };
+    return { calls, spawn };
+}
+const failed = Object.assign(new Error('Command failed'), { code: 1 });
+const fakeConfig = (name, stdlib = '') => ({ compiler: path.resolve('fake', name), cwd: path.resolve('fake'), file: 'main.goose', stdlib, timeout: 1000 });
+
+test('a compiler without --diagnostics json is probed once, then checked in text mode', async () => {
+    const config = fakeConfig('old-goose');
+    const old = fakeCompiler(args => args.includes('--diagnostics')
+        ? { error: failed, stderr: 'unknown option: --diagnostics\n' }
+        : { error: failed, stdout: 'parsed ok: 1 top-level declarations, 1 file(s)\n', stderr: 'main.goose:1: error: bad\n' });
+    const result = await runCompiler(config, old.spawn).promise;
+    assert.deepEqual(old.calls, [['check', '--diagnostics', 'json', 'main.goose'], ['check', 'main.goose']]);
+    assert.equal(result.error, failed);
+    assert.equal(result.diagnostics, undefined);
+    assert.deepEqual(result.args, ['check', 'main.goose']);
+    assert.equal(result.output, 'parsed ok: 1 top-level declarations, 1 file(s)\n\nmain.goose:1: error: bad\n');
+    assert.equal(parseDiagnostics(result.output, config.cwd)[0].file, path.join(config.cwd, 'main.goose'));
+    await runCompiler(config, old.spawn).promise;
+    assert.deepEqual(old.calls.slice(2), [['check', 'main.goose']], 'the flag is not probed again');
+});
+
+test('a compiler with --diagnostics json gives the diagnostics as data, and their text as the output', async () => {
+    const config = fakeConfig('new-goose', path.resolve('fake', 'stdlib'));
+    const modern = fakeCompiler(() => ({
+        error: failed, stderr: 'parsed ok: 1 top-level declarations, 1 file(s)\n',
+        stdout: '[\n  {"severity": "error", "message": "bad", "file": "main.goose", "line": 1, "col": 1, "endLine": 1, "endCol": 4, "text": "main.goose:1: error: bad\\nbad\\n^"}\n]\n'
+    }));
+    const result = await runCompiler(config, modern.spawn).promise;
+    assert.deepEqual(modern.calls, [['check', '--diagnostics', 'json', '--stdlib', config.stdlib, 'main.goose']]);
+    assert.equal(result.error, failed);
+    assert.deepEqual(result.args, modern.calls[0]);
+    assert.equal(result.diagnostics.length, 1);
+    assert.equal(result.diagnostics[0].endCol, 4);
+    assert.equal(result.output, 'parsed ok: 1 top-level declarations, 1 file(s)\nmain.goose:1: error: bad\nbad\n^');
+    const unlocated = fakeCompiler(() => ({ error: failed, stdout: '[\n  {"severity": "error", "message": "cannot open file: main.goose", "text": "cannot open file: main.goose"}\n]\n' }));
+    const missing = await runCompiler(fakeConfig('new-goose'), unlocated.spawn).promise;
+    assert.deepEqual(await parseJsonDiagnostics(missing.diagnostics, config.cwd, () => undefined), []);
+    assert.equal(failureMessage(missing.output), 'cannot open file: main.goose');
+});
+
+test('a check that did not run, or failed without rejecting the flag, is not remembered as text-only', async () => {
+    const notFound = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
+    const absent = fakeCompiler(() => ({ error: notFound }));
+    const result = await runCompiler(fakeConfig('no-goose'), absent.spawn).promise;
+    assert.equal(result.error, notFound);
+    assert.equal(absent.calls.length, 1, 'a compiler that is not found is not run again in text mode');
+    const crashing = fakeCompiler(() => ({ error: failed, stderr: 'assertion failed\n' }));
+    for (let i = 0; i < 2; i++) await runCompiler(fakeConfig('crashing-goose'), crashing.spawn).promise;
+    assert.deepEqual(crashing.calls.map(args => args.length), [4, 2, 4, 2], 'each check probes the flag again, then runs in text mode');
 });
 
 function deferredRunner() {

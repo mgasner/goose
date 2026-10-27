@@ -53,18 +53,10 @@
 
 namespace goose {
 
-// Where a value goes: nowhere (evaluated for effect), into the C lvalue `s`,
-// or constructed at the top of the data stack `s`. `t` is the wanted type
-// where the receiver knows it; `lenlv` is set for stack destinations of
-// resizable class: elements go to the stack, and the construction assigns
-// the element count (or the whole frame object) to it. A `pool` lvalue is a
-// gs_pref, which a construct's value choosing among pools reaches as each
-// branch's pool reference (GenPrefVal).
 // Whether index ix is in bounds by the types alone: a fixed array indexed by
 // a constant within it, or by an integer whose type holds no value outside it
-// (a u8 into a [256]). Codegen speculates such an index whatever bounds-check
-// elimination proved about it (CodeGen::Speculatable), and BCE's speculation
-// probe accepts it.
+// (a u8 into a [256]). Codegen speculates such an index whatever this pass
+// proved about it (CodeGen::Speculatable).
 inline bool IndexInRangeByType(Index *ix) {
     auto at = ix->obj->exprtype;
     if (at && IsPlainRef(at)) at = at->ref->sub;
@@ -77,13 +69,26 @@ inline bool IndexInRangeByType(Index *ix) {
     return lo >= 0 && hi < n;
 }
 
-enum DstKind { DK_DISCARD, DK_LVALUE, DK_STACK };
+// Where a value goes: nowhere (evaluated for effect), into the C lvalue `s`,
+// or constructed at the top of the data stack `s`. `t` is the wanted type
+// where the receiver knows it; `lenlv` is set for stack destinations of
+// resizable class: elements go to the stack, and the construction assigns
+// the element count (or the whole frame object) to it. A `pool` lvalue is a
+// gs_pref, which a construct's value choosing among pools reaches as each
+// branch's pool reference (GenPrefVal).
+// DK_BRANCH is where an inlined bool call in a condition delivers its value
+// (CodeGen::GenBranch): a branch to label s where the value is `when`,
+// leaving the scopes down to `exitscope` on the way, and on through the
+// call where it is not.
+enum DstKind { DK_DISCARD, DK_LVALUE, DK_STACK, DK_BRANCH };
 struct Dst {
     DstKind k = DK_DISCARD;
     string s;
     TypeExpr *t = nullptr;
     string lenlv;
     bool pool = false;
+    bool when = false;
+    int exitscope = -1;
 };
 
 // What a relative store knows of the reference it encodes beyond its type:
@@ -121,6 +126,64 @@ struct CodeGen {
     // emitted: the prototypes follow it, and a set of pointers would put
     // them in heap-address order, which differs from run to run.
     vector<FnSpec *> usedexterns;
+    // A used extern bound from a shared library (§7.10, the block form) is
+    // called through a pointer the runtime fills at start: named by the
+    // spec's place among the used externs and its symbol, which is stable
+    // across runs and distinct per declaration.
+    string DlSlot(FnSpec *sp) {
+        auto it = std::find(usedexterns.begin(), usedexterns.end(), sp);
+        assert(it != usedexterns.end() && !sp->sf->dylib.empty());
+        return cat("gs_dl", it - usedexterns.begin(), "_", sp->sf->cname);
+    }
+    // The function a call goes through to reach the pointer (ExternProto).
+    string DlCall(FnSpec *sp) { return cat(DlSlot(sp), "_call"); }
+    // The library a dynamic extern binds from, with the spelling each
+    // platform opens: the sidecars' (§7.10), the program's over the
+    // package's for a platform either says anything about, and empty where
+    // neither does, which leaves the runtime its derived spelling.
+    DylibSpelling DlSpelling(FnSpec *sp) {
+        DylibSpelling r { sp->sf->dylib };
+        auto pkg = ast.filepkg[sp->sf->line.fileidx];
+        for (auto p : { pkg, 0 }) {
+            for (auto &d : ast.packages[p].dylibs) {
+                if (d.name != r.name) continue;
+                for (auto plat : { "_windows", "_macos", "_linux" }) {
+                    auto &s = d.On(plat).empty() ? d.any : d.On(plat);
+                    if (!s.empty()) r.On(plat) = s;
+                }
+            }
+        }
+        return r;
+    }
+    static bool SameDylib(const DylibSpelling &a, const DylibSpelling &b) {
+        return a.name == b.name && a.onwindows == b.onwindows &&
+               a.onmacos == b.onmacos && a.onlinux == b.onlinux;
+    }
+    // The libraries the used externs bind from, each spelling once, in the
+    // order their first declaration comes in the program (file order, then
+    // source order).
+    vector<DylibSpelling> DlLibs() {
+        vector<pair<Line, DylibSpelling>> firsts;
+        for (auto sp : usedexterns) {
+            if (sp->sf->dylib.empty()) continue;
+            auto l = sp->sf->line;
+            auto d = DlSpelling(sp);
+            auto it = std::find_if(firsts.begin(), firsts.end(),
+                                   [&](auto &f) { return SameDylib(f.second, d); });
+            if (it == firsts.end()) firsts.emplace_back(l, d);
+            else if (pair(l.fileidx, l.line) < pair(it->first.fileidx, it->first.line))
+                it->first = l;
+        }
+        std::stable_sort(firsts.begin(), firsts.end(), [](auto &a, auto &b) {
+            return pair(a.first.fileidx, a.first.line) < pair(b.first.fileidx, b.first.line);
+        });
+        vector<DylibSpelling> libs;
+        for (auto &f : firsts) libs.push_back(f.second);
+        return libs;
+    }
+    // What gs_program_init's bind call counted, which the tables that
+    // Finish writes must agree with: every function is emitted by then.
+    size_t dlbinds = 0;
     string code;        // Function bodies, size/eq helpers, thunks, main.
     string exportprotos;
     bool usesthreads = false;
@@ -241,6 +304,9 @@ struct CodeGen {
     // only the innermost tail's elements occupy a data stack. A gs_rref to
     // one carries the object's address in `hdr`.
     bool IsFrameObj(TypeExpr *t) { return t->kind == TY_STRUCT && SI(t)->frameobj; }
+    // The C type of a resizable value's header: a frame object's own struct,
+    // a gs_rhdr for anything else.
+    string RzCT(TypeExpr *t) { return IsFrameObj(t) ? CT(t) : "gs_rhdr"; }
     string FoTailHdr(TypeExpr *t, const string &obj);
     TypeExpr *FoTailArr(TypeExpr *t);
     string FoPrefixSize(TypeExpr *t);
@@ -295,6 +361,13 @@ struct CodeGen {
     // uniquified mangle.
 
     string Mangle(TypeExpr *t);
+    string RawMangle(TypeExpr *t);
+    bool SameMangle(TypeExpr *a, TypeExpr *b);
+    map<VarDef *, int> ixmangles;   // Index types' arrays, numbered for Mangle.
+    // Per raw spelling, the types it was handed out for (one of each set of
+    // parts, SameMangle) with the mangle each got; and every mangle handed out.
+    unordered_map<string, vector<pair<TypeExpr *, string>>> mangleowners;
+    unordered_set<string> mangles;
 
     unordered_map<string, string> ctypes;   // mangle -> emitted C type name.
     bool corebuiltins = false;
@@ -304,12 +377,14 @@ struct CodeGen {
     static bool StructLike(TypeExpr *t);
     string NameCT(TypeExpr *t);
     set<string> cdefined;    // Mangled names whose C body has been emitted.
+    set<string> slicects;    // The C typedef names of slice types.
 
     void EmitCFields(string &d, const vector<Field> &fields, const vector<TypeExpr *> &ftypes);
 
     // Tag constants, one enum per EnumInst: <Mangle>_<Variant>_k.
     set<EnumInst *> tagenums;
     unordered_map<EnumInst *, string> tagprefix;
+    unordered_set<string> tagbases;   // The prefixes taken.
 
     void EnsureTagEnum(EnumInst *ei);
     string TagConst(EnumInst *ei, int vi);
@@ -329,8 +404,7 @@ struct CodeGen {
     string SizeFn(TypeExpr *t);
     void EmitSizeWalk(string &b, TypeExpr *t, const string &q);
     void EmitSizeElems(string &b, TypeExpr *elem, const string &q);
-    int64_t ZeroSize(TypeExpr *t);
-    int64_t MinBytes(TypeExpr *t);
+    int64_t MinBytes(TypeExpr *t, bool zero = false);
 
     // ------------------------------------------------------------------
     // The verifier from_bytes runs over an untrusted image
@@ -392,6 +466,7 @@ struct CodeGen {
         set<const VarDef *> globals; // Transitively touched stack/fat-reference globals.
         bool needssp = false;
         bool hasrf = false;
+        bool readsalltops = false;   // Transitively reads every data-stack top.
         int cret = -1;               // Ret index returned as the C value.
     };
     unordered_map<FnSpec *, SpecInfo> sinfo;
@@ -522,6 +597,11 @@ struct CodeGen {
         int kind;
         int stkbase;
         vector<pair<string, string>> saves;   // (stack expr, base var) to restore.
+        // The `defer` bodies registered in this scope (§6.6), each with how
+        // many saves came before it: an exit runs them among the restores,
+        // latest first, each before the release of the storage declared
+        // before it (EmitRestores).
+        vector<pair<size_t, Defer *>> defers;
         SFunction *ibsf = nullptr;            // SC_IB: which returns exit here.
         string brklbl, cntlbl;
         bool usedbrk = false, usedcnt = false;
@@ -677,6 +757,7 @@ struct CodeGen {
     vector<string> loopcons;
     static constexpr const char *BLOCKREGION = "{";
     bool InConsOf(const string &stk);
+    int OpenRegion(const string &cons);
     int MarkLoopBegin();
     int MarkBlockBegin();
     void MarkLoopEnd(int id);
@@ -695,10 +776,14 @@ struct CodeGen {
     string ExpandTopMarkers(const string &b, TopCachePlan &plan);
     string ExpandTopMarkers1(const string &b, TopCachePlan &plan, vector<bool> &lenok, bool &clean);
     string HoistAggregateDecls(string &b);
+    vector<string> BraceFields(const string &ct);
+    static vector<string> SplitBraceInit(const string &init);
     void PushSc(int kind);
     void EmitRestores(const CScope &s);
     void PopSc();
     void EmitExitRestores(int to);
+    void RegisterDefer(Defer *d);
+    void EmitDeferBody(Defer *d);
     string AllocStk(bool forlocal);
     void SaveBase(bool forlocal, const string &stk, const string &basevar);
 
@@ -772,6 +857,7 @@ struct CodeGen {
     void FindRefAliases(FnSpec *sp);
     const VarDef *AliasTarget(VarDef *d, Node *init, Node *&path);
     static bool HandedRef(Node *n);
+    static Node *FieldChainRoot(Node *n, bool typed);
 
     // Optimizer splices can leave a reference-typed tree in a slot whose
     // checked type already decayed; Dst::t says what the receiver wants, and
@@ -865,6 +951,10 @@ struct CodeGen {
         ~FillScope() { for (auto n : added) cg.fillvalues.erase(n); }
     };
     string GenPure(Node *n);
+    string DivX(bool div, IntStorage s, const string &l, const string &r, Line line);
+    string ArithX(TType op, TypeExpr *t, const string &l, const string &r, Line line,
+                  bool nonneg = false, string lx = "", string rx = "");
+    string IndexTypeCheck(const string &x, TypeExpr *t, Line ln);
     static string IntStr(int64_t v);
     static string FltStr(double v, bool f32);
     Loc IndexLoc(Loc lv, Node *idxnode, Line ln, bool nobc);
@@ -898,6 +988,11 @@ struct CodeGen {
     string GenRefVal(Node *child, Line ln);
     string GenXD(Node *n, TypeExpr *want);
     string GenTruth(Node *n);
+    bool SpeculativeForm(Binary *b);
+    Binary *ChainOp(Node *n);
+    InlineBlock *BranchCall(Node *n);
+    bool BranchChain(Node *n);
+    void GenBranch(Node *n, bool when, string lbl, int exitscope = -1);
     bool Speculatable(Node *n, bool idxok, bool truth, int &budget);
     bool SpeculatablePlace(Node *n, bool idxok, int &budget);
 
@@ -939,6 +1034,8 @@ struct CodeGen {
     TypeExpr *OperandT(TypeExpr *t);
     string GenVal(Node *n);
     string GenPureVal(Node *n);
+    string GenOperandVal(Node *n, bool later);
+    static bool IsCName(const string &x);
     bool HasStmts(Node *n);
     string GenEquality(TypeExpr *lt, const string &l, const string &r);
     string GenSliceEq(TypeExpr *st, const string &l, const string &r);
@@ -948,11 +1045,15 @@ struct CodeGen {
                          const string &r, const string &dst,
                          bool lscalar = false, bool rscalar = false);
     void GenElemwiseNegInto(TypeExpr *t, Line line, const string &x, const string &dst);
+    bool VecShape(TypeExpr *t, FltStorage &fs, int64_t &n);
+    string VecType(FltStorage fs, int64_t n);
+    string VecOperand(TypeExpr *t, FltStorage fs, const string &x, bool scalar);
+    string VecLoad(const string &vt, int64_t n, const string &v, bool scalar);
     void GenElemwiseLeaves(TypeExpr *t, const string &dst,
                            const function<string(TypeExpr *, const string &)> &leaf);
     void ElemwiseOperands(Binary *b, string &l, string &r);
     string GenElemwise(Binary *b, const string &l, const string &r);
-    string GenSlice(SliceExpr *se);
+    string GenSlice(SliceExpr *se, const string &into = "");
 
     // ------------------------------------------------------------------
     // Construction (§4.2/§4.3): writes a value front-to-back at a stack's
@@ -965,6 +1066,8 @@ struct CodeGen {
     void StoreWhole(const string &p, TypeExpr *t, const string &x);
     void EmitLenCheck(IntStorage ls, const string &n);
     void EmitLenStore(const string &stk, IntStorage ls, const string &n);
+    void EmitArrayCount(const string &stk, TypeExpr *at, const string &lenlv, const string &n,
+                        bool check);
     void EmitVarintStore(const string &stk, const string &x);
     void EmitRelRangeCheck(TypeExpr *rt, const string &off, Line ln, bool inroot);
     RelFacts RelValue(Node *v);
@@ -978,6 +1081,7 @@ struct CodeGen {
                        bool inroot = true);
     void EmitRelSelfStore(const string &stk, TypeExpr *rt, int64_t fieldoff, Line ln);
     bool HasRelRef(TypeExpr *t);
+    bool NeedsResultLocation(TypeExpr *t) { return IsFix(t) && t->kind != TY_REF && HasRelRef(t); }
     bool HasSelfRelRef(TypeExpr *t);
     void NoSelfRelCopy(Node *val);
     bool HasUninitSlots(TypeExpr *t);
@@ -1025,6 +1129,13 @@ struct CodeGen {
     void FixedArrayLitAt(ArrayLit *al, const string &base, bool inroot);
     void StructLitAt(StructLit *sl, const string &base, bool inroot);
     void EmitValStoreTag(const string &stk, IntStorage ts, const string &x);
+    // How many elements an array literal writes: its fill count, which the
+    // checker evaluated into an IntLit (§4.2), or its element list's length.
+    static int64_t LitCount(ArrayLit *al) {
+        if (!al->fillval) return (int64_t)al->elems.size();
+        assert(Is<IntLit>(al->fillcount));
+        return ((IntLit *)al->fillcount)->val;
+    }
     void GenArrayLit(ArrayLit *al, const string &stk, const string &lenlv = "",
                      TypeExpr *as = nullptr);
     static bool HasSelfInit(StructLit *sl);
@@ -1054,22 +1165,41 @@ struct CodeGen {
     // the watermarks of declarations it ran past, so the continue label
     // sits after the fallthrough restores rather than sharing them.
 
+    // A Goose loop's scope, open around the C loop or loops that run its body
+    // (OpenLoop to CloseLoop): its index and top-caching region, and the
+    // divisors fixed for it.
+    struct OpenedLoop { int si = -1, loopid = -1; vector<string> divisors; };
+    OpenedLoop OpenLoop(Block *bodyb, Node *cond, const vector<const VarDef *> &binders,
+                        const Dst &d);
+    void CloseLoop(const OpenedLoop &lp);
     void GenLoopBody(const function<void()> &condexit, Block *bodyb, Dst d,
                      const string &forhead = "", Node *cond = nullptr, size_t first = 0,
                      vector<const VarDef *> binders = {});
     static bool StraightCode(Node *n);
     bool InStraightLoop();
+    static bool CallsRecursive(Node *n);
 
-    // Divisors fixed for a loop being emitted, by DivisorKey: the C locals
+    // Divisors fixed for a loop being emitted, by DivisionKey: the C locals
     // holding the divisor's value as a u64, its gs_divu_gen magic and its
-    // shift (HoistDivisors).
-    struct DivMagic { string val, magic, more; };
+    // shift, or as a u32 and gs_divu32_gen's where `narrow` (HoistDivisors).
+    // `zeronone`: only a zero divisor leaves it without a magic.
+    struct DivMagic { string val, magic, more; bool narrow, zeronone; };
     unordered_map<string, DivMagic> divmagic;
     // The variables of the specialization being emitted that a reference is
     // made to somewhere in it (RefdLocals), for refdspec.
     set<const VarDef *> refdlocals;
     FnSpec *refdspec = nullptr;
-    bool LoopDivisible(Binary *b);
+    // A `/` or `%`, or a `/=` or `%=` dividing its target (AsDivision): the
+    // plain operator, the dividend's type, the divisor, and whether BCE found
+    // a signed one to be of nonnegative operands (Binary::nonneg, which BCE
+    // judges for no compound assignment).
+    struct Division { TType op; TypeExpr *t; Node *divisor; bool nonneg; };
+    static bool AsDivision(Node *n, Division &dv);
+    bool LoopDivisible(const Division &dv);
+    static bool NarrowDivision(const Division &dv);
+    string DivisionKey(const Division &dv, const VarDef **root = nullptr, bool *path = nullptr);
+    string FixedDivX(const Division &dv, const string &l, const function<string()> &plain,
+                     Line line);
     string DivisorKey(Node *n, const VarDef **root = nullptr, bool *path = nullptr);
     string DivisorValue(Node *n, string &ok);
     const set<const VarDef *> &RefdLocals();
@@ -1107,7 +1237,7 @@ struct CodeGen {
     bool Dupable(Node *n);
     int BlockSize(ForLoop *f);
     string AtLeastLeft(TypeExpr *ct, const string &hi, const string &ctr, int k, bool fromzero);
-    void GenBodyCopy(Block *bodyb, int si);
+    void GenBodyCopy(Block *bodyb, int si, size_t first = 0);
     void GenBlocked(ForLoop *f, int k, const string &more, const string &step,
                     const function<void()> &bind, const string &cond);
 
@@ -1128,6 +1258,7 @@ struct CodeGen {
     // Declarations and assignment.
 
     void BindLocal(VarDef *d, Node *init, bool forlocal = true);
+    Dst DeclStackLocal(VarDef *d, bool forlocal);
     string GenPrefVal(Node *n);
     string Unique2(const string &base);
     void GenRelAssign(Loc lv, Node *lval, Node *rhs, Line ln);
@@ -1168,7 +1299,7 @@ struct CodeGen {
     vector<string> EmitExternCall(Call *c, FnSpec *sp);
     string ExternProto(FnSpec *sp);
     vector<Node *> CallArgNodes(Call *c, size_t nparams);
-    void EmitArg(FnSpec *sp, size_t i, Node *node, vector<string> &args);
+    void EmitArg(FnSpec *sp, size_t i, Node *node, vector<string> &args, bool later);
     void EmitFvArg(const VarDef *fv, vector<string> &args);
     vector<string> EmitSpecCall(Call *c, FnSpec *sp, Dst d0, vector<Dst> *alldst);
     bool NeedsReprefix(const Dst &d, TypeExpr *rt);
@@ -1206,6 +1337,7 @@ struct CodeGen {
     void RenderLoc(Loc &out, Loc lv, TypeExpr *t, bool nested, Call *c, Line ln);
     void RenderVariant(Loc &out, Loc lv, TypeExpr *t, Call *c, Line ln);
     string RefArg(const Loc &lv, TypeExpr *sub, Line ln);
+    string PrefArg(const Loc &lv, Line ln);
     void EmitUserFormat(Loc &out, Loc lv, FnSpec *sp, Line ln);
 
     // A type that reaches itself through references renders the levels of a
@@ -1226,7 +1358,6 @@ struct CodeGen {
     void EmitRenderFn(RenderFnReq r);
     Loc RenderedLoc(Node *a);
     Loc RenderToTemp(Node *a, Call *c);
-    void EmitOutArg(Node *a, Call *c);
     string FmtCall(Node *a, const string &dst);
     void EmitFormatInto(Loc lv, Node *a, Line ln, Call *c);
     vector<string> EmitStr(Call *c, vector<Node *> &an, Dst d0, Line ln);
@@ -1248,11 +1379,14 @@ struct CodeGen {
 
     RzDest OpenRzDest(TypeExpr *t, Dst d0, Line ln, const char *what);
     void CloseRzDest(RzDest &rd, const string &count);
+    string NewElemResult(const string &e, TypeExpr *elem, const Loc &lv, Line ln);
     vector<string> EmitPush(vector<Node *> &an, Line ln);
+    string ElemValue(Node *n, TypeExpr *elem);
+    void StoreElemAt(Node *n, TypeExpr *elem, const string &e, const string &ev, Line ln);
     bool LiteralBytes(Node *n, TypeExpr *t, vector<uint8_t> &out);
     bool UniformFillByte(Node *n, TypeExpr *t, int &byte);
     void EmitAppend(vector<Node *> &an, Line ln);
-    vector<string> EmitAlloc(Call *c, vector<Node *> &an);
+    vector<string> EmitAlloc(Call *c, vector<Node *> &an, Line ln);
     vector<string> EmitSlicePool(Call *c, vector<Node *> &an, Line ln);
     string SpanArgs(const Loc &lv);
     string PlaceRun(const Loc &lv, const string &n);
@@ -1282,7 +1416,7 @@ struct CodeGen {
     const VarDef *NamedResult(Block *fnbody, SFunction *target, size_t nrets, size_t resultidx);
     const VarDef *OpenIbNrvo(InlineBlock *ib, const Dst &d);
     void PlanTopClasses(FnSpec *sp);
-    bool RefTopsOk(FnSpec *sp);
+    bool RefTopsOk(FnSpec *sp, bool farreturn);
     void ResetFnState();
     string EnsureEr(FnSpec *sp);
     void EmitSpec(FnSpec *sp, bool er = false);
@@ -1301,8 +1435,10 @@ struct CodeGen {
     // a later global's initializer naming one is spelled out from.
     map<const VarDef *, Node *> gstatic;
 
-    // Spelling out more elements than this would trade startup work for source
-    // size; such a value keeps its runtime initialization.
+    // Spelling out more elements of a fill or a string than this would trade
+    // startup work for source size; such a value keeps its runtime
+    // initialization, a loop or a copy. Listed elements are spelled out
+    // either way, so their static initializer has no limit.
     static constexpr int64_t MAXSTATICELEMS = 256;
 
     bool StaticInitX(Node *n, TypeExpr *t, string &out);
@@ -1383,8 +1519,34 @@ struct CodeGen {
             CT(ast.SliceOf(ast.inttypes[IS_U8], Line {}));
         }
         for (auto sp : usedexterns) {
-            if (runtime_ext_text.find(cat(" ", sp->sf->cname, "(")) != string_view::npos) continue;
+            if (sp->sf->dylib.empty() &&
+                runtime_ext_text.find(cat(" ", sp->sf->cname, "(")) != string_view::npos)
+                continue;
             externs += ExternProto(sp);
+        }
+        // The shared libraries the dynamic externs bind from and the
+        // pointers each symbol fills, which gs_program_init hands to
+        // gs_dl_bind (design/dynamic_externs.md §5). Only a used extern is
+        // bound, so a declared library no call reaches is never opened.
+        auto dllibs = DlLibs();
+        if (!dllibs.empty()) {
+            auto spelling = [&](const string &s) { return s.empty() ? string("0") : CStr(s); };
+            externs += "static const gs_dllib gs_dllibs[] = {\n";
+            for (auto &lib : dllibs)
+                Append(externs, "    { ", CStr(lib.name), ", ", spelling(lib.onwindows), ", ",
+                       spelling(lib.onmacos), ", ", spelling(lib.onlinux), " },\n");
+            externs += "};\nstatic const gs_dlbind gs_dlbinds[] = {\n";
+            size_t n = 0;
+            for (auto sp : usedexterns) {
+                if (sp->sf->dylib.empty()) continue;
+                assert(++n <= dlbinds && "an extern bound after gs_program_init was emitted");
+                auto d = DlSpelling(sp);
+                auto lib = std::find_if(dllibs.begin(), dllibs.end(),
+                                        [&](auto &l) { return SameDylib(l, d); }) - dllibs.begin();
+                Append(externs, "    { ", lib, ", ", CStr(sp->sf->cname), ", (void **)&",
+                       DlSlot(sp), " },\n");
+            }
+            externs += "};\n";
         }
         string includes;
         for (auto inc : headers) {

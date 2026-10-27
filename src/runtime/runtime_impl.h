@@ -22,32 +22,91 @@ static const char *gs_errmsgs[] = {
     "slice not from this pool",
     "non-null relative reference encodes as null",
     "pop_n count negative or beyond the array's length",
+    "queue limit of zero or less",
 };
 
-/* Ends the process with `code`, its streams flushed: every runtime error
-   and exit() comes here. The first thread to call it ends the process
-   without the C library's teardown, which two threads running at once
-   crash in on Windows, and which nothing of the program needs; any later
-   caller waits for that. Under TinyCC the program runs inside the
-   compiler, where exit() on the main thread returns to it instead. */
+/* Ends the process with `code`, its streams flushed: exit() and every
+   runtime error but a contained worker's abort come here. The first thread
+   to call it ends the process without the C library's teardown, which two
+   threads running at once crash in on Windows, and which nothing of the
+   program needs; any later caller waits for that. Under TinyCC the program
+   runs inside the compiler, where exit() on the main thread returns to it
+   instead. */
 static GS_NORETURN void gs_end(int code);
+
+#include <setjmp.h>
+#include <stdarg.h>
+/* No abort is raised in a signal handler, so the jump leaves the signal
+   state alone. */
+#ifdef _WIN32
+#define gs_setjmp(b)  setjmp(b)
+#define gs_longjmp    longjmp
+#else
+#define gs_setjmp(b)  _setjmp(b)
+#define gs_longjmp    _longjmp
+#endif
 
 GS_API GS_NORETURN void gs_panic(const char *msg) {
     fprintf(stderr, "goose runtime error: %s\n", msg);
     gs_end(1);
 }
 
-GS_API GS_NORETURN void gs_abort(int err, const char *file, int line) {
-    fprintf(stderr, "goose runtime error: %s (%s:%d)\n", gs_errmsgs[err], file, line);
+/* Where an abort in a contained worker returns to (gs_run_contained), and
+   the message it leaves there for thread_wait; NULL on every other thread. */
+typedef struct {
+    jmp_buf jump;
+    uint8_t *msg;
+    int64_t len;
+} gs_contained;
+static GS_TLS gs_contained *gs_contain;
+
+/* The end of a failed check or abort(msg) (§9.3), whose message is `len`
+   bytes at `msg` and the location after it. A contained worker's keeps the
+   message, without the "goose runtime error: " every printed one starts
+   with, and ends that worker; anything else's prints it and ends the
+   process. */
+static GS_NORETURN void gs_fail(const void *msg, int64_t len, const char *file, int line) {
+    static const char lead[] = "goose runtime error: ";
+    int64_t pre = sizeof lead - 1;
+    int64_t loc = snprintf(NULL, 0, " (%s:%d)\n", file, line);
+    uint8_t *text = (uint8_t *)malloc((size_t)(pre + len + loc + 1));
+    if (!text) {
+        if (gs_contain) gs_panic("out of memory recording an aborted thread");
+        fputs(lead, stderr);
+        fwrite(msg, 1, (size_t)len, stderr);
+        fprintf(stderr, " (%s:%d)\n", file, line);
+        gs_end(1);
+    }
+    memcpy(text, lead, (size_t)pre);
+    if (len) memcpy(text + pre, msg, (size_t)len);
+    snprintf((char *)text + pre + len, (size_t)loc + 1, " (%s:%d)\n", file, line);
+    if (gs_contain) {
+        memmove(text, text + pre, (size_t)(len + loc - 1));
+        gs_contain->msg = text;
+        gs_contain->len = len + loc - 1;
+        gs_longjmp(gs_contain->jump, 1);
+    }
+    fwrite(text, 1, (size_t)(pre + len + loc), stderr);
     gs_end(1);
+}
+
+/* gs_fail with the message printf formats. */
+static GS_NORETURN void gs_failf(const char *file, int line, const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    gs_fail(buf, n < 0 ? 0 : n < (int)sizeof buf ? n : (int)sizeof buf - 1, file, line);
+}
+
+GS_API GS_NORETURN void gs_abort(int err, const char *file, int line) {
+    gs_fail(gs_errmsgs[err], (int64_t)strlen(gs_errmsgs[err]), file, line);
 }
 
 GS_API GS_NORETURN void gs_abort_msg(const uint8_t *msg, int64_t len, const char *file,
                                      int line) {
-    fputs("goose runtime error: ", stderr);
-    fwrite(msg, 1, (size_t)len, stderr);
-    fprintf(stderr, " (%s:%d)\n", file, line);
-    gs_end(1);
+    gs_fail(msg, len, file, line);
 }
 
 GS_API GS_NORETURN void gs_exit(int64_t code) {
@@ -55,40 +114,31 @@ GS_API GS_NORETURN void gs_exit(int64_t code) {
 }
 
 GS_API GS_NORETURN void gs_idxfail(int64_t i, int64_t n, const char *file, int line) {
-    fprintf(stderr, "goose runtime error: index %lld out of bounds (length %lld) "
-            "(%s:%d)\n", (long long)i, (long long)n, file, line);
-    gs_end(1);
+    gs_failf(file, line, "index %lld out of bounds (length %lld)", (long long)i, (long long)n);
 }
 
 GS_API GS_NORETURN void gs_divfail(const char *file, int line) {
-    fprintf(stderr, "goose runtime error: division by zero (%s:%d)\n", file, line);
-    gs_end(1);
+    gs_failf(file, line, "division by zero");
 }
 
 GS_API GS_NORETURN void gs_divovf(const char *file, int line) {
-    fprintf(stderr, "goose runtime error: integer overflow in division (%s:%d)\n", file, line);
-    gs_end(1);
+    gs_failf(file, line, "integer overflow in division");
 }
 
 GS_API GS_NORETURN void gs_ovf(int64_t a, const char *op, int64_t b, const char *type,
                                const char *file, int line) {
-    fprintf(stderr, "goose runtime error: integer overflow (debug): %lld %s %lld at %s "
-            "(%s:%d)\n", (long long)a, op, (long long)b, type, file, line);
-    gs_end(1);
+    gs_failf(file, line, "integer overflow (debug): %lld %s %lld at %s", (long long)a, op,
+             (long long)b, type);
 }
 
 GS_API GS_NORETURN void gs_ovf_neg(int64_t a, const char *type, const char *file, int line) {
-    fprintf(stderr, "goose runtime error: integer overflow (debug): -(%lld) at %s (%s:%d)\n",
-            (long long)a, type, file, line);
-    gs_end(1);
+    gs_failf(file, line, "integer overflow (debug): -(%lld) at %s", (long long)a, type);
 }
 
 /* The message of a failing `as` check, with the source value as text. */
 static GS_NORETURN void gs_asfail(const char *why, const char *num, const char *type,
                                   const char *file, int line) {
-    fprintf(stderr, "goose runtime error: as conversion %s (debug): %s as %s (%s:%d)\n",
-            why, num, type, file, line);
-    gs_end(1);
+    gs_failf(file, line, "as conversion %s (debug): %s as %s", why, num, type);
 }
 
 GS_API GS_NORETURN void gs_asfail_i(const char *why, int64_t v, const char *type,
@@ -127,8 +177,9 @@ static char **gs_argv;
 
 /* What a new region reserves: the usable part, which halves whenever the
    platform refuses one (gs_reserve_region), and the guard gap behind it;
-   and the usable part as configured, for the reports. */
-static size_t gs_region_usable, gs_region_gap, gs_region_reserve;
+   the usable part as configured, for the reports; and the page size, a
+   whole number of which the usable part always is (gs_rt_start). */
+static size_t gs_region_usable, gs_region_gap, gs_region_reserve, gs_region_page;
 /* The worker running on this thread, main's being -1 (runtime_threads.h). */
 static GS_TLS int64_t gs_current_thread_id = -1;
 /* The program's address space budget for regions and the most regions its
@@ -144,6 +195,12 @@ static int64_t gs_thread_cap = INT64_MAX;
 typedef struct {
     uint8_t *base;
     size_t usable, size;    /* size: with the guard gap */
+    gs_stack *stack;       /* Stable descriptor of the owning data stack. */
+    /* Windows: one past the highest page the fault handler has
+       committed, so gs_trim_memory releases only what was ever committed
+       rather than walking the whole reservation. Unused on POSIX, where
+       the kernel supplies pages on touch. */
+    uint8_t *committed;
 } gs_region;
 static GS_TLS gs_region *gs_regions;
 static GS_TLS volatile long gs_nregions;
@@ -236,6 +293,8 @@ GS_API void gs_release_regions(void) {
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <io.h>
+#include <fcntl.h>
 
 static size_t gs_page_size = 0;
 #define GS_COMMIT_CHUNK (1u << 20)
@@ -257,17 +316,26 @@ static LONG WINAPI gs_fault_filter(EXCEPTION_POINTERS *ep) {
         return EXCEPTION_CONTINUE_SEARCH;
     uint8_t *hit = (uint8_t *)ep->ExceptionRecord->ExceptionInformation[1];
     for (long i = 0; i < gs_nregions; i++) {
-        const gs_region *r = &gs_regions[i];
+        gs_region *r = &gs_regions[i];
         if ((uintptr_t)hit - (uintptr_t)r->base < r->size) {
             /* Within the usable part: commit another chunk (clamped to the
-               region) and resume. Within the gap: a data stack overran. */
+               region) and resume, or where the system has no more memory to
+               commit, say so. Within the gap: a data stack overran. */
             if (hit < r->base + r->usable) {
                 uint8_t *page = (uint8_t *)((size_t)hit & ~(gs_page_size - 1));
                 size_t n = GS_COMMIT_CHUNK;
                 if (page + n > r->base + r->usable)
                     n = (size_t)(r->base + r->usable - page);
-                if (VirtualAlloc(page, n, MEM_COMMIT, PAGE_READWRITE))
+                if (VirtualAlloc(page, n, MEM_COMMIT, PAGE_READWRITE)) {
+                    if (page + n > r->committed) r->committed = page + n;
                     return EXCEPTION_CONTINUE_EXECUTION;
+                }
+                static const char nomem[] =
+                    "goose runtime error: out of memory committing a data stack\n";
+                DWORD written;
+                WriteFile(GetStdHandle(STD_ERROR_HANDLE), nomem, sizeof(nomem) - 1, &written,
+                          NULL);
+                ExitProcess(1);
             }
             char msg[GS_OVERFLOW_TEXT];
             DWORD written;
@@ -279,11 +347,16 @@ static LONG WINAPI gs_fault_filter(EXCEPTION_POINTERS *ep) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-/* Installed once by main, before any worker can start. */
-static void gs_regions_init(void) {
+/* The unit memory is committed and protected in. */
+static size_t gs_os_page_size(void) {
     SYSTEM_INFO si;
     GetSystemInfo(&si);
-    gs_page_size = si.dwPageSize;
+    return si.dwPageSize;
+}
+
+/* Installed once by main, before any worker can start. */
+static void gs_regions_init(void) {
+    gs_page_size = gs_os_page_size();
     if (!AddVectoredExceptionHandler(1, gs_fault_filter))
         gs_panic("cannot install data stack fault handler");
 }
@@ -344,11 +417,14 @@ static GS_TLS void *gs_sigstack;
 /* What the fault handler replaced, for the faults that are not its own. */
 static struct sigaction gs_prev_segv, gs_prev_bus;
 
+/* For gs_trim_memory, which discards whole pages only. */
+static size_t gs_page_size = 0;
+
 static void gs_fault_handler(int sig, siginfo_t *info, void *ctx) {
     (void)ctx;
     uint8_t *hit = (uint8_t *)info->si_addr;
     for (long i = 0; i < gs_nregions; i++) {
-        const gs_region *r = &gs_regions[i];
+        gs_region *r = &gs_regions[i];
         if ((uintptr_t)hit - (uintptr_t)r->base < r->size) {
             char msg[GS_OVERFLOW_TEXT];
             ssize_t w = write(2, msg, gs_overflow_text(msg, r));
@@ -367,7 +443,14 @@ static void gs_fault_handler(int sig, siginfo_t *info, void *ctx) {
     sigaction(sig, sig == SIGSEGV ? &gs_prev_segv : &gs_prev_bus, NULL);
 }
 
+/* The unit memory is mapped and protected in. */
+static size_t gs_os_page_size(void) {
+    long n = sysconf(_SC_PAGESIZE);
+    return n > 0 ? (size_t)n : 4096;
+}
+
 static void gs_regions_init(void) {
+    gs_page_size = gs_os_page_size();
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = gs_fault_handler;
@@ -494,13 +577,14 @@ static GS_NORETURN void gs_end(int code) {
 #define GS_REGION_MIN (1u << 20)
 
 /* A region of the size new ones currently get. Where the platform refuses
-   one, every region from then on is half as large, down to GS_REGION_MIN:
-   a smaller region is always safe, since the checks the compiler leaves
-   out assume no more than GS_STACK_RESERVE bytes in a stack, and the guard
-   gap behind a smaller one aborts growth that much sooner. Workers racing
-   through a refusal may each halve the size once more than needed, or
-   restore a larger one for a moment; it only ever settles downward. */
-GS_API uint8_t *gs_reserve_region(void) {
+   one, every region from then on is half as large, in whole pages, down to
+   GS_REGION_MIN: a smaller region is always safe, since the checks the
+   compiler leaves out assume no more than GS_STACK_RESERVE bytes in a
+   stack, and the guard gap behind a smaller one aborts growth that much
+   sooner. Workers racing through a refusal may each halve the size once
+   more than needed, or restore a larger one for a moment; it only ever
+   settles downward. */
+GS_API uint8_t *gs_reserve_region(gs_stack *stack) {
     if (gs_nregions >= gs_regions_cap)
         gs_panic("too many data stack regions");
     size_t usable = gs_region_usable;
@@ -510,14 +594,75 @@ GS_API uint8_t *gs_reserve_region(void) {
         if (p) break;
         if (usable <= GS_REGION_MIN) gs_panic("cannot reserve data stack address space");
         usable /= 2;
+        usable -= usable % gs_region_page;
         gs_region_usable = usable;
     }
     long i = gs_nregions;
     gs_regions[i].base = p;
     gs_regions[i].usable = usable;
     gs_regions[i].size = usable + gs_region_gap;
+    gs_regions[i].stack = stack;
+    gs_regions[i].committed = p;
     gs_nregions = i + 1;  /* Publish only the initialized entry. */
     return p;
+}
+
+/* Explicit rather than on every rewind: short-lived scratch can reuse its
+   pages cheaply, while a long-running application can give them back after
+   replacing a large document. Keep the virtual reservation and the partly
+   used final page; limited-array capacity and live borrowed values are below
+   the synchronized top and remain intact. Each worker has its own registry.
+
+   Eager on purpose: Windows decommits, which returns the commit charge as
+   well as the physical pages (DiscardVirtualMemory and MEM_RESET keep the
+   charge), and Linux's MADV_DONTNEED drops the pages from RSS at once,
+   where MADV_FREE leaves them counted until the kernel is short of memory.
+   On macOS MADV_DONTNEED reclaims nothing reliably, so replace the unused
+   suffix with fresh anonymous memory. MAP_FIXED replaces it atomically,
+   without making the address range available to another thread. Trimming
+   covers the full unused reservation; ordinary growth needs no tracking
+   or signal handler, and neither does growth into the replacement mapping.
+
+   Only generated code may call this, through os.trim_memory, whose callers
+   publish their cached tops first (SFunction::readsalltops). C reached
+   from Goose through another extern must not: tops cached by the Goose
+   frames above it would still be stale, and live pages above them lost. */
+GS_API uint8_t gs_trim_memory(void) {
+    uintptr_t page = (uintptr_t)gs_page_size;
+    int ok = 1;
+    for (long i = 0; i < gs_nregions; i++) {
+        gs_region *r = &gs_regions[i];
+        uintptr_t base = (uintptr_t)r->base, top = (uintptr_t)r->stack->top;
+        /* A top outside its own region is a compiler or runtime bug, not
+           something the OS refused: carrying on could discard live data. */
+        if (top < base || top - base > r->usable)
+            gs_panic("data stack top outside its region in trim_memory");
+        uintptr_t start = (top + page - 1) / page * page;
+        uintptr_t end = (base + r->usable) / page * page;
+#ifdef _WIN32
+        /* Nothing above the commit mark was ever committed (base is
+           allocation-aligned and the mark page-aligned). */
+        if ((uintptr_t)r->committed < end) end = (uintptr_t)r->committed;
+#endif
+        if (start >= end) continue;
+        size_t len = (size_t)(end - start);
+#ifdef _WIN32
+        /* The access-fault handler commits the pages again on growth. */
+        if (VirtualFree((void *)start, len, MEM_DECOMMIT))
+            r->committed = (uint8_t *)start;
+        else
+            ok = 0;
+#elif defined(__APPLE__)
+        if (mmap((void *)start, len, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED)
+            ok = 0;
+#else
+        /* Linux walks only the page tables that were ever populated, so the
+           untouched rest of the reservation costs it little. */
+        if (madvise((void *)start, len, MADV_DONTNEED)) ok = 0;
+#endif
+    }
+    return (uint8_t)ok;
 }
 
 /* ---------------------------------------------------------------------------
@@ -576,44 +721,93 @@ static void gs_sp_dropnode(gs_sppath *p, int64_t i) {
     GS_SPHEAD(p)->chain = i;
 }
 
-/* The largest count under node i, a leaf or an inner node. */
-static int64_t gs_sp_max(gs_sppath *p, int64_t i, int leaf) {
-    int64_t m = 0, k;
-    if (leaf) {
-        gs_spleaf *l = GS_SPLEAF(p, i);
-        for (k = 0; k < l->n; k++)
-            if (l->cnt[k] > m) m = l->cnt[k];
-    } else {
-        gs_spinner *in = GS_SPINNER(p, i);
-        for (k = 0; k < in->n; k++)
-            if (in->max[k] > m) m = in->max[k];
+/* Moves a node's entries from position s on up one, making room at s, or
+   those after s down onto it. A loop over the arrays together rather than
+   a memmove of each: a node holds a few entries, and the call costs more
+   than moving them. */
+static void gs_sp_open(gs_spleaf *lf, int64_t s) {
+    int64_t j;
+    for (j = lf->n; j > s; j--) {
+        lf->idx[j] = lf->idx[j - 1];
+        lf->cnt[j] = lf->cnt[j - 1];
     }
+    lf->n++;
+}
+
+static void gs_sp_close(gs_spleaf *lf, int64_t s) {
+    int64_t j;
+    lf->n--;
+    for (j = s; j < lf->n; j++) {
+        lf->idx[j] = lf->idx[j + 1];
+        lf->cnt[j] = lf->cnt[j + 1];
+    }
+}
+
+static void gs_sp_openin(gs_spinner *in, int64_t s) {
+    int64_t j;
+    for (j = in->n; j > s; j--) {
+        in->key[j] = in->key[j - 1];
+        in->max[j] = in->max[j - 1];
+        in->child[j] = in->child[j - 1];
+    }
+    in->n++;
+}
+
+static void gs_sp_closein(gs_spinner *in, int64_t s) {
+    int64_t j;
+    in->n--;
+    for (j = s; j < in->n; j++) {
+        in->key[j] = in->key[j + 1];
+        in->max[j] = in->max[j + 1];
+        in->child[j] = in->child[j + 1];
+    }
+}
+
+/* The largest of the w counts at v, or `stop` as soon as one reaches it. */
+static int64_t gs_sp_most(const int64_t *v, int64_t w, int64_t stop) {
+    int64_t m = 0, k;
+    for (k = 0; k < w && m < stop; k++)
+        if (v[k] > m) m = v[k];
     return m;
+}
+
+/* The largest count under node i, a leaf or an inner node, or `stop` as
+   soon as one reaches it. */
+static int64_t gs_sp_max(gs_sppath *p, int64_t i, int leaf, int64_t stop) {
+    return leaf ? gs_sp_most(GS_SPLEAF(p, i)->cnt, GS_SPLEAF(p, i)->n, stop)
+                : gs_sp_most(GS_SPINNER(p, i)->max, GS_SPINNER(p, i)->n, stop);
 }
 
 static int64_t gs_sp_key(gs_sppath *p, int64_t i, int leaf) {
     return leaf ? GS_SPLEAF(p, i)->idx[0] : GS_SPINNER(p, i)->key[0];
 }
 
-/* Brings the entries above level `from` of the path (the leaf being level
-   h) up to date with the node below each, stopping at the first that is. */
-static void gs_sp_fix(gs_sppath *p, int64_t from) {
-    int64_t l;
-    for (l = from - 1; l >= 0; l--) {
-        gs_spinner *in = GS_SPINNER(p, p->node[l]);
-        int64_t c = p->node[l + 1], k = p->pos[l];
-        int leaf = l + 1 == p->h;
-        int64_t key = gs_sp_key(p, c, leaf), max = gs_sp_max(p, c, leaf);
-        if (in->key[k] == key && in->max[k] == max) return;
+/* Brings the entries above level l of the path (the leaf being level h) up
+   to date with the node below each, after one count in the node at level l
+   went from `was` to `now` (0 for an entry added or removed), stopping at
+   the first entry that is unchanged. A node's largest count is rescanned
+   only where the count that held it shrank, and only until another as
+   large turns up; a `was` of INT64_MAX rescans the node at level l whole,
+   whatever changed in it. */
+static void gs_sp_fix(gs_sppath *p, int64_t l, int64_t was, int64_t now) {
+    for (; l > 0; l--) {
+        gs_spinner *in = GS_SPINNER(p, p->node[l - 1]);
+        int64_t k = p->pos[l - 1], c = p->node[l], m = in->max[k];
+        int leaf = l == p->h;
+        int64_t key = gs_sp_key(p, c, leaf);
+        int64_t nm = now >= m ? now : was < m ? m : gs_sp_max(p, c, leaf, was);
+        if (in->key[k] == key && nm == m) return;
         in->key[k] = key;
-        in->max[k] = max;
+        in->max[k] = nm;
+        was = m;
+        now = nm;
     }
 }
 
 /* Descends to the leaf holding the last span that starts at or before idx,
    and returns its position there, or -1 where no span does. */
 static int64_t gs_sp_find(gs_sppath *p, int64_t idx) {
-    int64_t l, i = GS_SPHEAD(p)->root, k, lo = 0, hi;
+    int64_t l, i = GS_SPHEAD(p)->root, k;
     gs_spleaf *lf;
     p->h = GS_SPHEAD(p)->height;
     for (l = 0; l < p->h; l++) {
@@ -625,27 +819,9 @@ static int64_t gs_sp_find(gs_sppath *p, int64_t idx) {
     }
     p->node[p->h] = i;
     lf = GS_SPLEAF(p, i);
-    hi = lf->n;
-    while (lo < hi) {
-        int64_t mid = (lo + hi) / 2;
-        if (lf->idx[mid] <= idx) lo = mid + 1;
-        else hi = mid;
-    }
-    p->pos[p->h] = lo - 1;
-    return lo - 1;
-}
-
-/* Moves the path to the next leaf, or returns 0 at the last. */
-static int gs_sp_nextleaf(gs_sppath *p) {
-    int64_t l = p->h - 1;
-    while (l >= 0 && p->pos[l] + 1 >= GS_SPINNER(p, p->node[l])->n) l--;
-    if (l < 0) return 0;
-    p->pos[l]++;
-    for (; l < p->h; l++) {
-        p->node[l + 1] = GS_SPINNER(p, p->node[l])->child[p->pos[l]];
-        p->pos[l + 1] = 0;
-    }
-    return 1;
+    for (k = 0; k < lf->n && lf->idx[k] <= idx; k++) {}
+    p->pos[p->h] = k - 1;
+    return k - 1;
 }
 
 /* A node full at the root splits under a new root of the two halves. */
@@ -654,10 +830,10 @@ static void gs_sp_newroot(gs_sppath *p, int64_t a, int64_t b, int leaf) {
     gs_spinner *rn = GS_SPINNER(p, r);
     rn->n = 2;
     rn->key[0] = gs_sp_key(p, a, leaf);
-    rn->max[0] = gs_sp_max(p, a, leaf);
+    rn->max[0] = gs_sp_max(p, a, leaf, INT64_MAX);
     rn->child[0] = a;
     rn->key[1] = gs_sp_key(p, b, leaf);
-    rn->max[1] = gs_sp_max(p, b, leaf);
+    rn->max[1] = gs_sp_max(p, b, leaf, INT64_MAX);
     rn->child[1] = b;
     GS_SPHEAD(p)->root = r;
     GS_SPHEAD(p)->height++;
@@ -668,7 +844,8 @@ static void gs_sp_newroot(gs_sppath *p, int64_t a, int64_t b, int leaf) {
 static void gs_sp_addchild(gs_sppath *p, int64_t l, int64_t k, int64_t child, int leaf) {
     for (;;) {
         gs_spinner *in = GS_SPINNER(p, p->node[l]), *o = in;
-        int64_t key = gs_sp_key(p, child, leaf), max = gs_sp_max(p, child, leaf), s = k, nn = 0;
+        int64_t key = gs_sp_key(p, child, leaf), max = gs_sp_max(p, child, leaf, INT64_MAX);
+        int64_t s = k, nn = 0;
         if (in->n == GS_SPAN_FAN) {
             int64_t half = GS_SPAN_FAN / 2;
             gs_spinner *r;
@@ -684,15 +861,12 @@ static void gs_sp_addchild(gs_sppath *p, int64_t l, int64_t k, int64_t child, in
                 s = k - half;
             }
         }
-        memmove(o->key + s + 1, o->key + s, (size_t)(o->n - s) * 8);
-        memmove(o->max + s + 1, o->max + s, (size_t)(o->n - s) * 8);
-        memmove(o->child + s + 1, o->child + s, (size_t)(o->n - s) * 8);
+        gs_sp_openin(o, s);
         o->key[s] = key;
         o->max[s] = max;
         o->child[s] = child;
-        o->n++;
         if (!nn) {
-            gs_sp_fix(p, l);
+            gs_sp_fix(p, l, 0, max);
             return;
         }
         if (l == 0) {
@@ -701,7 +875,7 @@ static void gs_sp_addchild(gs_sppath *p, int64_t l, int64_t k, int64_t child, in
         }
         /* The node keeps its place above, and its new right half goes
            after it. */
-        gs_sp_fix(p, l);
+        gs_sp_fix(p, l, INT64_MAX, 0);
         child = nn;
         leaf = 0;
         k = p->pos[l - 1] + 1;
@@ -727,17 +901,15 @@ static void gs_sp_insert(gs_sppath *p, int64_t k, int64_t idx, int64_t cnt) {
             s = k - half;
         }
     }
-    memmove(o->idx + s + 1, o->idx + s, (size_t)(o->n - s) * 8);
-    memmove(o->cnt + s + 1, o->cnt + s, (size_t)(o->n - s) * 8);
+    gs_sp_open(o, s);
     o->idx[s] = idx;
     o->cnt[s] = cnt;
-    o->n++;
     if (!nn) {
-        gs_sp_fix(p, p->h);
+        gs_sp_fix(p, p->h, 0, cnt);
     } else if (p->h == 0) {
         gs_sp_newroot(p, p->node[0], nn, 1);
     } else {
-        gs_sp_fix(p, p->h);
+        gs_sp_fix(p, p->h, INT64_MAX, 0);
         gs_sp_addchild(p, p->h - 1, p->pos[p->h - 1] + 1, nn, 1);
     }
 }
@@ -746,24 +918,19 @@ static void gs_sp_insert(gs_sppath *p, int64_t k, int64_t idx, int64_t cnt) {
    leaves its parent, and a root left with one child hands the root down. */
 static void gs_sp_delete(gs_sppath *p, int64_t k) {
     gs_spleaf *lf = GS_SPLEAF(p, p->node[p->h]);
-    int64_t l;
-    memmove(lf->idx + k, lf->idx + k + 1, (size_t)(lf->n - k - 1) * 8);
-    memmove(lf->cnt + k, lf->cnt + k + 1, (size_t)(lf->n - k - 1) * 8);
-    lf->n--;
+    int64_t c = lf->cnt[k], l;
+    gs_sp_close(lf, k);
     if (lf->n > 0 || p->h == 0) {
-        gs_sp_fix(p, p->h);
+        gs_sp_fix(p, p->h, c, 0);
         return;
     }
     gs_sp_dropnode(p, p->node[p->h]);
     for (l = p->h - 1;; l--) {
         gs_spinner *in = GS_SPINNER(p, p->node[l]);
-        int64_t e = p->pos[l];
-        memmove(in->key + e, in->key + e + 1, (size_t)(in->n - e - 1) * 8);
-        memmove(in->max + e, in->max + e + 1, (size_t)(in->n - e - 1) * 8);
-        memmove(in->child + e, in->child + e + 1, (size_t)(in->n - e - 1) * 8);
-        in->n--;
+        int64_t e = p->pos[l], m = in->max[e];
+        gs_sp_closein(in, e);
         if (in->n > 0) {
-            gs_sp_fix(p, l);
+            gs_sp_fix(p, l, m, 0);
             break;
         }
         /* Never the root: a root of one child is handed down below, so
@@ -782,13 +949,14 @@ static void gs_sp_delete(gs_sppath *p, int64_t k) {
    leaf, or the whole span where it holds no more. */
 static void gs_sp_take(gs_sppath *p, int64_t k, int64_t cnt) {
     gs_spleaf *lf = GS_SPLEAF(p, p->node[p->h]);
-    if (lf->cnt[k] <= cnt) {
+    int64_t c = lf->cnt[k];
+    if (c <= cnt) {
         gs_sp_delete(p, k);
         return;
     }
     lf->idx[k] += cnt;
-    lf->cnt[k] -= cnt;
-    gs_sp_fix(p, p->h);
+    lf->cnt[k] = c - cnt;
+    gs_sp_fix(p, p->h, c, c - cnt);
 }
 
 /* The front of the first span holding cnt, in index order, else the end of
@@ -799,52 +967,104 @@ static void gs_sp_take(gs_sppath *p, int64_t k, int64_t cnt) {
 GS_API int64_t gs_spans_alloc(uint8_t *base, int64_t *n, uint8_t **top, int64_t len,
                               int64_t cnt) {
     gs_sppath p;
-    int64_t l, i, k, idx;
-    gs_spleaf *lf;
-    int fit;
+    int64_t l, i, k = 0, j, m, c, now, idx, before[GS_SPAN_DEPTH];
+    gs_spleaf *lf = NULL;
     if (cnt == 0 || *n == 0) return len;
     p.base = base;
     p.n = n;
     p.top = top;
     p.h = GS_SPHEAD(&p)->height;
     i = GS_SPHEAD(&p)->root;
-    /* Down to the first fit, or else to the last span. A tree of one leaf
-       learns which while scanning it. */
-    fit = p.h == 0 || gs_sp_max(&p, i, 0) >= cnt;
+    /* Down the first entry at each level whose largest count holds cnt,
+       noting the largest count of the ones before it, all smaller than
+       cnt, for bringing the entries up to date once the span is taken
+       from. Where the root holds none, down to the last span. */
     for (l = 0; l < p.h; l++) {
         gs_spinner *in = GS_SPINNER(&p, i);
-        k = in->n - 1;
-        if (fit)
-            for (k = 0; in->max[k] < cnt; k++) {}
+        for (k = 0, m = 0; k < in->n && in->max[k] < cnt; k++)
+            if (in->max[k] > m) m = in->max[k];
+        if (k == in->n) break;
         p.node[l] = i;
         p.pos[l] = k;
+        before[l] = m;
         i = in->child[k];
     }
-    p.node[p.h] = i;
-    lf = GS_SPLEAF(&p, i);
-    k = 0;
-    if (fit)
-        while (k < lf->n && lf->cnt[k] < cnt) k++;
-    if (!fit || k == lf->n) {
+    if (l == p.h) {
+        lf = GS_SPLEAF(&p, i);
+        for (k = 0, m = 0; k < lf->n && lf->cnt[k] < cnt; k++)
+            if (lf->cnt[k] > m) m = lf->cnt[k];
+        before[l] = m;
+    }
+    if (l < p.h || k == lf->n) {
+        for (l = 0, i = GS_SPHEAD(&p)->root; l < p.h; l++) {
+            gs_spinner *in = GS_SPINNER(&p, i);
+            p.node[l] = i;
+            p.pos[l] = in->n - 1;
+            i = in->child[in->n - 1];
+        }
+        p.node[p.h] = i;
+        lf = GS_SPLEAF(&p, i);
         k = lf->n - 1;
         if (k < 0 || lf->idx[k] + lf->cnt[k] != len) return len;
+        idx = lf->idx[k];
+        gs_sp_take(&p, k, cnt);
+        return idx;
     }
+    p.node[p.h] = i;
+    p.pos[p.h] = k;
     idx = lf->idx[k];
-    gs_sp_take(&p, k, cnt);
+    c = lf->cnt[k];
+    if (c > cnt) {
+        lf->idx[k] = idx + cnt;
+        lf->cnt[k] = now = c - cnt;
+        j = k + 1;
+    } else if (lf->n > 1 || p.h == 0) {
+        gs_sp_close(lf, k);
+        now = 0;
+        j = k;
+    } else {
+        gs_sp_delete(&p, k);
+        return idx;
+    }
+    /* As gs_sp_fix, with what the descent noted: the count on the path at
+       level l went from c to `now`, and the node's other entries are the
+       ones before, smaller than cnt, and those from j on, which need
+       scanning only where c was the node's largest. */
+    for (l = p.h; l > 0; l--) {
+        gs_spinner *in = GS_SPINNER(&p, p.node[l - 1]);
+        int64_t e = p.pos[l - 1], mx = in->max[e], nm = mx;
+        int64_t key = gs_sp_key(&p, p.node[l], l == p.h);
+        if (c == mx) {
+            const int64_t *v = l == p.h ? lf->cnt : GS_SPINNER(&p, p.node[l])->max;
+            int64_t w = l == p.h ? lf->n : GS_SPINNER(&p, p.node[l])->n;
+            nm = before[l] > now ? before[l] : now;
+            for (; j < w && nm < c; j++)
+                if (v[j] > nm) nm = v[j];
+        }
+        if (in->key[e] == key && nm == mx) break;
+        in->key[e] = key;
+        in->max[e] = nm;
+        c = mx;
+        now = nm;
+        j = e + 1;
+    }
     return idx;
 }
 
-/* The spans around a run that starts at idx: the path to the leaf holding
-   the last span that starts at or before idx (its position k there, or -1),
-   and the span after that one, which follows it in its leaf or starts the
-   next leaf (nl and nk, reached by the path np), where there is one. */
+/* The spans around a run [idx, end): the path to the leaf holding the last
+   span that starts at or before idx (its position k there, or -1), and the
+   span after that one where it follows in the same leaf, or where it starts
+   the next leaf and at end (nl and nk, reached by the path np). A next
+   leaf's first index is the key of the entry that leads to it, so a path
+   to it is only made where its first span touches the run. */
 typedef struct {
     gs_spleaf *lf, *nl;
     int64_t k, nk;
     gs_sppath *np;
 } gs_spnear;
 
-static void gs_sp_near(gs_sppath *p, gs_sppath *q, int64_t idx, gs_spnear *s) {
+static void gs_sp_near(gs_sppath *p, gs_sppath *q, int64_t idx, int64_t end, gs_spnear *s) {
+    int64_t l;
     s->k = gs_sp_find(p, idx);
     s->lf = GS_SPLEAF(p, p->node[p->h]);
     s->nl = NULL;
@@ -855,30 +1075,45 @@ static void gs_sp_near(gs_sppath *p, gs_sppath *q, int64_t idx, gs_spnear *s) {
         s->nk = s->k + 1;
         return;
     }
-    if (p->h == 0) return;
-    *q = *p;
-    if (gs_sp_nextleaf(q)) {
-        s->np = q;
-        s->nl = GS_SPLEAF(q, q->node[q->h]);
-        s->nk = 0;
+    for (l = p->h - 1; l >= 0 && p->pos[l] + 1 >= GS_SPINNER(p, p->node[l])->n; l--) {}
+    if (l < 0 || GS_SPINNER(p, p->node[l])->key[p->pos[l] + 1] != end) return;
+    q->base = p->base;
+    q->n = p->n;
+    q->top = p->top;
+    q->h = p->h;
+    memcpy(q->node, p->node, (size_t)(l + 1) * 8);
+    memcpy(q->pos, p->pos, (size_t)(l + 1) * 8);
+    for (q->pos[l]++; l < q->h; l++) {
+        q->node[l + 1] = GS_SPINNER(q, q->node[l])->child[q->pos[l]];
+        q->pos[l + 1] = 0;
     }
+    s->np = q;
+    s->nl = GS_SPLEAF(q, q->node[q->h]);
+    s->nk = 0;
 }
 
 /* [idx, idx + cnt) back on the freelist beside the spans gs_sp_near found
    around it, merged with the ones it touches. */
 static void gs_sp_release(gs_sppath *p, gs_spnear *s, int64_t idx, int64_t cnt) {
-    int prev = s->k >= 0 && s->lf->idx[s->k] + s->lf->cnt[s->k] == idx;
-    int next = s->nl && idx + cnt == s->nl->idx[s->nk];
+    gs_spleaf *lf = s->lf, *nl = s->nl;
+    int64_t k = s->k, nk = s->nk;
+    int prev = k >= 0 && lf->idx[k] + lf->cnt[k] == idx;
+    int next = nl && idx + cnt == nl->idx[nk];
     if (prev) {
-        s->lf->cnt[s->k] += cnt + (next ? s->nl->cnt[s->nk] : 0);
-        gs_sp_fix(p, p->h);
-        if (next) gs_sp_delete(s->np, s->nk);
+        int64_t c = lf->cnt[k], m = c + cnt + (next ? nl->cnt[nk] : 0);
+        lf->cnt[k] = m;
+        /* The merged count is larger than both it replaces, so one fix
+           covers the span after leaving the leaf as well. */
+        if (next && nl == lf) gs_sp_close(lf, nk);
+        gs_sp_fix(p, p->h, c, m);
+        if (next && nl != lf) gs_sp_delete(s->np, nk);
     } else if (next) {
-        s->nl->idx[s->nk] = idx;
-        s->nl->cnt[s->nk] += cnt;
-        gs_sp_fix(s->np, s->np->h);
+        int64_t c = nl->cnt[nk];
+        nl->idx[nk] = idx;
+        nl->cnt[nk] = c + cnt;
+        gs_sp_fix(s->np, s->np->h, c, c + cnt);
     } else {
-        gs_sp_insert(p, s->k + 1, idx, cnt);
+        gs_sp_insert(p, k + 1, idx, cnt);
     }
 }
 
@@ -899,7 +1134,7 @@ GS_API void gs_spans_free(uint8_t *base, int64_t *n, uint8_t **top, int64_t idx,
         hd->root = gs_sp_newnode(&p);
         GS_SPLEAF(&p, hd->root)->n = 0;
     }
-    gs_sp_near(&p, &q, idx, &s);
+    gs_sp_near(&p, &q, idx, idx + cnt, &s);
     gs_sp_release(&p, &s, idx, cnt);
 }
 
@@ -921,7 +1156,7 @@ GS_API int64_t gs_spans_regrow(uint8_t *base, int64_t *n, uint8_t **top, int64_t
     p.base = base;
     p.n = n;
     p.top = top;
-    gs_sp_near(&p, &q, idx, &s);
+    gs_sp_near(&p, &q, idx, end, &s);
     if (s.nl && s.nl->idx[s.nk] == end &&
         (s.nl->cnt[s.nk] >= cnt - ol || end + s.nl->cnt[s.nk] == len)) {
         gs_sp_take(s.np, s.nk, cnt - ol);
@@ -950,13 +1185,22 @@ GS_API int64_t gs_spans_regrow(uint8_t *base, int64_t *n, uint8_t **top, int64_t
    positions, every search, tests one byte at a time, a single byte by
    memchr. No load reaches past the range: its last part is tested as the
    range's last whole block, with the positions before it, already tested,
-   shifted out of the result. */
+   shifted out of the result.
 
+   The set is a ByteSet the program wrote, read here as a gs_byteset: may_alias
+   keeps gcc's type-based alias analysis from taking those for two objects,
+   which at -O2 had it drop the program's stores to a set it then searched. */
+
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
+#define GS_MAY_ALIAS __attribute__((may_alias))
+#else
+#define GS_MAY_ALIAS
+#endif
 #pragma pack(push, 1)
 typedef struct {
     uint8_t members[256];
     uint8_t kind, invert, bytes[3], lo[16], hi[16];
-} gs_byteset;
+} GS_MAY_ALIAS gs_byteset;
 #pragma pack(pop)
 
 static int64_t gs_scan_any_bytes(const uint8_t *p, int64_t n, const gs_byteset *s) {
@@ -1182,6 +1426,13 @@ GS_API void gs_rt_start(int argc, char **argv, uint64_t reserve, uint64_t gap,
                         uint64_t budget, int64_t mainregions, int64_t workerregions) {
     gs_argc = argc;
     gs_argv = argv;
+    /* A region's usable part is whole pages: the guard gap behind it has to
+       start on a page to be protected, and on Windows a stack would run on
+       unseen through the rest of a part page committed at its end, past the
+       GS_STACK_RESERVE bytes the compiler's checks go by. */
+    gs_region_page = gs_os_page_size();
+    reserve -= reserve % gs_region_page;
+    if (!reserve) gs_panic("the data stack reservation (GS_STACK_RESERVE) is less than a page");
     gs_region_usable = gs_region_reserve = (size_t)reserve;
     gs_region_gap = (size_t)gap;
     gs_stack_budget = budget;
@@ -1202,6 +1453,16 @@ GS_API void gs_rt_start(int argc, char **argv, uint64_t reserve, uint64_t gap,
     // and interleaves correctly with stderr diagnostics. Revisit if print
     // throughput ever matters.
     setvbuf(stdout, NULL, _IONBF, 0);
+    #ifdef _WIN32
+        // The bytes a program writes are the bytes that come out, '\n' one
+        // byte as on every other platform, rather than a "\r\n" the CRT's
+        // text mode makes of it byte by byte; and the bytes it reads are
+        // the bytes that came in, where text mode would make "\r\n" '\n'
+        // and stop at the first Ctrl-Z.
+        _setmode(_fileno(stdin), _O_BINARY);
+        _setmode(_fileno(stdout), _O_BINARY);
+        _setmode(_fileno(stderr), _O_BINARY);
+    #endif
     gs_regions_init();
     gs_regions_begin(mainregions);
     gs_native_stack_init();
@@ -1492,25 +1753,5 @@ GS_API int64_t gs_fmt_quoted(uint8_t *dst, const uint8_t *s, int64_t n) {
     return (int64_t)(d - dst);
 }
 
-/* stdout is unbuffered (gs_rt_start), so every piece is its own write;
-   revisit if print throughput ever matters. */
-
-GS_API void gs_out_int(int64_t v) {
-    uint8_t buf[GS_FMT_MAX];
-    fwrite(buf, 1, (size_t)gs_fmt_i64(buf, v), stdout);
-}
-GS_API void gs_out_uint(uint64_t v) {
-    uint8_t buf[GS_FMT_MAX];
-    fwrite(buf, 1, (size_t)gs_fmt_u64(buf, v), stdout);
-}
-GS_API void gs_out_flt(double v) {
-    uint8_t buf[GS_FMT_MAX];
-    fwrite(buf, 1, (size_t)gs_fmt_f64(buf, v), stdout);
-}
-GS_API void gs_out_f32(float v) {
-    uint8_t buf[GS_FMT_MAX];
-    fwrite(buf, 1, (size_t)gs_fmt_f32(buf, v), stdout);
-}
-GS_API void gs_out_bool(int64_t v) { fputs(v ? "true" : "false", stdout); }
+/* stdout is unbuffered (gs_rt_start): each print is this one write. */
 GS_API void gs_out_bytes(const uint8_t *p, int64_t len) { fwrite(p, 1, (size_t)len, stdout); }
-GS_API void gs_out_nl(void) { fputc('\n', stdout); }

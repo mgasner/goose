@@ -16,4 +16,5 @@
 #include "typecheck_templates.h"
 #include "typecheck_types.h"
 #include "typecheck_exprs.h"
+#include "typecheck_expansion.h"
 #include "typecheck_nodes.h"

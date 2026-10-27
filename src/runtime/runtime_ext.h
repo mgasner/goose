@@ -26,6 +26,22 @@ static void gs_bld_append(gs_rref b, const void *p, int64_t n) {
     b.hdr->len += n;
 }
 
+/* ffi's cstr and bytes (stdlib/ffi.goose): the bytes at a pointer a C
+   library handed back as a u64, copied into a builder, so nothing foreign
+   is a Goose value without a copy. The pointer is trusted as every extern
+   call trusts C; a null one appends nothing and is the false result. */
+static uint8_t gs_ffi_cstr(uint64_t p, gs_rref out) {
+    const char *s = (const char *)(uintptr_t)p;
+    if (!s) return 0;
+    gs_bld_append(out, s, (int64_t)strlen(s));
+    return 1;
+}
+static uint8_t gs_ffi_bytes(uint64_t p, int64_t n, gs_rref out) {
+    if (!p) return 0;
+    gs_bld_append(out, (const void *)(uintptr_t)p, n);
+    return 1;
+}
+
 /* math's sqrt (stdlib/math.goose). Goose has no errno, and C's sqrt has to
    set it for a negative argument: clang and gcc then guard the square root
    instruction with a test and a library call at every use, and will not
@@ -44,6 +60,39 @@ static float gs_sqrtf(float x) { return __builtin_elementwise_sqrt(x); }
 static double gs_sqrt(double x) { return sqrt(x); }
 static float gs_sqrtf(float x) { return sqrtf(x); }
 #endif
+
+/* math's mul_add (stdlib/math.goose): x * y + z, fused into one rounding
+   where the code is built for FMA, as two roundings elsewhere
+   (GS_MUL_ADD_MODE, runtime.h). A call names the macro, which picks the
+   mode where the call is written: a simd function's AVX2 and AVX-512
+   versions fuse whatever the target. A function value is resolved at
+   compile time, so its calls name the macro too. The function of the same
+   name, in the target's mode, is only for C that names it without the
+   macro. The fused form is inlined into its caller, so that it is built
+   with the caller's FMA. */
+static inline double gs_mul_add_separate(double x, double y, double z) { return x * y + z; }
+static inline float gs_mul_addf_separate(float x, float y, float z) { return x * y + z; }
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
+static inline __attribute__((always_inline)) double gs_mul_add_fused(double x, double y, double z) {
+    return __builtin_fma(x, y, z);
+}
+static inline __attribute__((always_inline)) float gs_mul_addf_fused(float x, float y, float z) {
+    return __builtin_fmaf(x, y, z);
+}
+#else
+static inline double gs_mul_add_fused(double x, double y, double z) { return fma(x, y, z); }
+static inline float gs_mul_addf_fused(float x, float y, float z) { return fmaf(x, y, z); }
+#endif
+#define GS_MUL_ADD_CAT2(a, b) a##b
+#define GS_MUL_ADD_CAT(a, b) GS_MUL_ADD_CAT2(a, b)
+static double gs_mul_add(double x, double y, double z) {
+    return GS_MUL_ADD_CAT(gs_mul_add_, GS_MUL_ADD_BASE)(x, y, z);
+}
+static float gs_mul_addf(float x, float y, float z) {
+    return GS_MUL_ADD_CAT(gs_mul_addf_, GS_MUL_ADD_BASE)(x, y, z);
+}
+#define gs_mul_add(x, y, z) GS_MUL_ADD_CAT(gs_mul_add_, GS_MUL_ADD_MODE)(x, y, z)
+#define gs_mul_addf(x, y, z) GS_MUL_ADD_CAT(gs_mul_addf_, GS_MUL_ADD_MODE)(x, y, z)
 
 /* math's other libm functions (stdlib/math.goose). C has them set errno on a
    domain or range error, so a C compiler takes each call for a write to
@@ -172,3 +221,10 @@ GS_API int64_t gs_os_time_ns(void);
 GS_API int64_t gs_os_clock_ns(void);
 GS_API void gs_os_sleep_ms(int64_t ms);
 GS_API uint64_t gs_os_random_u64(void);
+/* os.trim_memory: discards unused complete pages of this thread program's
+   data stacks. Defined with the region registry it walks (runtime_impl.h),
+   but declared here like the other os primitives, so that no prototype is
+   emitted for it. For generated code only, whose callers write back their
+   cached tops first; C called from Goose must not call it. 0 means an OS
+   request failed; a top outside its region panics. */
+GS_API uint8_t gs_trim_memory(void);

@@ -1,9 +1,36 @@
 # Goose for Visual Studio Code
 
-An extension for the [Goose language](https://github.com/aardappel/goose). No
-language server, runtime dependencies, or compiler changes are required.
+An extension for the [Goose language](https://github.com/aardappel/goose). With
+a compiler that has `goose lsp`, the compiler itself is the language server:
+the extension starts it, and the server analyzes your programs as you type.
+With an older compiler, the extension checks saved files with `goose check`
+instead.
+Other editors can use the same server: [Goose in other editors](../docs/editors.md)
+has the configuration for Neovim, Helix and Emacs.
 
 ## Features
+
+- With the language server:
+  - errors and warnings as you type, over every file of the program (the
+    entry file set in `goose.entryFile`, or the open file);
+  - hover with declarations, types, instantiations and documentation
+    comments;
+  - go to definition (including across imports and on `import` lines);
+  - find all references and rename across the program's files;
+  - the outline and Go to Symbol in the file and the workspace;
+  - semantic highlighting of names that resolve to a function, type,
+    parameter, field or variant;
+  - signature help while typing a call's arguments;
+  - inlay hints for the types of `let`s and `var`s and the parameter names
+    at calls;
+  - folding of bodies and comment runs;
+  - expand selection by syntax;
+  - code lenses: above each generic function, the number of its
+    instantiations, which a click lists, and **Run** above `main`, which
+    runs that file with the JIT.
+
+  **Goose: Restart Language Server** restarts the server;
+  `goose.useLanguageServer` turns it off.
 
 - Syntax highlighting for `.goose` files, including nested block comments,
   escaped strings and characters, raw `"""` strings across lines, decimal/hex
@@ -12,17 +39,22 @@ language server, runtime dependencies, or compiler changes are required.
   editor and in the Markdown preview.
 - Bracket matching, auto-closing, indentation, comment toggling, folding and
   snippets (`main`, `fn`, `struct`, `enum`, `for`, `guard`, `match`, and more).
-- Compiler checks on open/save, error and warning underlines, and Problems
-  entries. Use **F8 / Shift+F8** to jump between problems. Lexer errors use the
-  compiler's caret; type errors highlight the source line. Instantiation chains
-  appear as related locations in Problems.
+- Without the language server: compiler checks on open/save, error and
+  warning underlines, and Problems entries. Use **F8 / Shift+F8** to jump
+  between problems. A compiler with `goose check --diagnostics json` reports
+  the source range of each error and warning, which is what gets underlined,
+  and instantiation chains appear as related locations in Problems at the
+  calls that made them. With an older compiler the extension reads the text
+  output instead: lexer errors use the compiler's caret, type errors highlight
+  the source line, and instantiation chains link to the calling line.
   While a Goose file is open, a status bar item shows the last check: **Goose**
   with a check mark, **Goose: N errors** (opens Problems), or **Goose: Check
   Failed** when the check failed without a source location (compiler not found,
   timeout, or an unlocated message). A failure also adds a warning in Problems
   on the checked file with no text underlined, and clicking the item opens the
-  Goose output with the full compiler output. **Run** next to it runs the file
-  with the JIT.
+  Goose output with the full compiler output. With the language server the
+  item counts the errors it reports. **Run** next to it runs the file with
+  the JIT.
 - **Goose: Check Program**, **Goose: Run with JIT**, **Goose: Build
   Executable** (`goose build`: an executable beside the source, linked with
   the packages the program uses), **Goose: Generate C**, and
@@ -32,15 +64,21 @@ language server, runtime dependencies, or compiler changes are required.
 - **Ctrl+Shift+B**, **F5**, and **Ctrl+F5** run with JIT while editing Goose
   (**Cmd+Shift+B** for build on macOS). **Goose: Run with JIT** is also available
   in VS Code's Run configuration picker.
-- Top-level declarations in Outline, breadcrumbs and Go to Symbol (**Ctrl+Shift+O**).
-- Clickable imports, with root-relative, importing-file-relative (`import .foo;`),
-  and standard-library resolution matching the compiler.
+- Without the language server, a lexical scan provides top-level
+  declarations in Outline, breadcrumbs and Go to Symbol (**Ctrl+Shift+O**).
+  Imports are also clickable, and are resolved root-relative,
+  importing-file-relative (`import .foo;`), or in the standard library, as
+  the compiler resolves them.
 - Check, Run, Build and Generate C tasks, plus the `$goose` problem matcher for
   custom tasks with absolute paths or paths relative to the workspace folder.
 
-The extension uses lexical analysis and compiler commands. It does not yet
-provide semantic completion, rename, cross-file symbol definitions, formatting,
-debugging, or an LSP.
+The language server also completes names in scope and members after a `.`,
+finds references and calls, renames, shows inlay hints, folds, and formats:
+**Format Document** (Shift+Alt+F) lays the file out as `goose format` does,
+and `"editor.formatOnSave": true` does it on every save. It does not provide
+debugging (`docs/design/language_server.md` has the plan). A
+function body that no instantiation reaches has no types: hover says so, and
+member completion there offers every field and function.
 
 ## Install the prebuilt extension
 
@@ -64,14 +102,17 @@ recommended), then run from the repository root:
 python vscode/build_vsix.py
 ```
 
-The script works from any working directory. It installs the locked npm build
-dependencies, runs the extension tests, and writes `vscode/goose-language.vsix`.
-Use `--skip-install` to reuse existing `node_modules`. The VSIX file is tracked
-in Git. Commit the rebuilt file with extension updates so people can install
-without building locally. The extension version still comes from `package.json`.
+The script works from any working directory. It installs the locked npm
+dependencies, runs the extension tests, bundles the extension and the language
+client library into `dist/extension.js` with esbuild, and writes
+`vscode/goose-language.vsix`. Use `--skip-install` to reuse existing
+`node_modules`. The VSIX file is tracked in Git. Commit the rebuilt file with
+extension updates so people can install without building locally. The
+extension version still comes from `package.json`.
 
 Open this `vscode/` directory in VS Code and press **F5** to launch an Extension
-Development Host with the parent Goose repository open. No build is needed.
+Development Host with the parent Goose repository open; the launch runs the
+bundler first (`npm run bundle`, after an `npm install`).
 Packaging is local; the package is not published to the Marketplace.
 The extension is under the repository's [Apache License 2.0](../LICENSE); the
 build copies that file into this directory, where `vsce` looks for it, so it
@@ -103,7 +144,23 @@ when no folder is open. Settings can be configured per folder in a multi-root
 workspace. `goose.stdlibPath` supplies `--stdlib`; leave it empty to use Goose's
 usual lookup, including `GOOSE_STDLIB` and directories near the executable.
 
-Checks use `goose check` and never run the program or generate C. They check
+The language server is started once per window. It uses the compiler and
+standard library of the first workspace folder (or of the open file, if
+there is no folder), and analyzes every folder's `goose.entryFile` as a
+program. A Goose file that no entry file imports is analyzed on its own, as
+`goose check` would analyze it. The extension asks the compiler whether it
+provides a language server (`goose lsp --probe`) at activation and whenever
+the Goose settings, the folders or the workspace's trust change, and
+otherwise falls back to the checks described below. The server's output is
+in the Goose output channel. The server does not fetch packages: an
+unfetched package is an error at its import, which **Goose: Check Program**
+(with the language server, this runs `goose check` in a terminal) or
+`goose fetch` resolves.
+
+Without the language server, checks use `goose check --diagnostics json` and never run the program or
+generate C. A compiler that rejects the flag is checked with plain `goose check`
+from then on, until it is rebuilt, and its text output is parsed instead; the
+Goose output channel shows the compiler's text either way. Checks run on
 saved files, wait while any open Goose file in the same folder has unsaved
 changes, and keep the last result, marked stale, until the next check completes.
 Changing Goose settings or workspace folders, or closing the files that use an
@@ -189,19 +246,29 @@ button. Program arguments still come from `goose.runArguments`.
 
 ## Verification
 
-`npm test` exercises the actual TextMate/Oniguruma grammar, declaration/import
-scanning, diagnostic parsing (including Windows paths and UTF-8 carets), task
-arguments, and cancellation/stale-result handling. Compiler integration tests
-run when a Goose build exists in the parent repository; set `GOOSE_TEST_COMPILER`
-to test another executable. Missing compilers are reported as skipped tests.
+`npm test` covers the TextMate/Oniguruma grammar, declaration and import
+scanning, and parsing of JSON and text diagnostics, including Windows paths and
+UTF-8 byte columns. It also checks fallback from `--diagnostics json` to text,
+task arguments, cancellation, and handling of stale results. Language-server
+tests cover probing and setup, then use the real protocol to check diagnostics
+after text changes and a hover response.
+
+Compiler integration tests run when a Goose build exists in the parent
+repository. Set `GOOSE_TEST_COMPILER` to test another executable. A missing
+compiler is reported as a skip. So are JSON tests with a compiler that lacks the
+flag, and server tests with one that lacks the verb.
 
 For the editor integration suite, create an empty directory
 `build/goose-extension-fixture` in the parent repository, then select **Test Goose
 Extension** in this directory's Run and Debug menu. This suite writes fixtures
-and settings only in that disposable directory. It exercises activation, real
-compiler diagnostics, related error locations, imports, outline, tasks, and the
-edit/save lifecycle, and real JIT execution through commands, build tasks, and
-Run configurations. Build the compiler with TinyCC first.
+and settings only in that disposable directory. With the language server off,
+it exercises activation, real compiler diagnostics, related error locations,
+imports, outline, tasks, the edit/save lifecycle, and real JIT execution
+through commands, build tasks, and Run configurations. Then, where the
+compiler has a language server, it checks a hover answered by the server and
+the server's code lenses: a generic function's instantiations, and **Run**
+running the file it is in rather than the entry file. Build the compiler with
+TinyCC first.
 
 The implementation uses VS Code's [TextMate grammar support](https://code.visualstudio.com/api/language-extensions/syntax-highlight-guide),
 [task provider API](https://code.visualstudio.com/api/extension-guides/task-provider),

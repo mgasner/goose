@@ -23,8 +23,8 @@ came from, through the C the compiler generated in between. It answers
 and as much of the same as the binary allows for one whose source is not.
 Written against upstream `64d62fc`, with the fork's six translation
 units. The first steps of the plan (§7), `--lines`, `--map`, the Mach-O
-reader, the line tables and the arm64 decoder, are implemented; the rest
-is not.
+reader, the line tables, the arm64 decoder and the HTML export, are
+implemented; the rest is not.
 
 ## 1. Decisions
 
@@ -282,6 +282,11 @@ golden file. Instead:
   load commands, and in `__debug_line`, 300 files each) found no fault,
   and a comparison with lldb no difference; neither is part of the suite,
   the second since lldb is slow to start and not on every machine.
+* **The page** for the sample holds the functions it should (Goose's,
+  not the runtime's), `main`'s instructions as `disasm` prints them, and
+  lines that are lines of the source files it carries. The script itself
+  was checked in headless Chrome, not in the suite: an instruction, a
+  source line, a branch target and the filter each do what they should.
 * **The decoder** decodes the 4,449 encodings of
   `test/inspect/arm64_words.txt`, each of up to three per operand shape
   clang's code had and random ones, against objdump's text; an encoding
@@ -315,7 +320,16 @@ golden file. Instead:
    sites.
 5. **The arm64 decoder**: `disasm`. Done: `tools/inspect/arm64.goose`,
    and `decode` for a list of encodings (§4.3).
-6. **The HTML export.**
+6. **The HTML export.** Done: `inspect html prog out.html [--all]`
+   writes one page with no server behind it (`html.goose`): the
+   functions, each instruction's address, bytes, text and source line, and
+   the source files those lines are in, as JSON in the page, which a script
+   shows as a function list, the disassembly with its source lines, the
+   source file, and the function's bytes. Selecting an instruction marks
+   its line and its bytes; selecting a line marks every instruction it
+   compiled to; a branch target opens its function. The runtime's
+   functions are on the page with `--all`. A page for a 13,000-instruction
+   program with the runtime is 1.2 MB.
 7. **ELF**, then x86-64 through Capstone.
 8. **The viewer** on the `ui` package.
 

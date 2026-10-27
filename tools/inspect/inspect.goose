@@ -11,6 +11,7 @@
 //   ./inspect lines prog main          (the line table over a function)
 //   ./inspect source prog sort.goose:42
 //   ./inspect disasm prog main         (arm64; with the source, where there are lines)
+//   ./inspect html prog prog.html      (all of it as one page; --all for the runtime too)
 //
 // The line information is the DWARF dsymutil collects into prog.dSYM, which
 // a build with debug information (goose build --debug) has beside it.
@@ -20,6 +21,7 @@ import binary;
 import .macho;
 import .dwarf;
 import .arm64;
+import .html;
 
 fn fail(msg: const u8[:]) {
     write_stderr(str("inspect: ", msg, "\n"));
@@ -35,6 +37,7 @@ fn usage() {
                inspect lines <exe> <symbol>
                inspect source <exe> <file:line>
                inspect disasm <exe> <symbol | 0xaddress [bytes]>
+               inspect html <exe> <out.html> [--all]
                inspect decode <file of "address word" lines, in hex>
 
         """);
@@ -513,6 +516,16 @@ fn symbolize(out: u8[>..]&, a: u64) {
     }
 }
 
+// An instruction's text with its mnemonic padded to a column, as objdump
+// has it.
+fn padded(out: u8[>..]&, text: const u8[:]) {
+    let tab = find(text, "\t");
+    if tab < 0 { out.append(text); return; }
+    out.append(text[..tab]);
+    for k in max(1, 8 - tab) { out.push(' '); }
+    out.append(text[tab + 1..]);
+}
+
 fn cmd_disasm(target: const u8[:], count_arg: const u8[:]) {
     if macho::cpu != macho::CPU_ARM64 { fail(str("disassembly is arm64 only; this is ", macho::cpu_name())); }
     var start: u64 = 0;
@@ -574,21 +587,103 @@ fn cmd_disasm(target: const u8[:], count_arg: const u8[:]) {
         let d = arm64::decode(word, a, text);
         total++;
         if d.known { known++; }
-        // The mnemonic padded to a column, as objdump has it.
-        let tab = find(text, "\t");
-        if tab >= 0 {
-            out.append(text[..tab]);
-            for k in max(1, 8 - tab) { out.push(' '); }
-            out.append(text[tab + 1..]);
-        } else {
-            out.append(text);
-        }
+        padded(out, text);
         if d.has_target { out.append(" <"); symbolize(out, d.target); out.append(">"); }
         out.append("\n");
         a += 4;
     }
     if known < total { format(out, "\n", total - known, " of ", total, " instructions not decoded (.word)\n"); }
     write_stdout(out);
+}
+
+// --- the page --------------------------------------------------------------
+
+// What a function is, for the page: a Goose one, the runtime's, or another.
+fn kind(f: Function) -> const u8[:] {
+    let c = c_name(macho::symbols[f.sym]);
+    let g, isgoose = goose_name(c);
+    if isgoose { "goose" } else if starts_with(c, "gs_") { "runtime" } else { "other" }
+}
+
+// One page with every Goose function (and the others but the runtime's,
+// or all with --all): each instruction with its bytes, text, target and
+// line, and the source files those lines are in (html.goose shows them).
+fn cmd_html(exe: const u8[:], path: const u8[:], all: bool) {
+    if macho::cpu != macho::CPU_ARM64 { fail(str("the page is arm64 only; this is ", macho::cpu_name())); }
+    // The page's files, by the line table's: -1 for one not on the page yet.
+    var page_of: i64[>..] = [];
+    for f in dwarf::files { page_of.push(-1); }
+    var page_files: i64[>..] = [];
+    var out: u8[>..] = [];
+    out.append(html::HEAD);
+    out.append("{\"exe\": ");
+    html::json_string(out, basename(exe));
+    format(out, ", \"arch\": \"arm64\", \"lines\": ", if have_lines { "true" } else { "false" }, ",\n\"functions\": [");
+    var first = true;
+    for f in functions {
+        let k = kind(f);
+        guard all || k != "runtime";
+        let c = c_name(macho::symbols[f.sym]);
+        let g, isgoose = goose_name(c);
+        let fileoff, mapped = macho::file_offset(f.start);
+        guard mapped;
+        out.append(if first { "\n{\"name\": " } else { ",\n{\"name\": " });
+        first = false;
+        html::json_string(out, if isgoose { g[..] } else { c });
+        out.append(", \"c\": ");
+        html::json_string(out, c);
+        format(out, ", \"kind\": \"", k, "\", \"start\": ", f.start, ", \"end\": ", f.end,
+               ", \"fileoff\": ", fileoff, ", \"insns\": [");
+        var a = f.start;
+        while a + 4 <= f.end {
+            let off, ok1 = macho::file_offset(a);
+            let word, ok2 = binary::read_u32le(macho::data, off);
+            if !ok1 || !ok2 { break; }
+            var text: u8[>..] = [];
+            let d = arm64::decode(word, a, text);
+            var shown: u8[>..] = [];
+            padded(shown, text);
+            var file = -1;
+            var line = 0;
+            if have_lines {
+                let ri = dwarf::row_at(a);
+                if ri >= 0 && dwarf::rows[ri].file >= 0 {
+                    let df = dwarf::rows[ri].file as i64;
+                    if page_of[df] < 0 { page_of[df] = page_files.len; page_files.push(df); }
+                    file = page_of[df];
+                    line = dwarf::rows[ri].line;
+                }
+            }
+            if a != f.start { out.push(','); }
+            format(out, "[", a - f.start, ",", word, ",");
+            html::json_string(out, shown);
+            format(out, ",", file, ",", line, ",", if d.has_target { d.target } else { 0 }, "]");
+            a += 4;
+        }
+        out.append("]}");
+    }
+    out.append("],\n\"files\": [");
+    for df, i in page_files {
+        let p = dwarf::file_path(dwarf::files[df]);
+        out.append(if i == 0 { "\n{\"name\": " } else { ",\n{\"name\": " });
+        html::json_string(out, basename(p));
+        out.append(", \"path\": ");
+        html::json_string(out, p);
+        out.append(", \"lines\": [");
+        let si = source_index(p);
+        let s = sources[si];
+        for n in s.nlines {
+            if n > 0 { out.push(','); }
+            let start = line_starts[s.lines_at + n];
+            var end = s.text_at + s.text_len;
+            if n + 1 < s.nlines { end = line_starts[s.lines_at + n + 1] - 1; }
+            html::json_string(out, source_text[start..end]);
+        }
+        out.append("]}");
+    }
+    out.append("]}\n");
+    out.append(html::TAIL);
+    if !write_file(path, out) { fail(str("cannot write ", path)); }
 }
 
 // Decodes the arm64 words of a file of `address word` lines (hex), one
@@ -635,6 +730,7 @@ fn main() {
     else if cmd == "at" && a.len >= 4 { cmd_at(a[3]); }
     else if cmd == "lines" && a.len >= 4 { cmd_lines(a[3]); }
     else if cmd == "source" && a.len >= 4 { cmd_source(a[3]); }
+    else if cmd == "html" && a.len >= 4 { cmd_html(a[2], a[3], a.len >= 5 && a[4] == "--all"); }
     else if cmd == "disasm" && a.len >= 4 { cmd_disasm(a[3], if a.len >= 5 { a[4] } else { "" }); }
     else { usage(); }
 }

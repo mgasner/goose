@@ -142,6 +142,30 @@ def check_inspect(exe, cc, base, *, runtime, extra=()):
         raise RuntimeError(f"disasm of __text: exit {code}\n" +
                            "\n".join(l for l in out.splitlines() if ".word" in l)[:2000] + err)
 
+    # The page: its data is what disasm and lines say, with the source in it.
+    page = base / "sorting.html"
+    code, out, err = run([inspect, "html", prog, page])
+    embedded = re.search(r'<script id="data" type="application/json">\n?(.*?)\n?</script>',
+                     page.read_text() if page.exists() else "", re.S)
+    if code or not embedded:
+        raise RuntimeError(f"html: exit {code}\n{out}{err}")
+    page_data = json.loads(embedded[1])
+    fns = {f["c"]: f for f in page_data["functions"]}
+    names = {f["name"] for f in page_data["functions"]}
+    if "main_g" not in fns or any(c in fns for c in ("gs_memcpy", "gs_out_bytes")):
+        raise RuntimeError(f"html: functions {sorted(fns)[:20]}")
+    code, out, err = run([inspect, "disasm", prog, "main_g"])
+    shown = [re.sub(r" <[^>]*>$", "", t) for t in
+             re.findall(r"^  [0-9a-f]{9}  [0-9a-f]{8}  (.*)$", out, re.MULTILINE)]
+    if shown != [i[2] for i in fns["main_g"]["insns"]]:
+        raise RuntimeError("html: main_g's instructions are not disasm's")
+    files = page_data["files"]
+    goose = [f for f in files if f["name"] == "09_sorting.goose"]
+    lined = [i for i in fns["main_g"]["insns"] if i[3] >= 0 and i[4] > 0]
+    if not goose or not goose[0]["lines"] or len(lined) < len(fns["main_g"]["insns"]) // 2 or \
+       any(files[i[3]]["lines"] and i[4] > len(files[i[3]]["lines"]) for i in lined):
+        raise RuntimeError(f"html: lines missing or past their files ({len(lined)} lined)")
+
     foreign = base / "sorting.c"
     for name, content in [("empty", b""), ("short", data[:3]), ("header", data[:100]),
                           ("half", data[:len(data) // 2]), ("c", foreign.read_bytes())]:

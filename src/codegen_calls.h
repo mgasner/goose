@@ -151,8 +151,14 @@ string CodeGen::ExternProto(FnSpec *sp) {
     }
     if (sp->argtypes.empty()) s += "void", params = "void";
     s += ");\n";
+    // A member of an extern? block is unbound where its library was not
+    // there: calling it then is the runtime error gs_dl_unbound raises.
+    auto check = dynamic && sp->sf->dyloptional
+                     ? cat("if (!", DlSlot(sp), ") gs_dl_unbound(", CStr(sp->sf->dylib), ", ",
+                           CStr(sp->sf->cname), "); ")
+                     : string();
     if (dynamic)
-        Append(s, "static GS_DL_CALL ", ret, " ", DlCall(sp), "(", params, ") { ",
+        Append(s, "static GS_DL_CALL ", ret, " ", DlCall(sp), "(", params, ") { ", check,
                sp->rets.empty() ? "" : "return ", DlSlot(sp), "(", args, "); }\n");
     return s;
 }

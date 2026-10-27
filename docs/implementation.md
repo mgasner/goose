@@ -5378,7 +5378,12 @@ After the prototypes come two tables:
 * `gs_dllibs[]`: the libraries that the used members bind from, in the
   order of their first declaration, each with the sidecars' three platform
   names (`DlSpelling`: per platform, the program's name takes precedence
-  over the package's, and 0 means the runtime derives one);
+  over the package's, and 0 means the runtime derives one) and whether it
+  is an `extern?` block's (`SFunction::dyloptional`), which `gs_dl_bind`
+  leaves unbound, with its reason, where it does not load or lacks a
+  symbol; such a member's call shim checks its pointer and calls
+  `gs_dl_unbound` where it is null, and `ResolveTypeNames` refuses a
+  library both kinds of block name;
 * `gs_dlbinds[]`: a row per used member.
 
 `gs_program_init` hands both tables to `gs_dl_bind` right after

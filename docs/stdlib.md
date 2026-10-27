@@ -759,6 +759,8 @@ fn cstr(p: u64, out: u8[>..]&) -> bool       // the C string at p, its NUL left 
 fn cstr(p: u64) -> u8[>..]                   // the same, fresh; empty for null
 fn bytes(p: u64, n: i64, out: u8[>..]&) -> bool   // the n bytes at p; false for null
 fn bytes(p: u64, n: i64) -> u8[>..]
+fn available(lib: const u8[:]) -> bool       // whether an extern? block's library was bound
+fn unavailable(lib: const u8[:], out: u8[>..]&) -> bool   // why not; false where it was
 ```
 
 These functions read memory that a C library owns. A function bound from a
@@ -779,6 +781,13 @@ extern "SDL2" {
 }
 if SDL_Init(0x20) < 0 { abort(str("SDL: ", ffi::cstr(SDL_GetError()))); }
 ```
+
+`available` and `unavailable` are about a library an `extern? "lib" {
+... }` block names (spec §7.10), which the program runs without where it
+is missing: given the block's string, `available` says whether it was
+bound as the program started, and `unavailable` appends the loader's
+reason where it was not. Both say not bound for a library nothing the
+program calls is bound from, since such a library is never opened.
 
 ## binary
 

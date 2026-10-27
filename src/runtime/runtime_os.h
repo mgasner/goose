@@ -559,14 +559,37 @@ static int gs_dl_spelling(const gs_dllib *lib, char *buf) {
     return n > 0 && n < GS_OS_PATH_MAX ? n : 0;
 }
 
+/* What gs_dl_bind made of each library: NULL where it was bound, else why
+   not (an optional library's; a required one's failure ends the program). */
+static const gs_dllib *gs_dl_libs;
+static char **gs_dl_why;
+static int64_t gs_dl_nlibs;
+
+/* A library that could not be bound: an error that ends the program, or
+   for an optional one the reason, kept, with its slots left NULL. */
+static void gs_dl_fail(const gs_dllib *libs, int64_t l, const gs_dlbind *binds, int64_t nbinds,
+                       const char *msg) {
+    if (!libs[l].optional) gs_panic(msg);
+    size_t n = strlen(msg) + 1;
+    gs_dl_why[l] = (char *)malloc(n);
+    if (gs_dl_why[l]) memcpy(gs_dl_why[l], msg, n);
+    for (int64_t b = 0; b < nbinds; b++)
+        if (binds[b].lib == l) *binds[b].slot = NULL;
+}
+
 GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *binds,
                        int64_t nbinds) {
+    gs_dl_libs = libs;
+    gs_dl_nlibs = nlibs;
+    gs_dl_why = (char **)calloc((size_t)(nlibs > 0 ? nlibs : 1), sizeof(char *));
+    if (!gs_dl_why) gs_panic("out of memory binding shared libraries");
     for (int64_t l = 0; l < nlibs; l++) {
         char spelling[GS_OS_PATH_MAX], msg[GS_OS_PATH_MAX + 512];
         if (!gs_dl_spelling(&libs[l], spelling)) {
             snprintf(msg, sizeof msg, "cannot load %s: its path does not fit or is not known",
                      libs[l].name);
-            gs_panic(msg);
+            gs_dl_fail(libs, l, binds, nbinds, msg);
+            continue;
         }
 #ifdef _WIN32
         sl_u8 utf8 = { (uint8_t *)spelling, (int64_t)strlen(spelling) };
@@ -586,7 +609,8 @@ GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *bin
         if (!h) {
             snprintf(msg, sizeof msg, "cannot load %s (%s): Windows error %u", libs[l].name,
                      spelling, (unsigned)GetLastError());
-            gs_panic(msg);
+            gs_dl_fail(libs, l, binds, nbinds, msg);
+            continue;
         }
 #else
         void *h = dlopen(spelling, RTLD_NOW | RTLD_LOCAL);
@@ -594,7 +618,8 @@ GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *bin
             const char *why = dlerror();
             snprintf(msg, sizeof msg, "cannot load %s (%s): %s", libs[l].name, spelling,
                      why ? why : "unknown error");
-            gs_panic(msg);
+            gs_dl_fail(libs, l, binds, nbinds, msg);
+            continue;
         }
 #endif
         for (int64_t b = 0; b < nbinds; b++) {
@@ -607,11 +632,43 @@ GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *bin
             if (!f) {
                 snprintf(msg, sizeof msg, "%s (%s) has no symbol %s", libs[l].name, spelling,
                          binds[b].sym);
-                gs_panic(msg);
+                /* An optional library is all or nothing: none of it is bound. */
+                gs_dl_fail(libs, l, binds, nbinds, msg);
+                break;
             }
             *binds[b].slot = f;
         }
     }
+}
+
+GS_API uint8_t gs_dl_available(const uint8_t *name, int64_t len, char **why) {
+    for (int64_t l = 0; l < gs_dl_nlibs; l++) {
+        if ((int64_t)strlen(gs_dl_libs[l].name) != len || memcmp(gs_dl_libs[l].name, name, (size_t)len))
+            continue;
+        if (!gs_dl_why[l]) return 1;
+        if (why) {
+            size_t n = strlen(gs_dl_why[l]) + 1;
+            *why = (char *)malloc(n);
+            if (*why) memcpy(*why, gs_dl_why[l], n);
+        }
+        return 0;
+    }
+    if (why) {
+        static const char none[] = "the program binds nothing from a library of that name";
+        *why = (char *)malloc(sizeof none);
+        if (*why) memcpy(*why, none, sizeof none);
+    }
+    return 0;
+}
+
+GS_API GS_NORETURN void gs_dl_unbound(const char *lib, const char *sym) {
+    char msg[GS_OS_PATH_MAX + 768];
+    char *why = NULL;
+    gs_dl_available((const uint8_t *)lib, (int64_t)strlen(lib), &why);
+    snprintf(msg, sizeof msg, "%s is called, but %s was not bound: %s", sym, lib,
+             why ? why : "unknown");
+    free(why);
+    gs_panic(msg);
 }
 
 GS_API void gs_os_arg(int64_t i, gs_rref out) {

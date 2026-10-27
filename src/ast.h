@@ -1474,6 +1474,9 @@ struct SFunction {
     bool isextern = false;      // A C function behind a Goose signature (§7.10); no body.
     bool isexport = false;      // A Goose function exposed through a C ABI wrapper.
     string cname;               // Its C symbol (the Goose name unless spelled out).
+    // Its extern block is `extern?` (§7.10): the library may be missing, and
+    // binding it then leaves this unbound rather than failing the start.
+    bool dyloptional = false;
     // The shared library an extern block binds it from by that symbol as
     // the program starts (§7.10); empty for an extern the link resolves.
     string dylib;
@@ -2351,6 +2354,7 @@ inline string_view GlobalLeaf(string_view name) {
 // empty where the entry says nothing and the derived spelling applies.
 struct DylibSpelling {
     string name, any, onwindows, onmacos, onlinux;
+    bool optional = false;      // Bound from `extern?` blocks (codegen's; no sidecar says it).
     const string &On(const char *platform) const {
         return string_view(platform) == "_windows" ? onwindows
              : string_view(platform) == "_macos"   ? onmacos

@@ -149,6 +149,7 @@ struct CodeGen {
     // neither does, which leaves the runtime its derived spelling.
     DylibSpelling DlSpelling(FnSpec *sp) {
         DylibSpelling r { sp->sf->dylib };
+        r.optional = sp->sf->dyloptional;
         auto pkg = ast.filepkg[sp->sf->line.fileidx];
         for (auto p : { pkg, 0 }) {
             for (auto &d : ast.packages[p].dylibs) {
@@ -176,6 +177,9 @@ struct CodeGen {
             auto d = DlSpelling(sp);
             auto it = std::find_if(firsts.begin(), firsts.end(),
                                    [&](auto &f) { return SameDylib(f.second, d); });
+            // One library is optional or not, every block naming it the
+            // same (ResolveTypeNames checks).
+            assert(it == firsts.end() || it->second.optional == d.optional);
             if (it == firsts.end()) firsts.emplace_back(l, d);
             else if (pair(l.fileidx, l.line) < pair(it->first.fileidx, it->first.line))
                 it->first = l;
@@ -1564,7 +1568,8 @@ struct CodeGen {
             externs += "static const gs_dllib gs_dllibs[] = {\n";
             for (auto &lib : dllibs)
                 Append(externs, "    { ", CStr(lib.name), ", ", spelling(lib.onwindows), ", ",
-                       spelling(lib.onmacos), ", ", spelling(lib.onlinux), " },\n");
+                       spelling(lib.onmacos), ", ", spelling(lib.onlinux), ", ",
+                       lib.optional ? 1 : 0, " },\n");
             externs += "};\nstatic const gs_dlbind gs_dlbinds[] = {\n";
             size_t n = 0;
             for (auto sp : usedexterns) {

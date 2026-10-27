@@ -475,14 +475,19 @@ struct Parser {
                 auto depth = lex.DepthBefore();
                 auto startp = lex.attr.data();
                 lex.Next();
+                // `extern? "lib" {`: a block whose library may be missing.
+                auto optional = lex.tok == T_QUESTION;
+                if (optional) lex.Next();
                 if (lex.tok == T_STRLIT) {
                     pre.cname = lex.sval;
                     lex.Next();
                 }
                 if (lex.tok == T_LCURLY) {
-                    ParseExternBlock(pre.cname, depth, startp);
+                    ParseExternBlock(pre.cname, optional, depth, startp);
                     return;
                 }
+                if (optional) Error("extern? opens a block bound from a library that may be missing: "
+                                    "extern? \"lib\" {");
                 ast.topdecls.push_back(ParseFnDecl(false, &pre));
                 return;
             }
@@ -670,6 +675,7 @@ struct Parser {
         string_view doc;    // The documentation above the declaration (Lexer::doc).
         string cname;       // The deprecated `extern "sym" fn`'s symbol, or empty.
         string dylib;       // The block's library; empty outside a block.
+        bool dyloptional = false;   // The block is `extern?`.
     };
 
     // `extern "lib" { ... }` (§7.10): declarations bound from the shared
@@ -678,12 +684,12 @@ struct Parser {
     // the dump prints the block back around the run of them (Ast::Dump).
     // An error in a member loses that member, and the parse goes on at the
     // next member a skip of the rest finds (SkipBody), or past the block.
-    void ParseExternBlock(const string &lib, int depth, const char *startp) {
+    void ParseExternBlock(const string &lib, bool optional, int depth, const char *startp) {
         if (lib.empty()) Error("an extern block names the library it binds from: extern \"lib\" {");
         Expect(T_LCURLY, "extern block");
         auto broken = false;
         while (lex.DepthBefore() > depth && lex.tok != T_RCURLY && lex.tok != T_EOF) {
-            ExternPrefix pre { CurLine(), lex.doc, "", lib };
+            ExternPrefix pre { CurLine(), lex.doc, "", lib, optional };
             auto memberp = lex.attr.data();
             ParseMembers(broken, depth, startp, [&](Ast::DeclMark &kept) {
                 ast.topdecls.push_back(ParseFnDecl(false, &pre));
@@ -713,6 +719,7 @@ struct Parser {
             sf->isextern = true;
             sf->cname = pre->cname;
             sf->dylib = pre->dylib;
+            sf->dyloptional = pre->dyloptional;
             if (inblock && lex.tok == T_STRLIT)
                 Error(cat("a member's symbol follows its signature: fn name(...) = \"", lex.sval,
                           "\"; (§7.10)"));
